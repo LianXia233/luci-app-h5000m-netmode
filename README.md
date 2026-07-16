@@ -30,6 +30,6 @@ GitHub Releases 中的软件包由 GitHub Actions 使用官方 OpenWrt SNAPSHOT
 软件包应安装到 ABI 匹配的近期 SNAPSHOT 固件。
 
 配置文件为 `/etc/config/h5000m_netmode`，后端命令为
-`/usr/sbin/h5000m-netmode`，LuCI 页面位于“网络 → 出口优先级”。
+`/usr/sbin/h5000m-netmode`，LuCI 页面位于“移动网络 → 出口优先级”。
 
 本项目采用 [Apache License 2.0](LICENSE)。
