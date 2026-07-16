@@ -38,7 +38,7 @@ CONFIG_PACKAGE_luci-app-h5000m-netmode=m
 CONFIG_LUCI_LANG_zh_Hans=y
 EOF
 make defconfig
-make package/luci-app-h5000m-netmode/compile -j"$(nproc)" V=s
+make package/h5000m-custom/luci-app-h5000m-netmode/compile -j"$(nproc)" V=s
 
 find bin -type f \( -name 'luci-app-h5000m-netmode-*.apk' -o -name 'luci-app-h5000m-netmode_*.ipk' -o -name 'luci-i18n-h5000m-netmode-zh-cn-*.apk' -o -name 'luci-i18n-h5000m-netmode-zh-cn_*.ipk' \) -exec cp -f {} "${output_dir}/" \;
 test "$(find "${output_dir}" -type f \( -name '*.apk' -o -name '*.ipk' \) | wc -l)" -ge 2
