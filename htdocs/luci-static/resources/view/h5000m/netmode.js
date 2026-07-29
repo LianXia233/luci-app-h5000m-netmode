@@ -10,7 +10,7 @@ return view.extend({
 	handleReset: null,
 
 	statusCommand: function() {
-		return fs.exec('/usr/sbin/h5000m-netmode', [ 'status' ]).catch(function() {
+		return fs.exec('/usr/sbin/h5000m-netmode-status').catch(function() {
 			return { stdout: '' };
 		});
 	},

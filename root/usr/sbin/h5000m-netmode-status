@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/sbin/h5000m-netmode status

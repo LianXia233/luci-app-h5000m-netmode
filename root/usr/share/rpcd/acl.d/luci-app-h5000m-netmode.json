@@ -3,7 +3,7 @@
 		"description": "Grant access to H5000M network priority settings",
 		"read": {
 			"file": {
-				"/usr/sbin/h5000m-netmode": [ "exec" ]
+				"/usr/sbin/h5000m-netmode-status": [ "exec" ]
 			},
 			"uci": [ "h5000m_netmode", "network", "mt5700m" ]
 		},
