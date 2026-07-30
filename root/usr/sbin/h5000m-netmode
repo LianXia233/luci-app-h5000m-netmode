@@ -2,6 +2,7 @@
 
 TAG="h5000m-netmode"
 LOCK_DIR="/var/lock/h5000m-netmode.lock"
+DAED_EXIT_STATE_FILE="/var/run/h5000m-netmode.daed-exit"
 
 mode="$(uci -q get h5000m_netmode.settings.mode || echo wan_first)"
 
@@ -126,6 +127,55 @@ route_owner() {
 	fi
 }
 
+store_daed_exit_state() {
+	local owner="$1" temporary
+
+	temporary="${DAED_EXIT_STATE_FILE}.new.$$"
+	umask 077
+	printf '%s\n' "$owner" > "$temporary" || return 1
+	mv -f "$temporary" "$DAED_EXIT_STATE_FILE"
+}
+
+reload_daed_on_exit_change() {
+	local current previous pid
+
+	read_live_state
+	current="$ACTIVE4"
+	case "$current" in
+		wan|modem) ;;
+		*) return 0 ;;
+	esac
+
+	previous="$(cat "$DAED_EXIT_STATE_FILE" 2>/dev/null || true)"
+	case "$previous" in
+		wan|modem) ;;
+		*)
+			store_daed_exit_state "$current"
+			logger -t "$TAG" "recorded initial daed IPv4 exit=$current"
+			return 0
+			;;
+	esac
+	[ "$previous" != "$current" ] || return 0
+
+	# daed exposes hot reload only through its authenticated GraphQL API. Signals
+	# and the generic OpenWrt reload action do not apply its selected profile, so
+	# use the procd-managed restart path without coupling this service to daed
+	# credentials. If daed is stopped, its next start will detect the live route.
+	pid="$(pgrep -f '^/usr/bin/daed run([[:space:]]|$)' 2>/dev/null | head -n 1)"
+	if [ -z "$pid" ]; then
+		store_daed_exit_state "$current"
+		logger -t "$TAG" "daed IPv4 exit changed ${previous}->${current}; daemon is not running"
+		return 0
+	fi
+	if [ ! -x /etc/init.d/daed ] || ! /etc/init.d/daed restart >/dev/null 2>&1; then
+		logger -t "$TAG" "failed to restart daed after IPv4 exit changed ${previous}->${current}"
+		return 1
+	fi
+	store_daed_exit_state "$current" || return 1
+	logger -t "$TAG" "restarted daed after IPv4 exit changed ${previous}->${current}"
+	return 0
+}
+
 read_live_state() {
 	local modem
 	discover_modem_interfaces
@@ -193,6 +243,7 @@ print_status() {
 	echo "modem6_interface=$MODEM6_PRIMARY"
 	echo "active4=$ACTIVE4"
 	echo "active6=$ACTIVE6"
+	echo "daed_exit_state=$(cat "$DAED_EXIT_STATE_FILE" 2>/dev/null || echo none)"
 	echo "wan_metric=$(uci -q get network.wan.metric || true)"
 	echo "wan6_metric=$(uci -q get network.wan6.metric || true)"
 	echo "usb_metric=$(uci -q get "network.${MODEM_PRIMARY}.metric" || true)"
@@ -401,6 +452,9 @@ if [ "$action" = "reconcile" ]; then
 		logger -t "$TAG" "failed to align IPv6 with the active IPv4 exit"
 		exit 1
 	fi
+	if ! reload_daed_on_exit_change; then
+		exit 1
+	fi
 	exit 0
 fi
 
@@ -427,6 +481,10 @@ if [ "$action" = "apply" ] || [ "$action" = "set" ]; then
 	sleep 1
 	align_ipv6_to_active4 || true
 	logger -t "$TAG" "applied exit policy mode=$mode"
+fi
+
+if ! reload_daed_on_exit_change; then
+	exit 1
 fi
 
 exit 0
