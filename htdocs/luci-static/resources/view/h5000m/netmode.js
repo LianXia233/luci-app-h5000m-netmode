@@ -16,7 +16,35 @@ return view.extend({
 	},
 
 	load: function() {
-		return this.statusCommand();
+		return Promise.all([this.statusCommand(), this.loadDeviceMap()]).then(L.bind(function(results) {
+			return results[0];
+		}, this));
+	},
+
+	loadDeviceMap: function() {
+		return fs.exec('/usr/sbin/h5000m-netmode', ['list-devices']).then(L.bind(function(res) {
+			var devices = [];
+			(res.stdout || '').trim().split(/\n/).forEach(function(name) {
+				name = name.trim();
+				if (name && devices.indexOf(name) < 0)
+					devices.push(name);
+			});
+			this.availableDevices = devices;
+		}, this)).catch(L.bind(function() {
+			this.availableDevices = ['eth0', 'eth1', 'eth2'];
+		}, this)).then(L.bind(function() {
+			return fs.exec('/usr/sbin/h5000m-netmode', ['get-device-map']);
+		}, this)).then(L.bind(function(res) {
+			var map = {};
+			(res.stdout || '').trim().split(/\n/).forEach(function(line) {
+				var pos = line.indexOf('=');
+				if (pos > -1)
+					map[line.substring(0, pos)] = line.substring(pos + 1);
+			});
+			this.deviceMap = map;
+		}, this)).catch(L.bind(function() {
+			this.deviceMap = { wan: 'eth1', modem: 'eth2' };
+		}, this));
 	},
 
 	parseStatus: function(res) {
@@ -48,16 +76,20 @@ return view.extend({
 			'.h5net-name h3{margin:0 0 2px;font-size:16px}.h5net-role{color:var(--text-color-medium,#777);font-size:12px}.h5net-card.selected .h5net-role{color:var(--net-blue);font-weight:600}',
 			'.h5net-state{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--net-red);white-space:nowrap}.h5net-state:before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}.h5net-state.up{color:var(--net-green)}.h5net-state.idle{color:var(--text-color-medium,#888)}',
 			'.h5net-protos{display:flex;flex-wrap:wrap;gap:7px;margin-top:15px}.h5net-proto{padding:5px 8px;border-radius:7px;background:var(--background-color-low,#f5f5f5);font-size:12px;color:var(--text-color-medium,#666)}.h5net-proto.current{background:rgba(49,185,133,.11);color:var(--net-green);font-weight:600}',
+			'.h5net-device-row{display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--border-color-low,#e8e8e8)}',
+			'.h5net-device-row label{font-size:12px;color:var(--text-color-medium,#777);white-space:nowrap}',
+			'.h5net-device-row select{flex:1;padding:6px 8px;border:1px solid var(--border-color-medium,#ccc);border-radius:6px;background:var(--background-color-high,#fff);font-size:13px;color:var(--text-color,#333);cursor:pointer;outline:none;transition:border-color .15s}',
+			'.h5net-device-row select:focus{border-color:var(--net-blue);box-shadow:0 0 0 2px rgba(79,143,247,.08)}',
 			'.h5net-actions{display:flex;justify-content:flex-end;align-items:center;margin-top:14px;padding-top:14px;border-top:1px solid var(--border-color-low,#e8e8e8)}.h5net-actions .cbi-button{min-width:112px}',
 			'@media(max-width:620px){.h5net-head{display:block}.h5net-active{margin-top:11px}.h5net-grid{grid-template-columns:1fr}.h5net-actions .cbi-button{width:100%}}'
 		].join(''));
 	},
 
 	exitLabel: function(exit) {
-		if (exit === 'wan') return _('Wired WAN');
-		if (exit === 'modem') return _('5G modem');
-		if (exit === 'other') return _('Other route');
-		return _('No available exit');
+		if (exit === 'wan') return _('有线 WAN');
+		if (exit === 'modem') return _('5G 模组');
+		if (exit === 'other') return _('其他路由');
+		return _('无可用出口');
 	},
 
 	modeOrder: function(mode) {
@@ -75,15 +107,15 @@ return view.extend({
 	roleLabel: function(mode, kind) {
 		var order = this.modeOrder(mode);
 		var position = order.indexOf(kind);
-		if (position < 0) return _('Not selected');
-		if (order.length === 1) return _('Only exit');
-		return position === 0 ? '1 · ' + _('Preferred exit') : '2 · ' + _('Fallback exit');
+		if (position < 0) return _('未选择');
+		if (order.length === 1) return _('唯一出口');
+		return position === 0 ? '1 · ' + _('首选出口') : '2 · ' + _('备用出口');
 	},
 
 	connectionState: function(present, up) {
-		if (present !== '1') return { label: _('Not configured'), cls: 'idle' };
-		if (up === '1') return { label: _('Connected'), cls: 'up' };
-		return { label: _('Disconnected'), cls: '' };
+		if (present !== '1') return { label: _('未配置'), cls: 'idle' };
+		if (up === '1') return { label: _('已连接'), cls: 'up' };
+		return { label: _('已断开'), cls: '' };
 	},
 
 	selectRoute: function(kind, ev) {
@@ -106,6 +138,44 @@ return view.extend({
 
 	cardKeydown: function(kind, ev) {
 		if (ev.key === 'Enter' || ev.key === ' ') this.selectRoute(kind, ev);
+	},
+
+	onDeviceChange: function(role, ev) {
+		if (ev) ev.stopPropagation();
+		var dev = ev.target.value;
+		if (!dev || this.applying) return;
+
+		// Swap device assignments if needed
+		var otherRole = role === 'wan' ? 'modem' : 'wan';
+		if (this.pendingDeviceMap[otherRole] === dev)
+			this.pendingDeviceMap[otherRole] = this.pendingDeviceMap[role];
+
+		this.pendingDeviceMap[role] = dev;
+		this.repaint();
+	},
+
+	deviceDropdown: function(role) {
+		var self = this;
+		var devices = this.availableDevices || [];
+		var currentDev = (this.pendingDeviceMap || {})[role] || '';
+
+		return E('div', {
+			'class': 'h5net-device-row',
+			'click': function(ev) { ev.stopPropagation(); }
+		}, [
+			E('label', {}, role === 'wan' ? '接口：' : '接口：'),
+			E('select', {
+				'change': L.bind(this.onDeviceChange, this, role),
+				'click': function(ev) { ev.stopPropagation(); },
+				'mousedown': function(ev) { ev.stopPropagation(); },
+				'disabled': this.applying ? 'disabled' : null
+			}, devices.map(function(dev) {
+				return E('option', {
+					'value': dev,
+					'selected': dev === currentDev ? 'selected' : null
+				}, dev);
+			}))
+		]);
 	},
 
 	routeCard: function(kind, data) {
@@ -134,16 +204,17 @@ return view.extend({
 				E('div', { 'class': 'h5net-name' }, [
 					E('div', { 'class': 'h5net-icon' }, modem ? '5G' : 'WAN'),
 					E('div', {}, [
-						E('h3', {}, modem ? _('5G modem') : _('Wired WAN')),
+						E('h3', {}, modem ? _('5G 模组') : _('有线 WAN')),
 						E('div', { 'class': 'h5net-role' }, this.roleLabel(this.pendingMode, kind))
 					])
 				]),
 				E('div', { 'class': 'h5net-state ' + state.cls }, state.label)
 			]),
 			E('div', { 'class': 'h5net-protos' }, [
-				E('span', { 'class': 'h5net-proto' + (active4 ? ' current' : '') }, active4 ? _('IPv4 in use') : (ready4 === '1' ? _('IPv4 ready') : _('IPv4 unavailable'))),
-				E('span', { 'class': 'h5net-proto' + (active6 ? ' current' : '') }, active6 ? _('IPv6 in use') : (ready6 === '1' ? _('IPv6 ready') : _('IPv6 unavailable')))
-			])
+				E('span', { 'class': 'h5net-proto' + (active4 ? ' current' : '') }, active4 ? _('IPv4 使用中') : (ready4 === '1' ? _('IPv4 就绪') : _('IPv4 不可用'))),
+				E('span', { 'class': 'h5net-proto' + (active6 ? ' current' : '') }, active6 ? _('IPv6 使用中') : (ready6 === '1' ? _('IPv6 就绪') : _('IPv6 不可用')))
+			]),
+			this.deviceDropdown(kind)
 		]);
 	},
 
@@ -153,27 +224,67 @@ return view.extend({
 		var fallback = preferred === 'wan' ? 'modem' : 'wan';
 		var active = data.active4 !== 'none' ? data.active4 : data.active6;
 
-		if (active === 'none') return _('No default route is currently available. Check the cable or 5G connection.');
+		if (active === 'none') return _('当前无默认路由可用。请检查网线或 5G 连接。');
 		if (mode === 'wan_only' || mode === 'modem_only')
-			return _('Only %s is enabled by the current policy.').format(this.exitLabel(preferred));
+			return _('当前策略仅启用了 %s。').format(this.exitLabel(preferred));
 		if (active === fallback && data.active6 === 'none')
-			return _('%s is unavailable, so IPv4 has switched to %s. IPv6 remains disabled to avoid splitting traffic across two exits.').format(this.exitLabel(preferred), this.exitLabel(fallback));
+			return _('%s 不可用，IPv4 已切换至 %s。IPv6 保持禁用状态以避免流量分散到两个出口。').format(this.exitLabel(preferred), this.exitLabel(fallback));
 		if (active === fallback)
-			return _('%s is unavailable, so traffic has switched to %s.').format(this.exitLabel(preferred), this.exitLabel(fallback));
+			return _('%s 不可用，流量已切换至 %s。').format(this.exitLabel(preferred), this.exitLabel(fallback));
 		if (active === preferred && data.active6 === 'none')
-			return _('IPv4 is using %s. IPv6 is unavailable on the preferred exit, so fallback IPv6 is disabled to avoid splitting traffic.').format(this.exitLabel(preferred));
+			return _('IPv4 正在使用 %s。首选出口上 IPv6 不可用，备用 IPv6 已禁用以避免流量分裂。').format(this.exitLabel(preferred));
 		if (active === preferred)
-			return _('IPv4 and IPv6 are using the preferred exit. The fallback will take over when needed.');
-		return _('Traffic is currently using another default route.');
+			return _('IPv4 和 IPv6 正在使用首选出口。备用出口将在需要时接替。');
+		return _('当前流量正在使用其他默认路由。');
 	},
 
 	applySelection: function() {
-		if (this.applying || this.pendingMode === this.liveData.mode) return;
+		if (this.applying) return;
+
+		var modeChanged = this.pendingMode !== this.liveData.mode;
+		var deviceChanged = false;
+
+		var curWanDev = this.deviceMap ? (this.deviceMap.wan || '') : '';
+		var curModemDev = this.deviceMap ? (this.deviceMap.modem || '') : '';
+		var newWanDev = (this.pendingDeviceMap || {}).wan || curWanDev;
+		var newModemDev = (this.pendingDeviceMap || {}).modem || curModemDev;
+		if (curWanDev !== newWanDev || curModemDev !== newModemDev)
+			deviceChanged = true;
+
+		if (!modeChanged && !deviceChanged) return;
+
 		this.applying = true;
 		this.repaint();
 
-		return fs.exec('/usr/sbin/h5000m-netmode', [ 'set', this.pendingMode ]).then(L.bind(function() {
-			ui.addNotification(null, E('p', _('Exit selection applied successfully.')));
+		var promises = [];
+
+		if (modeChanged) {
+			promises.push(
+				fs.exec('/usr/sbin/h5000m-netmode', ['set', this.pendingMode]).catch(function(err) {
+					throw new Error('Mode: ' + (err.message || _('未知错误')));
+				})
+			);
+		}
+
+		if (deviceChanged) {
+			if (curWanDev !== newWanDev && newWanDev) {
+				promises.push(
+					fs.exec('/usr/sbin/h5000m-netmode', ['set-device-map', 'wan', newWanDev]).catch(function(err) {
+						throw new Error('WAN: ' + (err.message || _('未知错误')));
+					})
+				);
+			}
+			if (curModemDev !== newModemDev && newModemDev) {
+				promises.push(
+					fs.exec('/usr/sbin/h5000m-netmode', ['set-device-map', 'modem', newModemDev]).catch(function(err) {
+						throw new Error('5G: ' + (err.message || _('未知错误')));
+					})
+				);
+			}
+		}
+
+		return Promise.all(promises).then(L.bind(function() {
+			ui.addNotification(null, E('p', _('设置已应用成功')));
 			this.selecting = false;
 			return new Promise(L.bind(function(resolve) {
 				window.setTimeout(L.bind(function() {
@@ -184,25 +295,31 @@ return view.extend({
 		}, this), L.bind(function(err) {
 			this.applying = false;
 			this.repaint();
-			ui.addNotification(null, E('p', _('Failed to apply exit selection:') + ' ' + (err.message || _('Unknown error'))), 'danger');
+			ui.addNotification(null, E('p', _('设置应用失败：') + ' ' + (err.message || _('未知错误'))), 'danger');
 		}, this));
 	},
 
 	statusPanel: function(data) {
-		var same, active, badgeText, badgeClass, changed;
+		var same, active, badgeText, badgeClass, changed, deviceChanged;
 		data.mode = data.mode || 'wan_first';
 		data.active4 = data.active4 || 'none';
 		data.active6 = data.active6 || 'none';
 		same = data.active4 === data.active6 && data.active4 !== 'none';
 		active = data.active4 !== 'none' ? data.active4 : data.active6;
-		badgeText = same ? _('Current exit: %s').format(this.exitLabel(active)) : _('IPv4: %s · IPv6: %s').format(this.exitLabel(data.active4), this.exitLabel(data.active6));
+		badgeText = same ? _('当前出口：%s').format(this.exitLabel(active)) : _('IPv4：%s · IPv6：%s').format(this.exitLabel(data.active4), this.exitLabel(data.active6));
 		badgeClass = 'h5net-active' + (active === 'none' ? ' fail' : (active === 'other' ? ' warn' : ''));
 		changed = this.pendingMode !== data.mode;
+
+		var curWanDev = this.deviceMap ? (this.deviceMap.wan || '') : '';
+		var curModemDev = this.deviceMap ? (this.deviceMap.modem || '') : '';
+		var newWanDev = (this.pendingDeviceMap || {}).wan || curWanDev;
+		var newModemDev = (this.pendingDeviceMap || {}).modem || curModemDev;
+		deviceChanged = curWanDev !== newWanDev || curModemDev !== newModemDev;
 
 		return E('div', { 'class': 'h5net', id: 'h5net-status' }, [
 			this.styleNode(),
 			E('div', { 'class': 'h5net-head' }, [
-				E('div', {}, [ E('h2', {}, _('Network exits')), E('p', {}, _('Click the connection cards to set the order. The first is preferred and the second is fallback.')) ]),
+				E('div', {}, [ E('h2', {}, _('网络出口')), E('p', {}, _('点击连接卡片设置优先级顺序。第一个为首选出口，第二个为备用出口。')) ]),
 				E('div', { 'class': badgeClass }, badgeText)
 			]),
 			E('div', { 'class': 'h5net-note' }, this.statusMessage(data)),
@@ -210,9 +327,9 @@ return view.extend({
 			E('div', { 'class': 'h5net-actions' }, [
 				E('button', {
 					'class': 'cbi-button cbi-button-apply',
-					'disabled': (!changed || this.applying) ? 'disabled' : null,
+					'disabled': (!changed && !deviceChanged || this.applying) ? 'disabled' : null,
 					'click': L.bind(this.applySelection, this)
-				}, this.applying ? _('Applying…') : _('Apply settings'))
+				}, this.applying ? _('应用中…') : _('应用设置'))
 			])
 		]);
 	},
@@ -224,10 +341,17 @@ return view.extend({
 	},
 
 	refreshStatus: function() {
-		return this.statusCommand().then(L.bind(function(res) {
+		return Promise.all([this.statusCommand(), this.loadDeviceMap()]).then(L.bind(function(results) {
+			var res = results[0];
 			this.liveData = this.parseStatus(res);
 			if (!this.selecting && !this.applying)
 				this.pendingMode = this.liveData.mode || 'wan_first';
+			if (!this.applying) {
+				var dm = this.deviceMap || {};
+				this.pendingDeviceMap = {};
+				this.pendingDeviceMap.wan = dm.wan || '';
+				this.pendingDeviceMap.modem = dm.modem || '';
+			}
 			this.repaint();
 		}, this));
 	},
@@ -238,6 +362,12 @@ return view.extend({
 		this.pendingMode = this.liveData.mode;
 		this.selecting = false;
 		this.applying = false;
+
+		var dm = this.deviceMap || {};
+		this.pendingDeviceMap = {};
+		this.pendingDeviceMap.wan = dm.wan || '';
+		this.pendingDeviceMap.modem = dm.modem || '';
+
 		poll.add(L.bind(this.refreshStatus, this), 5);
 		return this.statusPanel(this.liveData);
 	}

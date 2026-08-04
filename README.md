@@ -19,6 +19,8 @@
 - 只读状态查询与策略写入分权，普通监控账号不能改写出口策略
 - 升级时保留 `/etc/config/h5000m_netmode`
 - UCI 持久化配置和简体中文 LuCI 界面
+- Web 界面手动指定有线 WAN 和 5G 模组的物理接口（下拉选择）
+- 后端 `list-devices` / `get-device-map` / `set-device-map` 子命令
 - 不依赖云服务，不收集或上传网络数据
 
 ## 编译
@@ -37,5 +39,26 @@ GitHub Releases 中的软件包由 GitHub Actions 使用官方 OpenWrt SNAPSHOT
 
 配置文件为 `/etc/config/h5000m_netmode`，后端命令为
 `/usr/sbin/h5000m-netmode`，LuCI 页面位于“移动网络 → 出口优先级”。
+
+## 接口映射
+
+当有线 WAN 口命名非标准（如部分设备将真正的有线口注册为非 `wan`
+section）或 5G 模组接口名不被自动识别时，可通过 LuCI 界面每张出口卡片
+底部的下拉框手动指定物理接口：
+
+- **有线 WAN 卡片**：从可用 eth 设备列表中选择有线出口对应的物理口
+- **5G 模组卡片**：选择 5G 模组对应的物理口
+- 选择后点击「应用设置」保存，后端通过 UCI
+  `h5000m_netmode.settings.{wan_device,modem_device}` 持久化
+- 手动映射会覆盖自动发现结果，未设置时自动退回到原行为
+
+子命令速查：
+
+```sh
+/usr/sbin/h5000m-netmode list-devices      # 列出可用 eth 设备
+/usr/sbin/h5000m-netmode get-device-map    # 查看当前映射
+/usr/sbin/h5000m-netmode set-device-map wan eth1    # 设置有线口
+/usr/sbin/h5000m-netmode set-device-map modem eth2  # 设置 5G 口
+```
 
 本项目采用 [Apache License 2.0](LICENSE)。

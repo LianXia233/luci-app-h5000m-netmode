@@ -34,26 +34,31 @@ append_modem_section() {
 }
 
 discover_modem_interfaces() {
-	local modem section device
+	local section device eth_fallback
 
 	MODEM_SECTIONS=""
 	MODEM_PRIMARY=""
 	MODEM6_PRIMARY=""
-	MODEM_NETDEV=""
 
-	MODEM_NETDEV="$(uci -q get network.MT5700M.device 2>/dev/null || uci -q get network.MT5700M.ifname 2>/dev/null || true)"
+	eth_fallback="$(uci -q get h5000m_netmode.settings.eth_fallback || true)"
 
-	# First find the IPv4 interface attached directly to the MT5700M data device.
 	for section in $(uci -q show network 2>/dev/null | sed -n 's/^network\.\([^.]*\)=interface$/\1/p'); do
 		device="$(uci -q get "network.${section}.device" || uci -q get "network.${section}.ifname" || true)"
-		if { [ -n "$MODEM_NETDEV" ] && [ "$device" = "$MODEM_NETDEV" ]; } || \
-		   { [ -z "$MODEM_NETDEV" ] && { [ "$section" = "MT5700M" ] || [ "$section" = "USB" ]; }; }; then
-			append_modem_section "$section"
-			[ -n "$MODEM_PRIMARY" ] || MODEM_PRIMARY="$section"
-		fi
+
+		case "$section" in
+			wan|wan6|loopback|lan) continue ;;
+		esac
+
+		case " $eth_fallback " in
+			*" $section "*) continue ;;
+		esac
+
+		case "$device" in @wan|@wan6) continue ;; esac
+
+		append_modem_section "$section"
+		[ -n "$MODEM_PRIMARY" ] || MODEM_PRIMARY="$section"
 	done
 
-	# Then include IPv6 aliases such as MT5700Mv6 -> @MT5700M.
 	if [ -n "$MODEM_PRIMARY" ]; then
 		for section in $(uci -q show network 2>/dev/null | sed -n 's/^network\.\([^.]*\)=interface$/\1/p'); do
 			device="$(uci -q get "network.${section}.device" || uci -q get "network.${section}.ifname" || true)"
@@ -63,7 +68,6 @@ discover_modem_interfaces() {
 		done
 	fi
 }
-
 read_interface() {
 	local name="$1" json value
 
@@ -189,19 +193,35 @@ read_live_state() {
 	read_interface "${MODEM6_PRIMARY:-__missing_modem6__}"
 	MODEM6_PRESENT="$IFACE_PRESENT"; MODEM6_UP="$IFACE_UP"; MODEM6_AVAILABLE="$IFACE_AVAILABLE"; MODEM6_DEVICE="$IFACE_DEVICE"
 
-	# The dedicated manager may discover the built-in MT5700M before netifd has
-	# created its network section.
-	# Treat that physical modem as present so a missing SIM or inactive data
-	# session is reported as disconnected, not as an unconfigured device.
+	# Override with manual device mapping from UCI
+	local wan_dev_manual modem_dev_manual
+	wan_dev_manual="$(uci -q get h5000m_netmode.settings.wan_device 2>/dev/null || true)"
+	modem_dev_manual="$(uci -q get h5000m_netmode.settings.modem_device 2>/dev/null || true)"
+	[ -n "$wan_dev_manual" ] && WAN_DEVICE="$wan_dev_manual"
+	[ -n "$modem_dev_manual" ] && MODEM_DEVICE="$modem_dev_manual"
+
+	# If no modem interface was found in UCI, try to detect the physical
+	# 5G modem device through the MT5700M manager or any known USB helper.
+	# This treats the modem as "present" (just disconnected) rather than
+	# "not configured", giving clearer status in the dashboard.
 	if [ "$MODEM_PRESENT" != "1" ]; then
 		if [ -r /usr/share/mt5700m/usb.sh ]; then
 			. /usr/share/mt5700m/usb.sh
 			if mt5700m_usb_info >/dev/null 2>&1; then
-			MODEM_PRESENT=1
-			MODEM_DEVICE="$(mt5700m_netdev || true)"
-			if [ -n "$MODEM_DEVICE" ] && [ -d "/sys/class/net/${MODEM_DEVICE}" ]; then
-				ip -4 addr show dev "$MODEM_DEVICE" 2>/dev/null | grep -q 'inet ' && MODEM_UP=1
+				MODEM_PRESENT=1
+				MODEM_DEVICE="$(mt5700m_netdev || true)"
+				if [ -n "$MODEM_DEVICE" ] && [ -d "/sys/class/net/${MODEM_DEVICE}" ]; then
+					ip -4 addr show dev "$MODEM_DEVICE" 2>/dev/null | grep -q 'inet ' && MODEM_UP=1
+				fi
 			fi
+		elif [ -r /usr/share/qmodem/usb.sh ]; then
+			. /usr/share/qmodem/usb.sh
+			if qmodem_usb_info >/dev/null 2>&1; then
+				MODEM_PRESENT=1
+				MODEM_DEVICE="$(qmodem_netdev || true)"
+				if [ -n "$MODEM_DEVICE" ] && [ -d "/sys/class/net/${MODEM_DEVICE}" ]; then
+					ip -4 addr show dev "$MODEM_DEVICE" 2>/dev/null | grep -q 'inet ' && MODEM_UP=1
+				fi
 			fi
 		fi
 	fi
@@ -244,6 +264,7 @@ print_status() {
 	echo "active4=$ACTIVE4"
 	echo "active6=$ACTIVE6"
 	echo "daed_exit_state=$(cat "$DAED_EXIT_STATE_FILE" 2>/dev/null || echo none)"
+	echo "eth_fallback=$(uci -q get h5000m_netmode.settings.eth_fallback || true)"
 	echo "wan_metric=$(uci -q get network.wan.metric || true)"
 	echo "wan6_metric=$(uci -q get network.wan6.metric || true)"
 	echo "usb_metric=$(uci -q get "network.${MODEM_PRIMARY}.metric" || true)"
@@ -394,8 +415,12 @@ apply_policy() {
 			;;
 	esac
 
+	# Preserve eth_fallback across policy changes.
+	local saved_fallback
+	saved_fallback="$(uci -q get h5000m_netmode.settings.eth_fallback || true)"
 	uci -q set h5000m_netmode.settings='settings' || return 1
 	uci -q set "h5000m_netmode.settings.mode=${mode}" || return 1
+	[ -n "$saved_fallback" ] && uci -q set "h5000m_netmode.settings.eth_fallback=${saved_fallback}" || true
 	uci -q commit h5000m_netmode || return 1
 
 	set_network_option wan metric "$wan_metric" || return 1
@@ -430,6 +455,59 @@ case "$action" in
 		print_status
 		exit 0
 		;;
+	eth-candidates)
+		uci -q show network 2>/dev/null | sed -n 's/^network\.\([^.]*\)=interface$/\1/p' | while IFS= read -r section; do
+			case "$section" in wan|wan6|loopback|lan) continue ;; esac
+			printf '%s\n' "$section"
+		done
+		exit 0
+		;;
+	eth-fallback)
+		case "${2:-}" in
+			set)
+				shift 2
+				uci -q set "h5000m_netmode.settings.eth_fallback=${*}" || exit 1
+				uci -q commit h5000m_netmode || exit 1
+				exit 0
+				;;
+			get)
+				uci -q get h5000m_netmode.settings.eth_fallback || true
+				exit 0
+				;;
+			*)
+				echo "Usage: $0 eth-fallback {set <sections>|get}" >&2
+				exit 64
+				;;
+		esac
+		;;
+	list-devices)
+		ip link show 2>/dev/null | sed -n "s/^[0-9]*: \([eu][ths][b0-9a-zA-Z]*\):.*/\1/p" | sort -V
+		exit 0
+		;;
+	get-device-map)
+		w=$(uci -q get h5000m_netmode.settings.wan_device 2>/dev/null)
+		[ -n "$w" ] || w=$(uci -q get "network.wan.device" 2>/dev/null || uci -q get "network.wan.ifname" 2>/dev/null || echo eth1)
+		m=$(uci -q get h5000m_netmode.settings.modem_device 2>/dev/null)
+		[ -n "$m" ] || m=eth2
+		echo "wan=$w"
+		echo "modem=$m"
+		exit 0
+		;;
+	set-device-map)
+		case "${2:-}" in
+			wan|modem)
+				dev="${3:-}"
+				[ -n "$dev" ] || { echo "Usage: $0 set-device-map {wan|modem} <device>" >&2; exit 64; }
+				uci -q set "h5000m_netmode.settings.${2}_device=${dev}" || exit 1
+				uci -q commit h5000m_netmode || exit 1
+				exit 0
+				;;
+			*)
+				echo "Usage: $0 set-device-map {wan|modem} <device>" >&2
+				exit 64
+				;;
+		esac
+		;;
 	set)
 		case "${2:-}" in
 			wan_first|modem_first|wan_only|modem_only) mode="$2" ;;
@@ -438,7 +516,7 @@ case "$action" in
 		;;
 	reconcile) ;;
 	apply|'') ;;
-	*) echo "Usage: $0 {status|apply|reconcile|set MODE}" >&2; exit 64 ;;
+	*) echo "Usage: $0 {status|apply|reconcile|set MODE|eth-fallback|eth-candidates}" >&2; exit 64 ;;
 esac
 
 if ! acquire_lock; then

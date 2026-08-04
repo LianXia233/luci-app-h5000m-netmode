@@ -197,3 +197,18 @@ msgstr "出口选择已成功应用。"
 
 msgid "Failed to apply exit selection:"
 msgstr "出口选择应用失败："
+
+msgid "ETH fallback interfaces"
+msgstr "ETH 备用接口"
+
+msgid "Select additional wired interfaces that should be treated as WAN instead of 5G modem. This prevents non-modem network sections from being misidentified."
+msgstr "选择应视为 WAN 而非 5G 模块的额外有线接口，避免非模组网段被错误识别。"
+
+msgid "No additional interfaces found."
+msgstr "未发现额外接口。"
+
+msgid "Settings applied successfully."
+msgstr "设置已成功应用。"
+
+msgid "Failed to apply settings:"
+msgstr "设置应用失败："
