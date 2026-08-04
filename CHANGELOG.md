@@ -1,6 +1,17 @@
+---
+AIGC:
+    Label: "1"
+    ContentProducer: 001191440300708461136T1XGW3
+    ProduceID: 9768052f19c9c9070fcb40014c0e726f_340abc088fa011f188ed525400287e28
+    ReservedCode1: 9NsOYpNicN38AL65TaIco84YcU1C8jRB8NoThRdQ1o0p0K6jDkKUZc0mXv0YybCrA9MNsccP+QRewxgTLmjQU+iiODggrsMzbtiq4xpiDWR7j7iGRh06zDZEhWtSVlg+kXl761XNPaIfhZW4sj91inyu8SXqf2tCRWjOr2W1NFfgwDA7j4c1tfVcx4o=
+    ContentPropagator: 001191440300708461136T1XGW3
+    PropagateID: 9768052f19c9c9070fcb40014c0e726f_340abc088fa011f188ed525400287e28
+    ReservedCode2: 9NsOYpNicN38AL65TaIco84YcU1C8jRB8NoThRdQ1o0p0K6jDkKUZc0mXv0YybCrA9MNsccP+QRewxgTLmjQU+iiODggrsMzbtiq4xpiDWR7j7iGRh06zDZEhWtSVlg+kXl761XNPaIfhZW4sj91inyu8SXqf2tCRWjOr2W1NFfgwDA7j4c1tfVcx4o=
+---
+
 # 更新日志
 
-## [未发布] — 2026-08-04
+## v1.4.0 — 2026-08-04
 
 ### 新增
 - Web 界面每张出口卡片底部增加物理接口下拉选择，支持手动指定 WAN 和 5G 模组的 eth 设备
@@ -44,3 +55,4 @@
 - IPv6 出口跟随 IPv4，防止双栈流量分裂
 - daed 自动重载
 - Hotplug 触发 reconcile
+*（内容由AI生成，仅供参考）*
