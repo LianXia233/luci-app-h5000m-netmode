@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. 1.4.0. A tag 'v<version>' will be created. Leave empty to auto-use PKG_VERSION from Makefile."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -14,29 +19,55 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve release version
+        id: ver
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_VERSION}" ]; then
+            VERSION="${INPUT_VERSION}"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            # 手动触发且未指定版本时，自动取 Makefile 中的 PKG_VERSION
+            VERSION="$(sed -n 's/^PKG_VERSION:=//p' Makefile)"
+          fi
+          # 去掉可能多余的前导 v
+          VERSION="${VERSION#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${VERSION} -> tag: v${VERSION}"
+
       - name: Validate release version
-        if: startsWith(github.ref, 'refs/tags/')
+        if: steps.ver.outputs.version != ''
         run: |
           version="$(sed -n 's/^PKG_VERSION:=//p' Makefile)"
-          test "${GITHUB_REF_NAME}" = "v${version}"
+          test "${{ steps.ver.outputs.version }}" = "${version}"
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib gettext git libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file curl zstd
+
       - name: Build with the official OpenWrt SDK
         run: ./scripts/build-release.sh
+
       - uses: actions/upload-artifact@v4
         with:
-          name: luci-app-h5000m-netmode-${{ github.ref_name }}
+          name: luci-app-h5000m-netmode-${{ steps.ver.outputs.tag }}
           path: dist-release/*
           if-no-files-found: error
+
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: steps.ver.outputs.version != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" dist-release/* --clobber
+          TAG="${{ steps.ver.outputs.tag }}"
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist-release/* --clobber
           else
-            gh release create "${GITHUB_REF_NAME}" dist-release/* --title "H5000M Network Priority ${GITHUB_REF_NAME}" --generate-notes
+            gh release create "${TAG}" dist-release/* --title "H5000M Network Priority ${TAG}" --generate-notes
           fi
