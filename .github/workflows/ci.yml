@@ -7,9 +7,16 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on the same ref so rapid pushes / PR updates don't
+# pile up redundant checks or waste runner minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   static-checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install validation tools
