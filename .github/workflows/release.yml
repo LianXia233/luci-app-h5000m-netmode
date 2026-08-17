@@ -14,9 +14,16 @@ on:
 permissions:
   contents: write
 
+# Releases are infrequent and must not be cancelled mid-publish; group them so
+# a concurrent dispatch waits instead of racing.
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
