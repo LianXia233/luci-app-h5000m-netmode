@@ -502,13 +502,16 @@ read_live_state() {
 }
 
 # ---------------------------------------------------------------------------
-# health (diagnostic, opt-in)
+# health (diagnostic, on by default)
 #
 # The probe deliberately targets public anycast resolvers instead of the next
 # hop.  Measured on the H5000M: the cellular uplink passes traffic (0% loss to
 # 223.5.5.5) while its gateway 10.13.35.1 answers 0 of 2 ICMP echoes.  A
 # next-hop probe would therefore report a healthy cellular uplink as dead and
 # provoke a spurious failover, which is why a verdict here never moves traffic.
+#
+# Off switch: h5000m_netmode.settings.health_check=0 (or off/false/no).
+# Cadence:    h5000m_netmode.settings.health_probe_interval, seconds, default 60.
 # ---------------------------------------------------------------------------
 
 health_targets() {
@@ -518,10 +521,14 @@ health_targets() {
 	printf '%s\n' "$targets"
 }
 
+# Opt-out, exactly like the watchdog: the probe is on unless the operator writes
+# 0/off/false/no.  `health_check` used to be opt-in, which meant the diagnostic
+# that detects a "proto up but nothing passes" link was off on every default
+# install - the one situation it exists for.
 health_check_enabled() {
 	case "$(uci_get h5000m_netmode.settings.health_check)" in
-		1|true|yes|on) return 0 ;;
-		*) return 1 ;;
+		0|off|false|no) return 1 ;;
+		*) return 0 ;;
 	esac
 }
 
@@ -542,7 +549,21 @@ probe_reachable() {
 }
 
 refresh_health() {
-	local wan=unknown modem=unknown devices previous
+	local wan=unknown modem=unknown devices now last interval
+
+	now="$(date +%s 2>/dev/null || echo 0)"
+	interval="$(number_or "$(uci_get h5000m_netmode.settings.health_probe_interval)" 60)"
+	last="$(number_or "$(sed -n 's/^ts=//p' "$HEALTH_STATE_FILE" 2>/dev/null | head -n 1)" 0)"
+
+	# The probe is on by default now, which makes its cost a real consideration:
+	# the watchdog reconciles every few seconds, and probing a cellular uplink at
+	# that cadence would spend traffic to re-learn a value that rarely changes.  A
+	# verdict younger than health_probe_interval is reused as it stands, and the
+	# page reads the cached value, so the display stays live without the traffic.
+	if [ "$interval" -gt 0 ] && [ "$last" -gt 0 ] && [ "$now" -gt 0 ] &&
+		[ $(( now - last )) -lt "$interval" ]; then
+		return 0
+	fi
 
 	read_live_state
 
@@ -556,9 +577,8 @@ refresh_health() {
 	fi
 
 	umask 077
-	printf 'wan=%s\nmodem=%s\n' "$wan" "$modem" > "${HEALTH_STATE_FILE}.$$" 2>/dev/null || return 0
+	printf 'wan=%s\nmodem=%s\nts=%s\n' "$wan" "$modem" "$now" > "${HEALTH_STATE_FILE}.$$" 2>/dev/null || return 0
 	mv -f "${HEALTH_STATE_FILE}.$$" "$HEALTH_STATE_FILE" 2>/dev/null || true
-	previous="$(cat "$HEALTH_STATE_FILE" 2>/dev/null || true)"
 	log_note "health check: wan=$wan modem=$modem"
 	return 0
 }
@@ -901,6 +921,47 @@ apply_policy() {
 }
 
 # ---------------------------------------------------------------------------
+# wireless (access-point side)
+# ---------------------------------------------------------------------------
+
+# The Wi-Fi tile reports the access-point side of this router rather than an
+# uplink, and it lives here because a radio that failed to come up is invisible
+# everywhere else in this app: every other field only describes the two uplinks.
+# Everything is read through ubus, so a device without a wireless module - or
+# with both radios disabled - reports zeros instead of breaking the status call
+# that LuCI polls every five seconds.
+read_wireless_state() {
+	local json ups ifaces dev count
+
+	WIFI_TOTAL=0
+	WIFI_UP=0
+	WIFI_SSID=""
+	WIFI_CLIENTS=0
+
+	json="$(ubus call network.wireless status 2>/dev/null || true)"
+	[ -n "$json" ] || return 0
+
+	# One entry per radio.  `up` is the field every radio carries; `band` is not
+	# guaranteed to exist, so it must not be used for counting.
+	ups="$(printf '%s' "$json" | jsonfilter -e '@.*.up' 2>/dev/null || true)"
+	WIFI_TOTAL="$(printf '%s\n' "$ups" | grep -c . || true)"
+	WIFI_UP="$(printf '%s\n' "$ups" | grep -c '^true$' || true)"
+
+	WIFI_SSID="$(printf '%s' "$json" | jsonfilter -e '@.*.interfaces[*].config.ssid' 2>/dev/null | head -n 1 || true)"
+
+	# Associated stations are counted per BSS.  A radio whose driver has no
+	# iwinfo support simply contributes nothing.
+	ifaces="$(printf '%s' "$json" | jsonfilter -e '@.*.interfaces[*].ifname' 2>/dev/null || true)"
+	for dev in $ifaces; do
+		count="$(ubus call iwinfo assoclist "{\"device\":\"$dev\"}" 2>/dev/null \
+			| jsonfilter -e '@.results[*].mac' 2>/dev/null | grep -c . || true)"
+		WIFI_CLIENTS=$(( WIFI_CLIENTS + count ))
+	done
+
+	return 0
+}
+
+# ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
 
@@ -968,6 +1029,7 @@ print_status() {
 
 	echo "daed_exit_state=$(cat "$DAED_EXIT_STATE_FILE" 2>/dev/null || echo none)"
 	echo "watcher=$watcher"
+	echo "watch_interval=$(watch_interval)"
 	if health_check_enabled; then
 		echo "health_check=1"
 	else
@@ -975,6 +1037,12 @@ print_status() {
 	fi
 	echo "wan_health=$(cached_health wan)"
 	echo "modem_health=$(cached_health modem)"
+
+	read_wireless_state
+	echo "wifi_total=$WIFI_TOTAL"
+	echo "wifi_up=$WIFI_UP"
+	echo "wifi_ssid=$WIFI_SSID"
+	echo "wifi_clients=$WIFI_CLIENTS"
 
 	echo "eth_fallback=$(uci_get h5000m_netmode.settings.eth_fallback)"
 	echo "wan_metric=$(uci_get network.wan.metric)"

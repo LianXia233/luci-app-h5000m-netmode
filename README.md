@@ -7,7 +7,7 @@
 
 面向 Hiveton H5000M 的 OpenWrt 出口优先级管理器。通过卡片式 LuCI 界面，一键决定**有线 WAN** 与 **5G 模组**两条链路的启用范围与优先顺序，后端服务自动维护接口状态与默认路由。
 
-- 当前 Release 版本：`v1.5.0`
+- 当前 Release 版本：`v1.6.0`
 - 版本格式：`主版本.次版本.修订版本-r打包修订`（GitHub Release 使用语义化标签，OpenWrt 安装包追加打包修订号）
 
 ---
@@ -39,6 +39,9 @@
 | 出口判定基于 FIB | 用 `ip route get` 询问内核实际出口，尊重策略路由（mwan3 / qmodem / VPN / daed） |
 | 链路状态分级 | 区分已连接 / 协商中 / 网线未接 / 已断开，网卡载波仅作参考信号 |
 | 分流可观测 | IPv4 与 IPv6 走不同出口时显式告警，并提供一键「对齐出口」 |
+| 运行状态总览 | 界面底部 8 个动态图标各自绑定一项真实后端字段，配色与动画随状态变化；子系统未启用或故障时图标转为灰/红并停止动画 |
+| 链路健康探测 | 默认启用（opt-out），探测公共 anycast 地址以识别「接口已 up 却不通」的假连接；结果仅作诊断，不驱动切换 |
+| 无线侧可观测 | 状态总览显示射频在线数、SSID 与关联客户端数，AP 未起来时不再无感 |
 | 代理自动联动 | 默认 IPv4 出口变化时自动重新加载 daed，无需手动重新应用代理设置 |
 | IPv6 出口约束 | 自动跟随 IPv4 出口，避免 IPv4 走 WAN、IPv6 意外走 5G 的双栈流量分裂 |
 | 手动接口映射 | Web 界面下拉框手动指定 WAN / 5G 模组的物理接口，覆盖非标准接口命名场景 |
@@ -58,7 +61,8 @@
 5. 链路状态变化时，Hotplug 脚本（`95-h5000m-netmode`）委托后端对 section 分类并触发重新计算；
 6. procd 看门狗（`/etc/init.d/h5000m-netmode`）按 `watch_interval` 周期复算，覆盖 Hotplug 看不到的漂移；
 7. 默认出口变化时联动重载 daed，保持代理链路一致；
-8. 检测到 IPv4 与 IPv6 出口不一致时自动纠正，并在界面上显式告警。
+8. 检测到 IPv4 与 IPv6 出口不一致时自动纠正，并在界面上显式告警；
+9. 链路健康探测默认启用（`health_check`，显式设为 `0` 关闭），对公共 anycast 地址探测并缓存结论，界面底部的状态总览直接读取这些实测值而非推断值。
 
 根因级分析、判定逻辑与排查手法见 [FIXES.md](FIXES.md)。
 
@@ -118,6 +122,25 @@ opkg remove luci-app-h5000m-netmode
 
 页面顶部的状态徽标显示当前出口；若两个协议族走不同出口，徽标变红并在提示条中列出各自的实际出口。底部显示自动看门狗与链路健康探测的运行状态。
 
+#### 运行状态总览
+
+页面底部有 8 个动态图标，每个都绑定一项真实后端字段——图标是读数，不是装饰：
+
+| 图标 | 数据来源 | 正常表现 |
+| --- | --- | --- |
+| 有线 WAN | `wan_*` 链路状态 + 两个协议族的就绪情况 | 绿色，数据流动画运行 |
+| Wi-Fi | `wifi_up` / `wifi_total` / `wifi_ssid` / `wifi_clients` | 蓝色，信号波动画运行 |
+| 5G 模组 | `modem_*` 链路状态 + 两个协议族的就绪情况 | 绿色，环形动画运行 |
+| 流量转发 | `egress4` / `egress6` / `split` | 橙色，数据包位移动画运行 |
+| 自动切换 | `watcher` / `watch_interval` / `mode` | 紫色，环形进度动画运行 |
+| IPv6 / 上行 | `active6` / `egress6` / `split` | 青色，上传动画运行 |
+| 链路检测 | `health_check` / `wan_health` / `modem_health` | 红色，扫描动画运行 |
+| 智能路由 | `active4` / `daed_exit_state` | 灰色，路径动画运行 |
+
+配色与动画都取自实时状态：降级转琥珀色，故障转红色，未启用或无数据转灰色并**停止动画**——静止即表示该路径当前没有活动，不存在「一直在转但其实什么都没发生」的图标。例如把 `health_check` 设为 `0`，链路检测图标会在下一次轮询内变为灰底、文案变为「未启用」且动画停止。
+
+状态未变化时页面不会重建这些节点，因此 5 秒轮询不会打断动画。
+
 ---
 
 ## 接口映射
@@ -151,7 +174,8 @@ opkg remove luci-app-h5000m-netmode
 | `h5000m_netmode.settings.modem_device` | string | 手动指定的 5G 模组物理接口（可选） |
 | `h5000m_netmode.settings.watcher` | `0` / `1` | 是否启用 procd 看门狗（默认 `1`） |
 | `h5000m_netmode.settings.watch_interval` | 整数（秒） | 看门狗复算周期（默认 `10`） |
-| `h5000m_netmode.settings.health_check` | `0` / `1` | 是否启用链路健康探测（默认 `0`，仅作诊断，不驱动切换） |
+| `h5000m_netmode.settings.health_check` | `0` / `1` | 是否启用链路健康探测（默认 `1`，opt-out：显式设为 `0` / `off` / `false` / `no` 才关闭；仅作诊断，不驱动切换） |
+| `h5000m_netmode.settings.health_probe_interval` | 整数（秒） | 两次健康探测的最小间隔（默认 `60`；设为 `0` 表示不节流，每次复算都探测） |
 | `h5000m_netmode.settings.ipv6_owner` | `wan` / `modem` / `off` / `keep` | IPv6 出口归属，由后端自动维护，通常无需手工设置 |
 
 配置示例：
@@ -163,7 +187,8 @@ config settings 'settings'
 	option modem_device 'eth2'
 	option watcher '1'
 	option watch_interval '10'
-	option health_check '0'
+	option health_check '1'
+	option health_probe_interval '60'
 ```
 
 ---
@@ -227,7 +252,7 @@ uci set h5000m_netmode.settings.watcher=0 && uci commit h5000m_netmode   # 停�
 │   ├── sbin/h5000m-netmode-status # 状态查询
 │   └── share/luci/menu.d/         # LuCI 菜单注册
 ├── tests/
-│   ├── run_tests.sh               # 确定性测试（135 项断言）
+│   ├── run_tests.sh               # 确定性测试（162 项断言，支持按用例名过滤）
 │   └── mockbin/                   # 纯 shell 依赖替身
 ├── scripts/build-release.sh       # 发布构建脚本
 ├── Makefile                       # OpenWrt 构建描述
@@ -243,6 +268,7 @@ uci set h5000m_netmode.settings.watcher=0 && uci commit h5000m_netmode   # 停�
 
 | 版本 | 日期 | 主要更新 |
 | --- | --- | --- |
+| [v1.6.0](CHANGELOG.md) | 2026-09-14 | 新增运行状态总览（8 个动态图标绑定真实状态）；链路健康探测改为默认启用并支持探测节流；新增无线侧运行状态（射频/SSID/客户端数）；修正轮询重绘打断图标动画的问题 |
 | [v1.5.0](CHANGELOG.md) | 2026-09-14 | 出口判定改用 FIB 查询；IPv6 出口收敛为单一写者；新增 procd 看门狗与分级链路状态；修正单击卡片禁用备用链路的误触发；新增确定性测试套件 |
 | [v1.4.0](CHANGELOG.md) | 2026-08-04 | 物理接口手动映射（卡片内嵌下拉框）；新增 `list-devices` / `get-device-map` / `set-device-map` 子命令 |
 | v1.3.1 | 2026-08-02 | ETH fallback 接口选择面板；接口发现逻辑重写；新增 `qmodem` 物理兜底 |
@@ -309,6 +335,15 @@ logread | grep h5000m-netmode | tail -5
 
 **Q：界面显示「协商中」是什么意思？**
 该链路已具备可用配置、正在拨号或等待地址分配（netifd 的 `pending` 状态）。它既不是「已连接」也不是「已断开」——旧版本会把这一阶段误报为「已断开」。
+
+**Q：链路健康探测默认开着，会不会一直发 ICMP？**
+不会一直发。探测结论会缓存，`health_probe_interval`（默认 60 秒）之内的复算直接复用缓存值，只有超过间隔才重新探测；页面读的也是缓存值，所以界面保持实时而链路不会被高频探测占用。不需要可设 `h5000m_netmode.settings.health_check=0` 并提交，下次轮询即生效。
+
+**Q：健康探测显示「异常」会不会自动切链路？**
+不会。探测结果仅用于展示。蜂窝链路常见「网关不回 ICMP 但业务流量正常」，所以它不参与切换判定，也不会触发故障转移。
+
+**Q：运行状态总览里的图标为什么有的不动？**
+静止是结论，不是故障。图标只在对应子系统当前确实有活动时才播放动画；子系统被关闭或无数据时（例如 `health_check=0`、无默认路由）会转为灰底并停止动画。看到静止时先读它旁边的状态文本，那才是原因。
 
 **Q：为什么出口判定不直接读 `ip route show default`？**
 因为那只会列出 main 表。当 mwan3、qmodem、VPN 或 daed 创建了策略路由后，真实出口由 `ip rule` 指向其他路由表，main 表里的默认路由并不是内核实际使用的那条。本应用改用 `ip route get` 向内核查询实际出口。

@@ -1,6 +1,8 @@
 #!/bin/sh
 # Mock of `ubus` for network interface status queries.
 #   $H5_SCEN/ubus/<section>.json  -> `ubus call network.interface.<section> status`
+#   $H5_SCEN/wireless.json        -> `ubus call network.wireless status`
+#   $H5_SCEN/iwinfo/<device>.json -> `ubus call iwinfo assoclist '{"device":...}'`
 scen="${H5_SCEN:?H5_SCEN not set}"
 
 case "${1:-}" in
@@ -9,6 +11,25 @@ case "${1:-}" in
 			network.interface.*)
 				name="${2#network.interface.}"
 				f="$scen/ubus/$name.json"
+				[ -f "$f" ] || exit 1
+				while IFS= read -r line || [ -n "$line" ]; do
+					printf '%s\n' "$line"
+				done < "$f"
+				exit 0
+				;;
+			network.wireless)
+				f="$scen/wireless.json"
+				[ -f "$f" ] || exit 1
+				while IFS= read -r line || [ -n "$line" ]; do
+					printf '%s\n' "$line"
+				done < "$f"
+				exit 0
+				;;
+			iwinfo)
+				[ "${3:-}" = assoclist ] || exit 1
+				dev="$(printf '%s' "${4:-}" | \
+					sed -n 's/.*"device"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+				f="$scen/iwinfo/$dev.json"
 				[ -f "$f" ] || exit 1
 				while IFS= read -r line || [ -n "$line" ]; do
 					printf '%s\n' "$line"

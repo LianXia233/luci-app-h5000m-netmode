@@ -2,6 +2,36 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.6.0] — 2026-09-14
+
+本次发布把界面从「渲染状态」推进到「承载状态」：底部新增运行状态总览，8 个动态图标各自绑定一项真实后端字段；链路健康探测改为默认启用。
+
+### 新增
+
+- 界面新增**运行状态总览**：8 个动态 SVG 图标分别对应有线 WAN、5G 模组、无线 AP、转发出口、自动切换、IPv6 出口、链路检测与选路方式，图标旁的数值、配色与动画均取自 `status` 的实时输出，不做任何本地推断
+- 后端 `status` 新增无线侧运行状态：`wifi_total`、`wifi_up`、`wifi_ssid`、`wifi_clients`（取自 `ubus call network.wireless status` 与 `ubus call iwinfo assoclist`；无无线模块的设备返回 0 且不影响 status 成功）
+- 后端 `status` 新增 `watch_interval`，界面据此显示看门狗的真实周期
+- 新增 UCI 配置项 `health_probe_interval`（默认 `60` 秒），限定两次健康探测的最小间隔；设为 `0` 表示不节流
+- 出口卡片图标改为动态 SVG，并按链路分级状态换色、启停动画
+
+### 变更
+
+- **链路健康探测改为默认启用**（opt-out）：`health_check` 未设置即视为启用，只有显式写入 `0` / `off` / `false` / `no` 才关闭。旧版本写入的默认值 `0` 与「用户主动关闭」无法区分，因此由 `uci-defaults` 一次性迁移为 `1` 并落下迁移标记，迁移后再改回 `0` 不会被重装覆盖
+- `health_check_enabled` 与看门狗 `watcher` 采用同一套 opt-out 语义，两个开关不再一个 opt-in、一个 opt-out
+- 健康探测结论缓存新增时间戳，间隔内的复算复用缓存并直接返回，不再每 `watch_interval` 秒对蜂窝链路发起探测
+- 图标静止成为有效结论：子系统未启用或无数据时转为灰底并停止动画，不再存在「持续转动却什么都没发生」的指示
+
+### 修复
+
+- 修复状态面板每 5 秒整块重建导致 SVG 动画从头重启、图标持续抖动的问题：引入渲染键比较，仅当参与渲染的字段（含未提交的本地编辑状态）发生变化时才重绘
+- 修复设计稿中 Wi-Fi 图标缺少 `<svg>` 外层导致该图形完全不渲染的问题
+
+### 测试
+
+- 断言数由 135 增至 162，新增无线状态解析、健康探测默认语义与探测节流三组用例
+- 测试桩补全 `ubus call network.wireless status` 与 `ubus call iwinfo assoclist`，`jsonfilter` 桩支持通配路径（`@.*.up` 等）
+- `tests/run_tests.sh` 支持按用例名过滤（第二个参数），便于单点复跑
+
 ## [v1.5.0] — 2026-09-14
 
 本次发布修正了出口判定、IPv6 对齐与界面交互中的若干实质缺陷。根因分析与排查手法见 [FIXES.md](FIXES.md)。

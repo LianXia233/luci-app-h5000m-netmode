@@ -29,8 +29,28 @@ while [ $# -gt 0 ]; do
 			shift 2 2>/dev/null || shift
 			field="${expr#@.}"
 			[ "$field" = "$expr" ] && field="$expr"
-			emit_value "$(printf '%s' "$raw" | \
-				sed -n "s/.*\"$field\"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p")"
+			case "$field" in
+				*\**)
+					# A wildcard path (`@.*.up`, `@.*.interfaces[*].config.ssid`).
+					# The real jsonfilter expands it into one line per match, which
+					# is the behaviour the app depends on to count radios.  This
+					# mock matches on the leaf key only - every key the app reads
+					# through a wildcard (up, ssid, ifname, mac) is unique per
+					# object in the fixtures - and prints every match it finds.
+					key="${field##*.}"
+					matches="$(printf '%s' "$raw" | \
+						grep -o "\"$key\"[[:space:]]*:[[:space:]]*[^,}]*" | \
+						sed 's/^[^:]*:[[:space:]]*//')"
+					[ -n "$matches" ] || exit 0
+					printf '%s\n' "$matches" | while IFS= read -r line; do
+						emit_value "$line"
+					done
+					;;
+				*)
+					emit_value "$(printf '%s' "$raw" | \
+						sed -n "s/.*\"$field\"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p")"
+					;;
+			esac
 			;;
 		*)
 			shift

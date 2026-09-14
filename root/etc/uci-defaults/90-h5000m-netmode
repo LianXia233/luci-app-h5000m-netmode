@@ -13,11 +13,18 @@ uci -q get h5000m_netmode.settings.watcher >/dev/null 2>&1 || \
 uci -q get h5000m_netmode.settings.watch_interval >/dev/null 2>&1 || \
 	uci -q set h5000m_netmode.settings.watch_interval='10'
 
-# Health probing is opt-in.  A cellular gateway can drop every ICMP echo while
-# passing traffic normally (measured on the H5000M), so a probe result is
-# diagnostic only and must never be switched on without the operator asking.
-uci -q get h5000m_netmode.settings.health_check >/dev/null 2>&1 || \
-	uci -q set h5000m_netmode.settings.health_check='0'
+# Health probing is on by default (opt-out), because the case it exists for - an
+# uplink whose interface is proto-up while nothing actually passes - is invisible
+# without it.  Installations written by an earlier version carry the old opt-in
+# default of 0, which is indistinguishable from a deliberate 0, so that value is
+# migrated once; the marker makes any later reinstall respect an operator's 0.
+if [ "$(uci -q get h5000m_netmode.settings.health_check)" != "1" ] &&
+	[ "$(uci -q get h5000m_netmode.settings.health_check_migrated)" != "1" ]; then
+	uci -q set h5000m_netmode.settings.health_check='1'
+fi
+uci -q set h5000m_netmode.settings.health_check_migrated='1'
+uci -q get h5000m_netmode.settings.health_probe_interval >/dev/null 2>&1 || \
+	uci -q set h5000m_netmode.settings.health_probe_interval='60'
 
 uci -q commit h5000m_netmode
 

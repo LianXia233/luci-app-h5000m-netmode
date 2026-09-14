@@ -101,8 +101,322 @@ return view.extend({
 			'.h5net-meta{display:flex;flex-wrap:wrap;gap:12px;color:var(--text-color-medium,#777);font-size:12px}',
 			'.h5net-meta b{font-weight:600;color:var(--text-color-medium,#555)}.h5net-meta .off{color:var(--net-amber)}',
 			'.h5net-buttons{display:flex;gap:9px;flex-shrink:0}.h5net-buttons .cbi-button{min-width:104px}',
-			'@media(max-width:620px){.h5net-head{display:block}.h5net-active{margin-top:11px}.h5net-grid{grid-template-columns:1fr}.h5net-foot{display:block}.h5net-buttons{margin-top:12px;flex-direction:column}.h5net-buttons .cbi-button{width:100%}}'
+			// --- animated SVG icons ------------------------------------------------
+			// Reproduced verbatim from the supplied design sheet.  The keyframe names
+			// (pulse / flow / wave / ring / signal / travel / progress / upload /
+			// scan / node) are kept exactly as written: the LuCI theme only defines
+			// aurora-fade-in, divider-in, sidebar-run-* and spin, so there is no
+			// collision.  Only the *class selectors* carry a .h5net scope, because
+			// generic names such as .node / .progress / .scan must not leak into
+			// other LuCI pages.  The SVG markup and its own class attributes are
+			// untouched.
+			'.h5net .h5net-icon svg{width:38px;height:38px;overflow:visible}',
+			'.h5net .pulse{animation:pulse 1.8s ease-in-out infinite}',
+			'.h5net .flow{animation:flow 1.4s linear infinite}',
+			'.h5net .ring{transform-origin:50% 50%;animation:ring 2.4s linear infinite}',
+			'.h5net .signal{transform-origin:18px 18px;animation:signal 1.5s ease-in-out infinite}',
+			'.h5net .dash{animation:flow 1.25s linear infinite}',
+			'.h5net .blink{animation:pulse 1.45s ease-in-out infinite}',
+			'.h5net .wave{transform-origin:32px 38px;animation:wave 1.5s ease-in-out infinite}',
+			'.h5net .wave2{animation-delay:.25s}',
+			'.h5net .orbit{transform-origin:32px 32px;animation:ring 3.5s linear infinite}',
+			'.h5net .travel{animation:travel 1.7s ease-in-out infinite}',
+			'.h5net .progress{transform-origin:32px 32px;animation:progress 2s ease-in-out infinite}',
+			'.h5net .upload{animation:upload 1.35s ease-in-out infinite}',
+			'.h5net .scan{animation:scan 1.7s ease-in-out infinite}',
+			'.h5net .scan2{animation-delay:.18s}.h5net .scan3{animation-delay:.36s}',
+			'.h5net .route{animation:flow 1.1s linear infinite}',
+			'.h5net .node{animation:node 1.4s ease-in-out infinite}',
+			'@keyframes pulse{0%,100%{opacity:1}50%{opacity:.42}}',
+			'@keyframes flow{from{stroke-dashoffset:0}to{stroke-dashoffset:-24}}',
+			'@keyframes wave{0%,100%{opacity:.25;transform:scale(.94)}50%{opacity:1;transform:scale(1)}}',
+			'@keyframes ring{to{transform:rotate(360deg)}}',
+			'@keyframes signal{0%,100%{opacity:.45}50%{opacity:1}}',
+			'@keyframes travel{0%,100%{transform:translateX(0);opacity:.35}50%{transform:translateX(29px);opacity:1}}',
+			'@keyframes progress{0%{stroke-dashoffset:0;transform:rotate(-90deg)}50%{stroke-dashoffset:35;transform:rotate(90deg)}100%{stroke-dashoffset:0;transform:rotate(270deg)}}',
+			'@keyframes upload{0%,100%{transform:translateY(3px);opacity:.45}50%{transform:translateY(-3px);opacity:1}}',
+			'@keyframes scan{0%,100%{transform:translateX(0);opacity:.35}50%{transform:translateX(29px);opacity:1}}',
+			'@keyframes node{0%,100%{opacity:.35}50%{opacity:1}}',
+			// The icon is part of the readout, not decoration: colour and motion are
+			// driven by the same fields the cards use, so an icon that is moving
+			// always means "this path is live right now".  A link that is down or
+			// not configured stops animating entirely - a permanently spinning
+			// indicator would claim activity that is not happening.
+			'.h5net .h5net-icon.tone-pending{background:rgba(231,163,62,.12);color:var(--net-amber)}',
+			'.h5net .h5net-icon.tone-down{background:rgba(228,95,95,.12);color:var(--net-red)}',
+			'.h5net .h5net-icon.tone-off{background:rgba(120,132,148,.14);color:#8b95a3}',
+			'.h5net .h5net-icon.tone-pending svg *{animation-duration:2.6s}',
+			'.h5net .h5net-icon.tone-down svg,.h5net .h5net-icon.tone-down svg *{animation:none!important}',
+			'.h5net .h5net-icon.tone-off svg,.h5net .h5net-icon.tone-off svg *{animation:none!important}',
+			// --- live status tiles -------------------------------------------------
+			// Each tile is one real subsystem.  The base tone is the sheet's colour
+			// for that subsystem; the st-* / is-idle layer overrides it with the
+			// live state, so colour means "state" and the sheet's palette only
+			// survives while that subsystem is healthy.
+			'.h5net-stat{margin-top:25px}',
+			'.h5net-stat-head{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:14px}',
+			'.h5net-stat-head h2{margin:0 0 5px;font-size:20px;letter-spacing:-.3px}',
+			'.h5net-stat-head p{margin:0;color:var(--text-color-medium,#7d8795);font-size:13px}',
+			'.h5net-stat-badge{padding:7px 11px;border-radius:999px;background:var(--background-color-high,#fff);border:1px solid var(--border-color-low,#e8edf3);color:#687281;font-size:12px;font-weight:700;white-space:nowrap}',
+			'.h5net-stat-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}',
+			'.h5net-stat-item{min-width:0;padding:15px 13px 13px;background:rgba(255,255,255,.72);border:1px solid var(--border-color-low,#e8edf3);border-radius:15px;box-shadow:0 5px 18px rgba(33,48,73,.035)}',
+			'.h5net-stat-icon{height:74px;display:grid;place-items:center;border-radius:12px;margin-bottom:11px;transition:color .3s,background .3s}',
+			'.h5net-stat-icon svg{width:54px;height:54px}',
+			'.h5net-stat-icon.tone-green{color:#2bb889;background:#edf9f5}',
+			'.h5net-stat-icon.tone-blue{color:#4d8dff;background:#eef5ff}',
+			'.h5net-stat-icon.tone-mint{color:#30b995;background:#eaf9f4}',
+			'.h5net-stat-icon.tone-orange{color:#ed9b43;background:#fff5e9}',
+			'.h5net-stat-icon.tone-purple{color:#8d79e8;background:#f3f0ff}',
+			'.h5net-stat-icon.tone-cyan{color:#36aeca;background:#edf9fc}',
+			'.h5net-stat-icon.tone-red{color:#e56f7b;background:#fff0f2}',
+			'.h5net-stat-icon.tone-gray{color:#778392;background:#f1f4f7}',
+			'.h5net-stat-icon.st-warn{color:#d08324;background:#fff5e9}',
+			'.h5net-stat-icon.st-bad{color:#d9534f;background:#fff0f2}',
+			'.h5net-stat-icon.st-off{color:#9aa4b1;background:#f2f4f7}',
+			'.h5net-stat-icon.is-idle svg,.h5net-stat-icon.is-idle svg *{animation:none!important}',
+			'.h5net-stat-item>b{display:block;font-size:14px;margin-bottom:6px}',
+			'.h5net-stat-value{display:block;font-size:12.5px;font-weight:600;color:var(--text-color,#39424e);overflow-wrap:anywhere}',
+			'.h5net-stat-hint{display:block;margin-top:4px;color:#929aa5;font-size:11px;overflow-wrap:anywhere}',
+			'@media(max-width:900px){.h5net-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}',
+			'@media(max-width:620px){.h5net-head{display:block}.h5net-active{margin-top:11px}.h5net-grid{grid-template-columns:1fr}.h5net-foot{display:block}.h5net-buttons{margin-top:12px;flex-direction:column}.h5net-buttons .cbi-button{width:100%}.h5net-stat-head{display:block}.h5net-stat-head p{line-height:1.6}.h5net-stat-badge{display:inline-block;margin-top:10px}.h5net-stat-grid{gap:9px}.h5net-stat-item{padding:12px 9px;border-radius:12px}.h5net-stat-icon{height:64px;margin-bottom:9px;border-radius:10px}.h5net-stat-icon svg{width:46px;height:46px}.h5net-stat-item>b{font-size:13px}.h5net-stat-hint{font-size:10px}}'
 		].join(''));
+	},
+
+	// Animated icon for an uplink card, transcribed verbatim from the design sheet
+	// (48x48 viewBox, animation classes flow / wave / pulse / signal).
+	//
+	// The markup is injected through innerHTML rather than built with E(): LuCI's
+	// E() calls document.createElement(), which yields an HTMLUnknownElement for
+	// SVG tag names, so an E()-built <svg> renders nothing.  Going through
+	// innerHTML lets the source markup be copied unchanged.
+	iconSvg: function(kind) {
+		if (kind === 'modem') {
+			return '<svg viewBox="0 0 48 48" aria-hidden="true">'
+				+ '<path d="M10 30a15 15 0 0 1 28 0" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" opacity=".18"/>'
+				+ '<path d="M15 30a10 10 0 0 1 18 0" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" opacity=".38" class="wave"/>'
+				+ '<path d="M20 30a5 5 0 0 1 8 0" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" class="wave"/>'
+				+ '<circle cx="24" cy="31" r="2.8" fill="currentColor" class="pulse"/>'
+				+ '<path d="M13 13h10v6H17v5h6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/>'
+				+ '<path d="M28 24v-5l7-7M35 12v7h-7" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
+				+ '<circle cx="35" cy="12" r="2" fill="currentColor" class="signal"/>'
+				+ '</svg>';
+		}
+
+		return '<svg viewBox="0 0 48 48" aria-hidden="true">'
+			+ '<rect x="8" y="8" width="32" height="22" rx="5" fill="none" stroke="currentColor" stroke-width="2.4"/>'
+			+ '<path d="M15 36h18M19 30v6m10-6v6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>'
+			+ '<path class="flow" d="M14 19h20M14 24h12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="5 4"/>'
+			+ '<circle cx="34" cy="19" r="2.1" fill="currentColor" class="pulse"/>'
+			+ '</svg>';
+	},
+
+	// Maps the graded link state onto the icon tone.  `tone-live` is deliberately
+	// not defined in CSS: a healthy uplink keeps the card's own colour, and only
+	// the degraded states override it.
+	iconTone: function(state) {
+		if (state.cls === 'up') return 'tone-live';
+		if (state.cls === 'pending') return 'tone-pending';
+		if (state.cls === 'idle') return 'tone-off';
+		return 'tone-down';
+	},
+
+	// Live status tiles.  Every animated SVG from the design sheet is bound to one
+	// real subsystem and reports that subsystem's actual value: on this page the
+	// sheet's icons are a readout, not a gallery.  A tile animates only while the
+	// thing it depicts is actually happening, so a moving icon always means
+	// "live", never "decorative".
+	//
+	// Sources, all from the backend status output that the page polls every five
+	// seconds (no value below is invented or hard-coded):
+	//   WAN / 5G      wan_*, modem_* liveness plus per-family route readiness
+	//   Wi-Fi         wifi_total / wifi_up / wifi_ssid / wifi_clients
+	//   forwarding    egress4 / egress6 / split
+	//   failover      watcher / watch_interval / mode
+	//   IPv6          active6 / egress6 / split
+	//   health probe  health_check / wan_health / modem_health
+	//   routing       active4 / daed_exit_state
+	//
+	// One source defect in the sheet was corrected: the Wi-Fi entry ships its
+	// <path> elements without an enclosing <svg>.  Bare SVG shape elements in the
+	// HTML namespace are never rendered, and the sheet's own rule
+	// `.svg-preview svg,.svg-preview>path` shows the wrapper was intended, so the
+	// missing <svg viewBox="0 0 64 64"> was added to match the other seven.
+	statusTiles: function(data) {
+		var wan = this.connectionState(data, 'wan');
+		var modem = this.connectionState(data, 'modem');
+		var e4 = data.egress4 || 'none';
+		var e6 = data.egress6 || 'none';
+		var split = data.split === '1';
+		var watcherOn = data.watcher === 'on';
+		var healthOn = data.health_check === '1';
+		var active4 = data.active4 || 'none';
+		var active6 = data.active6 || 'none';
+		var daed = data.daed_exit_state || 'none';
+		var wifiTotal = Number(data.wifi_total || 0) || 0;
+		var wifiUp = Number(data.wifi_up || 0) || 0;
+		var wifiClients = Number(data.wifi_clients || 0) || 0;
+
+		function ready(v) { return v === '1' ? _('就绪') : _('不可用'); }
+		function probe(v) {
+			if (v === '1') return _('正常');
+			if (v === '0') return _('异常');
+			return _('未探测');
+		}
+		function liveness(state) {
+			if (state.cls === 'up') return 'ok';
+			if (state.cls === 'pending') return 'warn';
+			if (state.cls === 'idle') return 'off';
+			return 'bad';
+		}
+
+		var items = [
+			{
+				tone: 'green',
+				name: _('有线 WAN'),
+				value: (data.wan_device || _('未指定')) + ' · ' + wan.label,
+				hint: _('IPv4 ') + ready(data.wan4_ready) + ' · ' + _('IPv6 ') + ready(data.wan6_ready),
+				state: liveness(wan),
+				live: wan.cls === 'up',
+				svg: '<svg viewBox="0 0 64 64">'
+					+ '<rect x="14" y="11" width="36" height="28" rx="7" fill="none" stroke="currentColor" stroke-width="2.8"/>'
+					+ '<path d="M21 47h22M26 39v8m12-8v8" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"/>'
+					+ '<path class="dash" d="M21 21h22M21 28h15" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="6 5"/>'
+					+ '<circle class="blink" cx="43" cy="21" r="2.7" fill="currentColor"/>'
+					+ '</svg>'
+			},
+			{
+				tone: 'blue',
+				name: 'Wi‑Fi',
+				value: wifiTotal ? _('%s/%s 射频在线').format(wifiUp, wifiTotal) : _('未检测到射频'),
+				hint: data.wifi_ssid
+					? data.wifi_ssid + ' · ' + _('%s 台客户端').format(wifiClients)
+					: _('无线未启用'),
+				state: !wifiTotal ? 'off' : (wifiUp === wifiTotal ? 'ok' : (wifiUp > 0 ? 'warn' : 'bad')),
+				live: wifiUp > 0,
+				svg: '<svg viewBox="0 0 64 64">'
+					+ '<path d="M16 38a18 18 0 0 1 32 0" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" opacity=".18"/>'
+					+ '<path class="wave" d="M22 38a11 11 0 0 1 20 0" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>'
+					+ '<path class="wave wave2" d="M28 38a5 5 0 0 1 8 0" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>'
+					+ '<circle class="blink" cx="32" cy="43" r="3.5" fill="currentColor"/>'
+					+ '</svg>'
+			},
+			{
+				tone: 'mint',
+				name: _('5G 模组'),
+				value: (data.modem_device || _('未指定')) + ' · ' + modem.label,
+				hint: _('IPv4 ') + ready(data.modem4_ready) + ' · ' + _('IPv6 ') + ready(data.modem6_ready),
+				state: liveness(modem),
+				live: modem.cls === 'up',
+				svg: '<svg viewBox="0 0 64 64">'
+					+ '<rect x="13" y="13" width="38" height="38" rx="9" fill="none" stroke="currentColor" stroke-width="2.8"/>'
+					+ '<text x="32" y="39" text-anchor="middle" font-size="19" font-weight="800" fill="currentColor">5G</text>'
+					+ '<circle class="orbit" cx="32" cy="32" r="25" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="3 7" opacity=".45"/>'
+					+ '</svg>'
+			},
+			{
+				tone: 'orange',
+				name: _('流量转发'),
+				value: split ? (e4 + ' / ' + e6) : (e4 + ' → ' + e6),
+				hint: split ? _('IPv4 与 IPv6 出口不一致') : _('IPv4 与 IPv6 同出口'),
+				state: split ? 'bad' : ((e4 !== 'none' || e6 !== 'none') ? 'ok' : 'bad'),
+				live: !split && (e4 !== 'none' || e6 !== 'none'),
+				svg: '<svg viewBox="0 0 64 64">'
+					+ '<path d="M16 32h32M38 23l10 9-10 9" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>'
+					+ '<circle class="travel" cx="18" cy="32" r="4" fill="currentColor"/>'
+					+ '<path d="M12 19h16M36 45h16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" opacity=".35"/>'
+					+ '</svg>'
+			},
+			{
+				tone: 'purple',
+				name: _('自动切换'),
+				value: watcherOn ? _('运行中 · 每 %s 秒').format(data.watch_interval || '10') : _('已停止'),
+				hint: _('策略：') + this.modeLabel(data.mode),
+				state: watcherOn ? 'ok' : 'warn',
+				live: watcherOn,
+				svg: '<svg viewBox="0 0 64 64">'
+					+ '<circle cx="32" cy="32" r="22" fill="none" stroke="currentColor" stroke-width="2.2" opacity=".18"/>'
+					+ '<circle class="progress" cx="32" cy="32" r="17" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-dasharray="70 37"/>'
+					+ '<path d="M25 32h14M32 25v14" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/>'
+					+ '</svg>'
+			},
+			{
+				tone: 'cyan',
+				name: _('IPv6 / 上行'),
+				value: active6 === 'none' ? _('已禁用') : (_('出口 ') + e6),
+				hint: _('策略：IPv6 跟随 IPv4 出口'),
+				state: split ? 'bad' : (active6 === 'none' ? 'off' : 'ok'),
+				live: active6 !== 'none',
+				svg: '<svg viewBox="0 0 64 64">'
+					+ '<path d="M20 44h24a10 10 0 0 0 1-20 14 14 0 0 0-26-3 9 9 0 0 0 1 23Z" fill="none" stroke="currentColor" stroke-width="2.8"/>'
+					+ '<path class="upload" d="M32 39V25m0 0-6 6m6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>'
+					+ '</svg>'
+			},
+			{
+				tone: 'red',
+				name: _('链路检测'),
+				value: healthOn
+					? (_('WAN ') + probe(data.wan_health) + ' · ' + _('模组 ') + probe(data.modem_health))
+					: _('未启用'),
+				hint: healthOn ? _('探测公共 anycast 地址') : _('启用后可提前发现假连接'),
+				state: !healthOn ? 'off' : ((data.wan_health === '0' || data.modem_health === '0') ? 'warn' : 'ok'),
+				live: healthOn,
+				svg: '<svg viewBox="0 0 64 64">'
+					+ '<path d="M16 23h32M16 32h32M16 41h32" stroke="currentColor" stroke-width="3" stroke-linecap="round" opacity=".25"/>'
+					+ '<circle class="scan" cx="17" cy="23" r="4" fill="currentColor"/>'
+					+ '<circle class="scan scan2" cx="17" cy="32" r="4" fill="currentColor"/>'
+					+ '<circle class="scan scan3" cx="17" cy="41" r="4" fill="currentColor"/>'
+					+ '</svg>'
+			},
+			{
+				tone: 'gray',
+				name: _('智能路由'),
+				value: active4 === 'none'
+					? _('无默认路由')
+					: (active4 === 'other' ? _('外部路由接管') : _('本插件自主选路')),
+				hint: (daed !== 'none') ? (_('daed 出口 ') + daed) : _('FIB 查询 · 最低 metric 胜出'),
+				state: active4 === 'none' ? 'bad' : (active4 === 'other' ? 'warn' : 'ok'),
+				live: active4 !== 'none' && active4 !== 'other',
+				svg: '<svg viewBox="0 0 64 64">'
+					+ '<path class="route" d="M13 45C22 45 20 19 32 19s10 26 19 26" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round" stroke-dasharray="5 5"/>'
+					+ '<circle cx="13" cy="45" r="5" fill="currentColor"/>'
+					+ '<circle cx="51" cy="45" r="5" fill="currentColor"/>'
+					+ '<circle class="node" cx="32" cy="19" r="5" fill="currentColor"/>'
+					+ '</svg>'
+			}
+		];
+
+		return E('section', { 'class': 'h5net-stat' }, [
+			E('div', { 'class': 'h5net-stat-head' }, [
+				E('div', {}, [
+					E('h2', {}, _('运行状态总览')),
+					E('p', {}, _('图标、配色与动画都来自设备实时状态：正在动的链路才是此刻真的在通则上。'))
+				]),
+				E('span', { 'class': 'h5net-stat-badge' }, _('随页面每 5 秒刷新'))
+			]),
+			E('div', { 'class': 'h5net-stat-grid' }, items.map(function(item) {
+				// The markup goes in through innerHTML, not E(): E() uses
+				// document.createElement(), which yields an HTMLUnknownElement for
+				// SVG tag names, so an E()-built <svg> renders nothing at all.
+				var icon = E('div', {
+					'class': 'h5net-stat-icon tone-' + item.tone + ' st-' + item.state
+						+ (item.live ? '' : ' is-idle')
+				});
+				icon.innerHTML = item.svg;
+				return E('div', { 'class': 'h5net-stat-item' }, [
+					icon,
+					E('b', {}, item.name),
+					E('span', { 'class': 'h5net-stat-value' }, item.value),
+					E('span', { 'class': 'h5net-stat-hint' }, item.hint)
+				]);
+			}))
+		]);
+	},
+
+	modeLabel: function(mode) {
+		if (mode === 'modem_first') return _('5G 优先');
+		if (mode === 'wan_only') return _('仅有线');
+		if (mode === 'modem_only') return _('仅 5G');
+		return _('有线优先');
 	},
 
 	exitLabel: function(exit) {
@@ -247,6 +561,13 @@ return view.extend({
 		var state = this.connectionState(data, kind);
 		var cls = 'h5net-card ' + (modem ? 'modem' : 'wan') + (selected ? ' selected' : ' unselected') + ((active4 || active6) ? ' active' : '');
 
+		// The animated icon is injected as markup; see iconSvg() for why E() cannot
+		// be used to build SVG elements in LuCI.  The tone class is what turns the
+		// icon from decoration into a readout: an uplink that is down or still
+		// negotiating stops animating instead of always looking busy.
+		var iconBox = E('div', { 'class': 'h5net-icon ' + this.iconTone(state) });
+		iconBox.innerHTML = this.iconSvg(kind);
+
 		return E('div', {
 			'class': cls,
 			'role': 'button',
@@ -257,7 +578,7 @@ return view.extend({
 		}, [
 			E('div', { 'class': 'h5net-cardtop' }, [
 				E('div', { 'class': 'h5net-name' }, [
-					E('div', { 'class': 'h5net-icon' }, modem ? '5G' : 'WAN'),
+					iconBox,
 					E('div', {}, [
 						E('h3', {}, modem ? _('5G 模组') : _('有线 WAN')),
 						E('div', { 'class': 'h5net-role' }, this.roleLabel(this.pendingMode, kind))
@@ -514,14 +835,46 @@ return view.extend({
 			E('div', { 'class': 'h5net-foot' }, [
 				this.metaBar(data),
 				E('div', { 'class': 'h5net-buttons' }, buttons)
-			])
+			]),
+			this.statusTiles(data)
 		]);
+	},
+
+	// The panel is rebuilt on every poll, but the animated icons must not restart
+	// with it: replacing the nodes resets every CSS animation, so a steady device
+	// would show the same icons stuttering in place every five seconds.  This key
+	// covers exactly the fields the panel draws - plus the local editing state, so
+	// an unapplied selection still repaints immediately - which means an unchanged
+	// device is left alone and a real change still appears at once.
+	renderKey: function(data) {
+		return [
+			data.mode, data.split, data.active4, data.active6,
+			data.egress4, data.egress6,
+			data.watcher, data.watch_interval, data.health_check,
+			data.wan_health, data.modem_health, data.daed_exit_state,
+			data.wan_present, data.wan_available, data.wan_pending, data.wan_carrier,
+			data.wan_up, data.wan4_ready, data.wan6_ready, data.wan_device,
+			data.modem_present, data.modem_available, data.modem_pending, data.modem_carrier,
+			data.modem_up, data.modem4_ready, data.modem6_ready, data.modem_device,
+			data.wifi_total, data.wifi_up, data.wifi_ssid, data.wifi_clients,
+			this.pendingMode,
+			(this.pendingDeviceMap || {}).wan,
+			(this.pendingDeviceMap || {}).modem,
+			(this.availableDevices || []).join(','),
+			this.applying ? '1' : '0',
+			this.deviceDirty ? '1' : '0'
+		].join('\u0001');
 	},
 
 	repaint: function() {
 		var old = document.getElementById('h5net-status');
-		if (old && this.liveData)
-			old.parentNode.replaceChild(this.statusPanel(this.liveData), old);
+		if (!old || !this.liveData) return;
+
+		var key = this.renderKey(this.liveData);
+		if (key === this.renderedKey) return;
+
+		this.renderedKey = key;
+		old.parentNode.replaceChild(this.statusPanel(this.liveData), old);
 	},
 
 	refreshStatus: function() {
@@ -551,6 +904,10 @@ return view.extend({
 
 		var dm = this.deviceMap || {};
 		this.pendingDeviceMap = { wan: dm.wan || '', modem: dm.modem || '' };
+
+		// Seed the render key so the first poll does not rebuild (and therefore
+		// restart) the icons that were just mounted.
+		this.renderedKey = this.renderKey(this.liveData);
 
 		poll.add(L.bind(this.refreshStatus, this), 5);
 		return this.statusPanel(this.liveData);

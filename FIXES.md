@@ -1,6 +1,6 @@
 # 故障根因与排查手册
 
-本文件记录 v1.5.0 修正的缺陷的**根因**、判定依据与排查手法。变更摘要见 [CHANGELOG.md](CHANGELOG.md)，使用说明见 [README.md](README.md)。
+本文件记录 v1.5.0 / v1.6.0 修正的缺陷的**根因**、判定依据与排查手法。变更摘要见 [CHANGELOG.md](CHANGELOG.md)，使用说明见 [README.md](README.md)。
 
 写作原则：每条都以源码为准，给出「现象 → 危害 → 修复 → 为什么另一种看起来更简洁的写法是错的 → 可执行验证命令」。最后一项尤其重要：判断出口类问题永远要测**内核实际会从哪里发包**，而不是配置里写了什么。
 
@@ -16,6 +16,7 @@
 - [六、接口通断分级](#六接口通断分级)
 - [七、确定性测试](#七确定性测试)
 - [八、上线自检清单](#八上线自检清单)
+- [九、状态呈现](#九状态呈现)
 
 ---
 
@@ -630,7 +631,11 @@ logread | grep h5000m-netmode | tail -5
 /usr/sbin/h5000m-netmode iface-role 2_1
 /usr/sbin/h5000m-netmode iface-role wan
 
-# 8. 测试套件
+# 8. 状态呈现：页面值必须等于 status 值，图标静止必须等于该子系统无活动
+uci show h5000m_netmode | grep health_check
+cat /var/run/h5000m-netmode.health
+
+# 9. 测试套件
 sh tests/run_tests.sh
 ```
 
@@ -645,4 +650,97 @@ sleep 8
 
 # 还原
 uci set network.wan.metric=10 && uci commit network && /etc/init.d/network reload
+```
+
+---
+
+## 九、状态呈现
+
+这一章的缺陷都不影响转发，只影响**界面说的是不是真话**。它们值得单独成章，是因为一个说假话的仪表盘比没有仪表盘更危险：它把「看起来正常」当成了「确已正常」，让操作者放弃本该做的核对。
+
+### 9.1 轮询重绘打断动画
+
+**现象**：状态总览里的图标每 5 秒抖动一次——动画播到一半从头开始。
+
+**危害**：动画一旦成为周期性闪烁，用户就会主动忽略它。此时「图标在动」不再意味着任何事，这一层信息等于失效。
+
+**根因**：`repaint()` 用 `replaceChild` 整块重建面板。DOM 节点被替换后，附着其上的 CSSAnimation 从 0% 重新开始。轮询周期（5 秒）与动画周期（1.4–3.5 秒）不整除，于是每次重建都切在动画中间。
+
+**修复**：引入渲染键比较。`renderKey(data)` 把参与渲染的全部字段拼成一个字符串，键未变化直接返回，不重建任何节点。
+
+**为什么另一种看起来更简洁的写法是错的**：渲染键只放后端字段会漏掉本地编辑状态。用户点卡片后 `pendingMode` 变了，但后端数据在保存前完全不变，键不变化 → 界面不重绘 → 点击看起来失灵。所以键里必须同时含 `pendingMode`、`pendingDeviceMap`、`applying`、`deviceDirty` 与设备列表。同理，`render()` 首次挂载后要立即用当前值播种键，否则第一次轮询会多重建一次。
+
+**验证**：
+
+```sh
+# 页面打开后静置 20 秒（跨过 4 个轮询周期），图标不应出现周期性抖动
+# 再确认真实变化仍会立即反映：把探测关掉，链路检测图标应在一次轮询内变灰静止
+uci set h5000m_netmode.settings.health_check=0 && uci commit h5000m_netmode
+sleep 8
+uci set h5000m_netmode.settings.health_check=1 && uci commit h5000m_netmode
+```
+
+### 9.2 图标与真实状态脱钩
+
+**现象**：8 个动态图标无论设备处于什么状态都在播放动画，配色也固定不变。
+
+**危害**：这是「装饰性动画」的典型形态——它持续制造「系统在正常工作」的观感，而这份观感与设备实况无关。链路已经断了，图标照样转。
+
+**修复**：图标分两层。基色层保留每个子系统的固有色调（仅在健康时生效），状态层按真实字段覆盖配色，并用 `is-idle` 停止动画：
+
+- 正常 → 保持基色，动画运行
+- 降级（协商中 / 部分射频离线 / 探测异常）→ 琥珀色
+- 故障（已断开 / 出口分流 / 无默认路由）→ 红色
+- 未启用或无数据 → 灰色，**动画停止**
+
+**为什么另一种写法是错的**：只换颜色、不停动画。用户看到红色但图标仍在流动，会判断为「正在恢复中」——而真相是这条路径当前完全没有活动。反过来，`is-idle` 必须是 `animation:none!important`，因为动画声明在 `.h5net .pulse` 这类两条类选择器上，状态类需要更高的权重才能压住它。
+
+**验证**：页面上把某个子系统关掉，观察它是否既变色又停止。
+
+```sh
+uci set h5000m_netmode.settings.health_check=0 && uci commit h5000m_netmode
+# 8 秒后：链路检测图标应为灰底、「未启用」，且无任何 CSSAnimation 在跑
+uci set h5000m_netmode.settings.health_check=1 && uci commit h5000m_netmode
+```
+
+自动化版本见 `tools/verify_tiles.py`：它从设备抓一份 `status`，用与前端相同的规则推导出 8 个图标应有的文案与状态，再逐项与页面比对，并断言「`is-idle` 当且仅当没有动画在跑」。
+
+### 9.3 只放裸 SVG 图形不会渲染
+
+**现象**：8 个图标里 Wi-Fi 那个完全不显示，其余 7 个正常。
+
+**根因**：该图标的 `<path>` / `<circle>` 外面没有 `<svg>` 包裹。这些标签在 HTML 解析器里属于未知元素（`HTMLUnknownElement`），不会被渲染。设计稿自身的 CSS 规则 `.svg-preview svg,.svg-preview>path` 说明原本就该有外层，属于源稿遗漏。
+
+同一个坑在 LuCI 里还有第二个入口：`E()` 内部调用 `document.createElement()`，对 SVG 标签名同样只能得到 `HTMLUnknownElement`。因此 SVG 必须走 `innerHTML` 注入，让 HTML 解析器按 SVG 命名空间构建节点——用 `E('svg', ...)` 拼出来的图形一个都不会显示。
+
+**验证**：注入后检查命名空间，而不是看「好像画出来了」。
+
+```js
+// Playwright / 浏览器控制台
+[...document.querySelectorAll('#h5net-status svg')]
+  .filter(s => s.namespaceURI !== 'http://www.w3.org/2000/svg').length
+// 期望 0
+```
+
+### 9.4 默认关闭的诊断等于不存在
+
+**现象**：`health_check` 出厂值为 `0`，唯一能发现「接口已 up 但实际不通」的功能从未运行过。
+
+**危害**：这类假连接是最难排查的故障——所有 netifd 字段都报正常，`ip route` 也有默认路由，但流量出不去。为它准备的功能默认不开启，等于没有。
+
+**修复**：改为 opt-out，与看门狗 `watcher` 统一语义：未设置即启用，只有显式 `0` / `off` / `false` / `no` 才关闭。
+
+**为什么另一种写法是错的**：在 `uci-defaults` 里直接 `uci set health_check=1`，会连带覆盖「用户主动关闭过」的意图。`0` 这个值本身无法区分「旧版本的默认值」与「用户的决定」，所以必须带一次性迁移标记：首次迁移写入 `health_check_migrated=1`，此后即便重装也不再改动 `health_check`。
+
+默认开启还引出一个必须一并解决的问题：看门狗每 `watch_interval`（默认 10 秒）复算一次，若每轮都探测，就是对蜂窝链路每 10 秒发一次 ICMP 去重新学一个几乎不变的值。因此结论缓存带时间戳，`health_probe_interval`（默认 60 秒）之内复用缓存直接返回；页面读的也是缓存值，界面照旧实时，链路不被高频占用。
+
+**验证**：
+
+```sh
+uci show h5000m_netmode | grep health          # health_check=1 且带 migrated 标记
+uci -q delete h5000m_netmode.settings.health_check
+/usr/sbin/h5000m-netmode status | grep health_check    # 期望 1（未设置即启用）
+uci set h5000m_netmode.settings.health_check=0
+/usr/sbin/h5000m-netmode status | grep health_check    # 期望 0（显式关闭）
+cat /var/run/h5000m-netmode.health                     # wan/modem/ts 三项，ts 用于节流
 ```

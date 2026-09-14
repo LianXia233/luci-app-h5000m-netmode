@@ -82,7 +82,7 @@ check_absent() { # <label> <needle> <file>
 new_scenario() {
 	[ -n "$SC" ] && rm -rf "$SC"
 	SC="$(mktemp -d)"
-	mkdir -p "$SC/uci" "$SC/ubus" "$SC/routes" "$SC/sysfs"
+	mkdir -p "$SC/uci" "$SC/ubus" "$SC/iwinfo" "$SC/routes" "$SC/sysfs"
 }
 
 uci_set() {
@@ -122,6 +122,32 @@ ubus_set() { # <section> <key=rawjson> ...
 
 ubus_del() {
 	rm -f "$SC/ubus/$1.json"
+}
+
+# `ubus call network.wireless status` fixture.  Deliberately shaped like the real
+# reply - one object per radio, interfaces nested one level below - so the
+# wildcard paths the backend reads (`@.*.up`, `@.*.interfaces[*].config.ssid`,
+# `@.*.interfaces[*].ifname`) are exercised against the same depth the router
+# returns rather than against a flattened convenience object.
+wifi_set() { # <radio0-up> <radio1-up> <ssid>
+	printf '{"radio0":{"up":%s,"config":{"band":"2g"},"interfaces":[{"section":"default_radio0","ifname":"phy0-ap0","config":{"mode":"ap","ssid":"%s"}}]},' \
+		"$1" "$3" > "$SC/wireless.json"
+	printf '"radio1":{"up":%s,"config":{"band":"5g"},"interfaces":[{"section":"default_radio1","ifname":"phy1-ap0","config":{"mode":"ap","ssid":"%s"}}]}}' \
+		"$2" "$3" >> "$SC/wireless.json"
+}
+
+wifi_del() {
+	rm -f "$SC/wireless.json"
+}
+
+wifi_assoc() { # <ifname> <mac> [<mac> ...]
+	local dev="$1"
+	shift
+	local body="" mac
+	for mac in "$@"; do
+		body="$body${body:+,}{\"mac\":\"$mac\",\"signal\":-55}"
+	done
+	printf '{"results":[%s]}' "$body" > "$SC/iwinfo/$dev.json"
 }
 
 set_route() { # <slot> <content|''>
@@ -250,6 +276,10 @@ base_scenario() {
 	uci_set h5000m_netmode.settings settings
 	uci_set h5000m_netmode.settings.mode wan_first
 	uci_set h5000m_netmode.settings.ipv6_owner wan
+	# Health probing is opt-out, so every other case pins it off: their behaviour
+	# must not depend on a probe verdict, and the default itself is covered by
+	# test_health_probe_defaults_on.
+	uci_set h5000m_netmode.settings.health_check 0
 
 	netdev eth0 0
 	netdev eth1 1
@@ -464,12 +494,96 @@ $MODEM_ROUTE" \
 		modem_present modem_available modem_pending modem_carrier modem_up modem6_up \
 		modem4_ready modem6_ready modem_device modem_devices modem_device_source \
 		modem_interface modem6_interface egress4 egress6 active4 active6 split \
-		default4 default6 daed_exit_state watcher health_check wan_health modem_health \
+		default4 default6 daed_exit_state watcher watch_interval health_check \
+		wan_health modem_health \
+		wifi_total wifi_up wifi_ssid wifi_clients \
 		eth_fallback wan_metric wan6_metric usb_metric usbv6_metric wan_defaultroute \
 		wan6_defaultroute wan6_auto usb_defaultroute usbv6_defaultroute usbv6_auto \
 		modem_metric; do
 		check_eq "status key $key" '1' "$(grep -c "^$key=" "$SC/out.txt")"
 	done
+}
+
+# The Wi-Fi tile is the only place a radio that failed to come up is visible, so
+# the status call has to carry the real count.  Two radios, one up, two stations:
+# anything that collapses the wildcard path to a single value reports 1/1 and
+# hides the dead radio.
+test_wireless_state_is_reported() {
+	base_scenario
+	routes "$WAN_ROUTE" '' '1.1.1.1 via 192.168.88.1 dev eth1 src 192.168.88.187 uid 0' ''
+
+	wifi_set true false OWRT
+	wifi_assoc phy0-ap0 'aa:bb:cc:dd:ee:01' 'aa:bb:cc:dd:ee:02'
+	wifi_assoc phy1-ap0
+
+	run status
+	check_eq 'wireless rc' '0' "$rc"
+	check_eq 'wireless radios total' '2' "$(sv wifi_total)"
+	check_eq 'wireless radios up' '1' "$(sv wifi_up)"
+	check_eq 'wireless ssid' 'OWRT' "$(sv wifi_ssid)"
+	check_eq 'wireless clients' '2' "$(sv wifi_clients)"
+
+	# Both radios up, three stations across two BSS: the count must be the sum.
+	wifi_set true true OWRT
+	wifi_assoc phy0-ap0 'aa:bb:cc:dd:ee:01' 'aa:bb:cc:dd:ee:02'
+	wifi_assoc phy1-ap0 'aa:bb:cc:dd:ee:03'
+
+	run status
+	check_eq 'wireless all radios up' '2' "$(sv wifi_up)"
+	check_eq 'wireless clients summed' '3' "$(sv wifi_clients)"
+
+	# No wireless module at all: status must still succeed and report zeros.
+	wifi_del
+	run status
+	check_eq 'wireless absent rc' '0' "$rc"
+	check_eq 'wireless absent total' '0' "$(sv wifi_total)"
+	check_eq 'wireless absent up' '0' "$(sv wifi_up)"
+	check_eq 'wireless absent clients' '0' "$(sv wifi_clients)"
+}
+
+# Health probing is opt-out: the diagnostic exists for the case where an uplink is
+# proto-up but nothing passes, which is exactly the case a default install would
+# otherwise never notice.  Three behaviours have to hold - absent means on, an
+# explicit off value means off, and the cached verdict is not re-probed on every
+# reconcile (the watchdog runs every few seconds and must not spend traffic on it).
+test_health_probe_defaults_on() {
+	base_scenario
+	uci_del h5000m_netmode.settings.health_check
+	routes "$WAN_ROUTE
+$MODEM_ROUTE" '' '1.1.1.1 via 192.168.88.1 dev eth1 src 192.168.88.187 uid 0' ''
+
+	run status
+	check_eq 'health absent means on' '1' "$(sv health_check)"
+
+	for value in 0 off false no; do
+		uci_set h5000m_netmode.settings.health_check "$value"
+		run status
+		check_eq "health off via $value" '0' "$(sv health_check)"
+	done
+
+	# Back to the default, and let a reconcile produce a verdict.
+	uci_del h5000m_netmode.settings.health_check
+	run reconcile
+	check_eq 'health caches wan verdict' '1' "$(sed -n 's/^wan=//p' "$SC/health" | head -n 1)"
+	check_eq 'health caches modem verdict' '1' "$(sed -n 's/^modem=//p' "$SC/health" | head -n 1)"
+	check_eq 'health records a timestamp' '1' "$(grep -c '^ts=' "$SC/health")"
+
+	# A verdict younger than health_probe_interval must be reused even though a
+	# fresh probe would contradict it (the ping mock always succeeds).
+	printf 'wan=0\nmodem=0\nts=%s\n' "$(date +%s)" > "$SC/health"
+	run reconcile
+	check_eq 'health throttles a fresh verdict' '0' "$(sed -n 's/^wan=//p' "$SC/health" | head -n 1)"
+
+	# interval=0 disables the throttle and the verdict is refreshed again.
+	uci_set h5000m_netmode.settings.health_probe_interval 0
+	run reconcile
+	check_eq 'health interval 0 refreshes' '1' "$(sed -n 's/^wan=//p' "$SC/health" | head -n 1)"
+
+	# A stale verdict is refreshed without touching the interval.
+	printf 'wan=0\nmodem=0\nts=1\n' > "$SC/health"
+	uci_del h5000m_netmode.settings.health_probe_interval
+	run reconcile
+	check_eq 'health refreshes a stale verdict' '1' "$(sed -n 's/^wan=//p' "$SC/health" | head -n 1)"
 }
 
 # hotplug delegates classification to the backend so a modem section without the
@@ -609,6 +723,8 @@ test_no_ipv4_default_keeps_ipv6_untouched
 test_missing_modem_ipv6_disables_ipv6
 test_stable_state_produces_no_churn
 test_status_is_read_only_and_complete
+test_wireless_state_is_reported
+test_health_probe_defaults_on
 test_iface_role_classification
 test_eth_fallback_sections_are_not_modem
 test_manual_mapping_is_serialised
@@ -618,7 +734,14 @@ test_reconcile_lock_behaviour
 "
 
 	printf 'backend: %s\n\n' "$script"
+only="${2:-}"
 for case_name in $test_names; do
+	if [ -n "$only" ]; then
+		case "$case_name" in
+			*"$only"*) ;;
+			*) continue ;;
+		esac
+	fi
 	before=$failures
 	"$case_name"
 	if [ "$failures" = "$before" ]; then
