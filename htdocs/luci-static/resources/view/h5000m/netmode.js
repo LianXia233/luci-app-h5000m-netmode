@@ -75,8 +75,22 @@ return view.extend({
 	styleNode: function() {
 		return E('style', {}, [
 			'.h5net{--net-blue:#4f8ff7;--net-green:#31b985;--net-amber:#e7a33e;--net-red:#e45f5f}',
-			'.h5net-head{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:2px 2px 14px;margin-bottom:14px;border-bottom:1px solid var(--border-color-low,#e8e8e8)}',
-			'.h5net-head h2{margin:0 0 4px;font-size:22px;line-height:1.3}.h5net-head p{margin:0;color:var(--text-color-medium,#666);font-size:13px}',
+			// --- the lead card -----------------------------------------------------
+			// The page heading and the live exit readout are one card.  An earlier
+			// revision kept them as two siblings with a rule between them, which left
+			// the heading as bare text while the value beside it was a card.  Both
+			// halves now carry the same .svgbox / .ec-topline / .ec-title / .ec-live /
+			// .ec-meta vocabulary, so one set of rules styles both of them.
+			//
+			// The halves report different verdicts on purpose: the heading half says
+			// whether the configured plan is still intact, the readout half says
+			// which uplink is live.  Two pills both reading "online" inside one card
+			// would be noise, and the plan verdict is the thing a dual-exit policy
+			// can lose silently.
+			'.h5net .h5net-ecard.hero{flex-wrap:nowrap;align-items:stretch;gap:0;margin:0 0 14px;padding:12px 18px 12px 13px}',
+			'.h5net .h5net-ecard.hero .hero-slot{display:flex;align-items:center;gap:13px;flex:1 1 0;min-width:0}',
+			'.h5net .h5net-ecard.hero .hero-div{flex:none;align-self:stretch;width:1px;margin:5px 16px;background:linear-gradient(180deg,transparent,rgba(139,149,161,.34),transparent)}',
+			'.h5net .h5net-ecard .ec-hint{margin-top:6px;color:#929aa5;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
 			// --- live egress card --------------------------------------------------
 			// The design sheet's `.status` card, carrying the uplink that is actually
 			// holding the default route.  Only one is rendered: the sheet's demo shows
@@ -103,6 +117,16 @@ return view.extend({
 			'.h5net .h5net-ecard .ec-topline{display:flex;align-items:center;gap:8px;min-width:0}',
 			'.h5net .h5net-ecard .ec-title{margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:15px;font-weight:760;letter-spacing:.05px}',
 			'.h5net .h5net-ecard .ec-live{display:inline-flex;align-items:center;gap:5px;flex:none;color:var(--accent);font-size:11px;font-weight:700;white-space:nowrap}',
+			// Each half of the lead card states its own verdict, so the pill colour
+			// cannot come from the card's accent alone: an intact plan can sit next to
+			// a degraded link, and a pill has to keep meaning what it says.  The four
+			// classes below reproduce exactly what the accent used to imply
+			// (tone-live / tone-pending / tone-down / tone-off), so the readout half
+			// renders as it did before.
+			'.h5net .h5net-ecard .ec-live.is-up{color:var(--net-green)}',
+			'.h5net .h5net-ecard .ec-live.is-pending{color:var(--net-amber)}',
+			'.h5net .h5net-ecard .ec-live.is-down{color:var(--net-red)}',
+			'.h5net .h5net-ecard .ec-live.is-off{color:#8b95a3}',
 			'.h5net .h5net-ecard .ec-dot{width:6px;height:6px;border-radius:50%;background:currentColor;box-shadow:0 0 0 3px rgba(0,0,0,.05);animation:breath 1.8s ease-in-out infinite}',
 			'.h5net .h5net-ecard .ec-meta{display:flex;align-items:center;gap:7px;margin-top:6px;min-width:0;color:#8b95a1;font-size:11px}',
 			'.h5net .h5net-ecard .ec-badge{padding:4px 7px;border-radius:7px;background:var(--soft);color:var(--accent);font-weight:700;white-space:nowrap}',
@@ -128,6 +152,29 @@ return view.extend({
 			'.h5net .h5net-ecard .cell-signal{stroke-dasharray:3 5;animation:dash 1.15s linear infinite}',
 			'.h5net .h5net-ecard .cell-packet{animation:packet 1.7s ease-in-out infinite}',
 			'.h5net .h5net-ecard .cell-packet.p2{animation-delay:.85s}',
+			// The egress glyph in the lead card's heading half: the router and the two
+			// uplinks it can leave through.  Which branch animates is decided by the
+			// card's eg-via-* state class, so that half states which way the traffic
+			// is leaving instead of only naming the page.  A branch that is not
+			// carrying keeps a still, faint line.  Each state rule is written on its
+			// own so that every class in the markup is matched by the rule that
+			// animates it, which is what the audit script reads.
+			//
+			// eg-via-none deliberately has no rule: no carrying branch is already the
+			// default rendering, which is "neither line is moving".
+			'.h5net .h5net-ecard .eg-dev{fill:none;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round}',
+			'.h5net .h5net-ecard .eg-port{fill:none;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round}',
+			'.h5net .h5net-ecard .eg-link{fill:none;stroke:currentColor;stroke-linecap:round;opacity:.3}',
+			'.h5net .h5net-ecard .eg-flow{fill:none;stroke:currentColor;stroke-linecap:round;stroke-width:2.4;stroke-dasharray:4 4;opacity:0}',
+			'.h5net .h5net-ecard .eg-bar{fill:currentColor;opacity:.3}',
+			'.h5net .h5net-ecard .eg-led{animation:led 1.5s ease-in-out infinite}',
+			'.h5net .h5net-ecard.eg-via-wan .f-wan{opacity:1;animation:dash 1.05s linear infinite}',
+			'.h5net .h5net-ecard.eg-via-modem .f-modem{opacity:1;animation:dash 1.05s linear infinite}',
+			'.h5net .h5net-ecard.eg-via-both .eg-flow{opacity:1;animation:dash 1.05s linear infinite}',
+			'.h5net .h5net-ecard.eg-via-wan .eg-port{fill:currentColor;fill-opacity:.18}',
+			'.h5net .h5net-ecard.eg-via-both .eg-port{fill:currentColor;fill-opacity:.18}',
+			'.h5net .h5net-ecard.eg-via-modem .eg-bar{opacity:1}',
+			'.h5net .h5net-ecard.eg-via-both .eg-bar{opacity:1}',
 			'.h5net-note{margin:0 0 14px;padding:10px 12px;border-left:3px solid var(--net-blue);border-radius:4px;background:rgba(79,143,247,.07);color:var(--text-color-medium,#555);font-size:13px}',
 			'.h5net-note.alert{border-left-color:var(--net-red);background:rgba(228,95,95,.08);color:var(--net-red);font-weight:500}',
 			'.h5net-note.warn{border-left-color:var(--net-amber);background:rgba(231,163,62,.08)}',
@@ -235,8 +282,8 @@ return view.extend({
 			'.h5net-stat-item>b{display:block;font-size:14px;margin-bottom:6px}',
 			'.h5net-stat-value{display:block;font-size:12.5px;font-weight:600;color:var(--text-color,#39424e);overflow-wrap:anywhere}',
 			'.h5net-stat-hint{display:block;margin-top:4px;color:#929aa5;font-size:11px;overflow-wrap:anywhere}',
-			'@media(max-width:900px){.h5net-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.h5net-head{flex-wrap:wrap}.h5net .h5net-ecard{flex:1 1 100%;margin-top:10px}}',
-			'@media(max-width:620px){.h5net-head{display:block}.h5net .h5net-ecard{margin-top:11px}.h5net-grid{grid-template-columns:1fr}.h5net-foot{display:block}.h5net-buttons{margin-top:12px;flex-direction:column}.h5net-buttons .cbi-button{width:100%}.h5net-stat-grid{gap:9px}.h5net-stat-item{padding:12px 9px;border-radius:12px}.h5net-stat-icon{height:64px;margin-bottom:9px;border-radius:10px}.h5net-stat-icon svg{width:46px;height:46px}.h5net-stat-item>b{font-size:13px}.h5net-stat-hint{font-size:10px}.h5net .h5net-ecard{min-height:68px;border-radius:16px;padding-right:14px}.h5net .h5net-ecard .svgbox{width:46px;height:46px;border-radius:13px}.h5net .h5net-ecard .svgbox svg{width:39px;height:39px}.h5net .h5net-ecard .ec-title{font-size:14px}.h5net .h5net-ecard .ec-meta,.h5net .h5net-ecard .ec-live{font-size:10px}}'
+			'@media(max-width:900px){.h5net-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.h5net .h5net-ecard.hero{flex-direction:column;gap:11px}.h5net .h5net-ecard.hero .hero-div{align-self:stretch;width:auto;height:1px;margin:0;background:linear-gradient(90deg,transparent,rgba(139,149,161,.34),transparent)}}',
+			'@media(max-width:620px){.h5net .h5net-ecard .ec-hint{display:none}.h5net .h5net-ecard .hero-slot{gap:11px}.h5net-grid{grid-template-columns:1fr}.h5net-foot{display:block}.h5net-buttons{margin-top:12px;flex-direction:column}.h5net-buttons .cbi-button{width:100%}.h5net-stat-grid{gap:9px}.h5net-stat-item{padding:12px 9px;border-radius:12px}.h5net-stat-icon{height:64px;margin-bottom:9px;border-radius:10px}.h5net-stat-icon svg{width:46px;height:46px}.h5net-stat-item>b{font-size:13px}.h5net-stat-hint{font-size:10px}.h5net .h5net-ecard{min-height:68px;border-radius:16px;padding-right:14px}.h5net .h5net-ecard .svgbox{width:46px;height:46px;border-radius:13px}.h5net .h5net-ecard .svgbox svg{width:39px;height:39px}.h5net .h5net-ecard .ec-title{font-size:14px}.h5net .h5net-ecard .ec-meta,.h5net .h5net-ecard .ec-live{font-size:10px}}'
 		].join(''));
 	},
 
@@ -312,16 +359,42 @@ return view.extend({
 			+ '</svg>';
 	},
 
-	// The live egress card: which uplink holds the default route right now, its
-	// real netdev, its real place in the configured policy, and the two family
-	// verdicts when they disagree.
+	// The lead card's heading half: the router, the wired socket, the cellular
+	// bars, and the two branches joining them.  The branch holding the default
+	// route is the one whose dashes flow, with its socket or its bars filled in.
+	//
+	// Which branch is selected comes from the card's eg-via-* class rather than
+	// from a token spliced into this string, which keeps every class attribute
+	// literal: the audit script reconstructs the markup by harvesting string
+	// literals, and a concatenated attribute would be invisible to it.
+	egressIconSvg: function() {
+		return '<svg viewBox="0 0 64 64" aria-label="' + _('网络出口') + '">'
+			+ '<g class="eg-port">'
+			+ '<rect x="45" y="9" width="13" height="11" rx="3.5" stroke-width="2"/>'
+			+ '<path d="M49 20v3.5m5-3.5v3.5M47.5 23.5h8" stroke-width="2"/>'
+			+ '</g>'
+			+ '<rect class="eg-bar" x="45" y="45" width="3.2" height="8" rx="1.6"/>'
+			+ '<rect class="eg-bar" x="50.4" y="41" width="3.2" height="12" rx="1.6"/>'
+			+ '<rect class="eg-bar" x="55.8" y="37" width="3.2" height="16" rx="1.6"/>'
+			+ '<rect class="eg-dev" x="4" y="25" width="16" height="14" rx="5" stroke-width="2.2"/>'
+			+ '<circle class="eg-led" cx="12" cy="32" r="2.1" fill="currentColor"/>'
+			+ '<path class="eg-link" d="M20 29c10 0 10-14 23-14"/>'
+			+ '<path class="eg-flow f-wan" d="M20 29c10 0 10-14 23-14"/>'
+			+ '<path class="eg-link" d="M20 35c10 0 10 14 23 14"/>'
+			+ '<path class="eg-flow f-modem" d="M20 35c10 0 10 14 23 14"/>'
+			+ '</svg>';
+	},
+
+	// The live egress readout, as data rather than as markup.  Split out of
+	// exitCard() so that the card's own state classes and the half it renders
+	// cannot disagree about which state the device is in.
 	//
 	// Every string here is derived from the status output.  The sheet's demo text
-	// ("当前出口：有线 WAN" next to "当前出口：蜂窝网络", both "在线") describes a state
-	// this device cannot be in: one uplink carries the traffic, and if both are up
-	// under two different families that is a split, which the header card reports
-	// as a fault rather than as two tidy green cards.
-	exitCard: function(data) {
+	// ("current exit: wired WAN" next to "current exit: cellular", both "online")
+	// describes a state this device cannot be in: one uplink carries the traffic,
+	// and if both are up under two different families that is a split, which the
+	// card reports as a fault rather than as two tidy green cards.
+	exitVerdict: function(data) {
 		var active4 = data.active4 || 'none';
 		var active6 = data.active6 || 'none';
 		var split = data.split === '1';
@@ -329,7 +402,7 @@ return view.extend({
 		var daed = data.daed_exit_state || 'none';
 		var self = this;
 
-		var tone = 'tone-live', idle = false, kind, title, live, badge, iface, role;
+		var tone = 'tone-live', idle = false, kind, title, live, liveCls, badge, iface, role;
 
 		// The policy order, not the current carrier: when the backup is the one
 		// carrying traffic, that is exactly what the reader needs to see.
@@ -348,6 +421,7 @@ return view.extend({
 			idle = true;
 			title = _('出口分流');
 			live = _('告警');
+			liveCls = 'is-down';
 			badge = _('IPv4 ') + this.exitLabel(active4);
 			iface = this.exitDevice(data, active4);
 			role = _('IPv6 ') + this.exitLabel(active6);
@@ -361,6 +435,9 @@ return view.extend({
 			idle = tone === 'tone-down' || tone === 'tone-off';
 			title = _('当前出口：%s').format(this.exitLabel(active));
 			live = (state.cls === 'up') ? _('在线') : state.label;
+			liveCls = (state.cls === 'up') ? 'is-up'
+				: (state.cls === 'pending') ? 'is-pending'
+				: (state.cls === 'idle') ? 'is-off' : 'is-down';
 			badge = (active === 'wan') ? 'Ethernet' : '5G / LTE';
 			iface = (active === 'wan' ? data.wan_device : data.modem_device) || _('未指定');
 			role = roleOf(active);
@@ -371,6 +448,7 @@ return view.extend({
 			// claims a position in this app's policy.
 			kind = 'route';
 			tone = 'tone-pending';
+			liveCls = 'is-pending';
 			title = _('当前出口：其他路由');
 			live = _('外部接管');
 			badge = (daed !== 'none') ? (_('daed 接管') ) : _('外部路由');
@@ -381,6 +459,7 @@ return view.extend({
 			kind = 'route';
 			tone = 'tone-off';
 			idle = true;
+			liveCls = 'is-off';
 			title = _('无可用出口');
 			live = _('离线');
 			badge = _('无出口');
@@ -388,36 +467,135 @@ return view.extend({
 			role = _('策略：') + this.modeLabel(data.mode);
 		}
 
-		var card = E('article', {
-			'class': 'h5net-ecard' + (kind === 'modem' ? ' cell' : '') + ' ' + tone
-				+ (idle ? ' is-idle' : '')
-		});
-		var box = E('div', { 'class': 'svgbox' });
-		box.innerHTML = this.exitIconSvg(kind);
+		// Which of the two drawn branches carries traffic.  Both is a split;
+		// neither means the traffic is not leaving through this app's uplinks at
+		// all, and the glyph then shows no motion.
+		var carriesWan = (active4 === 'wan' || active6 === 'wan');
+		var carriesModem = (active4 === 'modem' || active6 === 'modem');
+		var via = (carriesWan && carriesModem) ? 'eg-via-both'
+			: carriesWan ? 'eg-via-wan'
+			: carriesModem ? 'eg-via-modem' : 'eg-via-none';
 
-		card.appendChild(box);
-		card.appendChild(E('div', { 'class': 'ec-content' }, [
+		return { tone: tone, idle: idle, kind: kind, title: title, live: live,
+			liveCls: liveCls, badge: badge, iface: iface, role: role, via: via };
+	},
+
+	// The lead card of the page: the configured plan on the left, the live exit on
+	// the right, in one card.  Both halves are built through the same vocabulary,
+	// so neither is styled as an exception to the other.
+	//
+	// The card's tone still comes from the live exit alone.  Toning it by the plan
+	// verdict as well would turn it amber for a deliberate "only this exit" choice,
+	// and colour that no longer means "something is wrong right now" is worse than
+	// no colour; the plan states that in its own pill, inside its own half.
+	exitCard: function(data) {
+		var v = this.exitVerdict(data);
+		var card = E('article', {
+			'class': 'h5net-ecard hero' + (v.kind === 'modem' ? ' cell' : '') + ' '
+				+ v.tone + (v.idle ? ' is-idle' : '') + ' ' + v.via
+		});
+
+		card.appendChild(this.egressSlot(data));
+		card.appendChild(E('span', { 'class': 'hero-div' }));
+		card.appendChild(this.exitSlot(v));
+
+		return card;
+	},
+
+	// The plan half.  Its verdict is deliberately not the link verdict: the two
+	// facts can disagree, because a healthy link under a plan whose backup has
+	// gone away is a failover that no longer exists - which is the failure this
+	// app was rebuilt to stop hiding.  The ladder below is exhaustive over the
+	// states the backend can report.
+	egressSlot: function(data) {
+		var self = this;
+		var order = this.modeOrder(data.mode);
+		var active = (data.active4 && data.active4 !== 'none') ? data.active4
+			: ((data.active6 && data.active6 !== 'none') ? data.active6 : 'none');
+
+		var live, liveCls;
+		if (data.split === '1') {
+			live = _('分流告警'); liveCls = 'is-down';
+		}
+		else if (active === 'none') {
+			live = _('无默认路由'); liveCls = 'is-off';
+		}
+		else if (active === 'other') {
+			live = _('策略被绕过'); liveCls = 'is-pending';
+		}
+		else if (order.length === 1) {
+			live = _('单出口运行'); liveCls = 'is-pending';
+		}
+		else if (order.filter(function(k) {
+			return self.connectionState(data, k).cls === 'up';
+		}).length < order.length) {
+			live = _('无备用链路'); liveCls = 'is-pending';
+		}
+		else {
+			live = _('主备就绪'); liveCls = 'is-up';
+		}
+
+		// The plan is printed in the order it is configured: the number is the
+		// policy position, which is what the cards below let the user change.
+		var plan = order.map(function(k, i) {
+			return (order.length > 1 ? (i + 1) + ' ' : '') + self.exitLabel(k);
+		}).join(' · ');
+
+		var hint = _('点击连接卡片切换首选出口，“仅用此出口”会移除备用链路。');
+
+		var slot = E('div', { 'class': 'hero-slot hero-egress' });
+		var box = E('div', { 'class': 'svgbox' });
+		box.innerHTML = this.egressIconSvg();
+
+		slot.appendChild(box);
+		slot.appendChild(E('div', { 'class': 'ec-content' }, [
 			E('div', { 'class': 'ec-topline' }, [
-				E('div', { 'class': 'ec-title' }, title),
-				E('div', { 'class': 'ec-live' }, [
+				E('h2', { 'class': 'ec-title' }, _('网络出口')),
+				E('div', { 'class': 'ec-live ' + liveCls }, [
 					E('i', { 'class': 'ec-dot' }),
 					E('span', {}, live)
 				])
 			]),
 			E('div', { 'class': 'ec-meta' }, [
-				E('span', { 'class': 'ec-badge' }, badge),
+				E('span', { 'class': 'ec-badge' }, this.modeLabel(data.mode)),
 				E('span', { 'class': 'ec-sep' }, '·'),
-				E('span', { 'class': 'ec-iface' }, iface),
+				E('span', { 'class': 'ec-role' }, plan)
+			]),
+			E('div', { 'class': 'ec-hint', 'title': hint }, hint)
+		]));
+
+		return slot;
+	},
+
+	// The readout half: which uplink holds the default route, its real netdev, its
+	// real place in the configured policy, and the two family verdicts when they
+	// disagree.
+	exitSlot: function(v) {
+		var slot = E('div', { 'class': 'hero-slot hero-exit' });
+		var box = E('div', { 'class': 'svgbox' });
+		box.innerHTML = this.exitIconSvg(v.kind);
+
+		slot.appendChild(box);
+		slot.appendChild(E('div', { 'class': 'ec-content' }, [
+			E('div', { 'class': 'ec-topline' }, [
+				E('div', { 'class': 'ec-title' }, v.title),
+				E('div', { 'class': 'ec-live ' + v.liveCls }, [
+					E('i', { 'class': 'ec-dot' }),
+					E('span', {}, v.live)
+				])
+			]),
+			E('div', { 'class': 'ec-meta' }, [
+				E('span', { 'class': 'ec-badge' }, v.badge),
 				E('span', { 'class': 'ec-sep' }, '·'),
-				E('span', { 'class': 'ec-role' }, role)
+				E('span', { 'class': 'ec-iface' }, v.iface),
+				E('span', { 'class': 'ec-sep' }, '·'),
+				E('span', { 'class': 'ec-role' }, v.role)
 			])
 		]));
 
-		return card;
+		return slot;
 	},
 
-	// The netdev behind an exit label, as reported by the backend rather than
-	// guessed from the uci section.
 	exitDevice: function(data, exit) {
 		if (exit === 'wan') return data.wan_device || '—';
 		if (exit === 'modem') return data.modem_device || '—';
@@ -989,9 +1167,9 @@ return view.extend({
 		var active6 = data.active6;
 		var split = data.split === '1';
 		var message = this.statusMessage(data);
-		// The header readout is the exit card, which states the live exit and the
-		// family split in the same place; the old pill badge that only printed a
-		// label has been folded into it.
+		// The header is one card: the plan on the left, the live exit and the family
+		// split on the right.  Both halves come out of exitCard(), so what the header
+		// claims cannot drift from what the device is doing.
 		var curWanDev = (this.deviceMap || {}).wan || '';
 		var curModemDev = (this.deviceMap || {}).modem || '';
 		var newWanDev = (this.pendingDeviceMap || {}).wan || curWanDev;
@@ -1016,13 +1194,9 @@ return view.extend({
 
 		return E('div', { 'class': 'h5net', id: 'h5net-status' }, [
 			this.styleNode(),
-			E('div', { 'class': 'h5net-head' }, [
-				E('div', {}, [
-					E('h2', {}, _('网络出口')),
-					E('p', {}, _('点击连接卡片把该链路设为首选出口，另一条自动作为备用。"仅用此出口"会移除备用链路。'))
-				]),
-				this.exitCard(data)
-			]),
+			// The heading is part of the card below, not a sibling of it: the plan and
+			// the live exit are the same statement about the same two links.
+			this.exitCard(data),
 			E('div', { 'class': message.cls }, message.text),
 			// The readout sits above the controls it describes: the tiles state what
 			// the device is doing right now, and the cards below are what the user

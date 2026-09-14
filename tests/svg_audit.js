@@ -48,7 +48,7 @@ const flat = literals.join('\n');
 const svgs = [ ...flat.matchAll(/<svg[^>]*>[\s\S]*?<\/svg>/g) ].map(m => m[0]);
 
 console.log('\nSVG fragments found: ' + svgs.length +
-	' (2 uplink card icons + 8 tiles + 3 exit-card variants expected)');
+	' (2 uplink card icons + 8 tiles + 3 exit-card variants + 1 egress glyph expected)');
 svgs.forEach((svg, i) => {
 	const viewBox = (svg.match(/viewBox="([^"]+)"/) || [])[1];
 	const classes = [ ...svg.matchAll(/class="([^"]+)"/g) ].map(m => m[1]).sort();
@@ -56,7 +56,7 @@ svgs.forEach((svg, i) => {
 	console.log('  #' + (i + 1) + '  viewBox=' + viewBox + '  len=' + svg.length +
 		'  balanced=' + balanced + '  classes=[' + classes.join(', ') + ']');
 });
-report(svgs.length === 13, 'SVG count is 13', 'found ' + svgs.length);
+report(svgs.length === 14, 'SVG count is 14', 'found ' + svgs.length);
 report(svgs.every(s => (s.match(/<svg/g) || []).length === (s.match(/<\/svg>/g) || []).length),
 	'every SVG is balanced');
 
@@ -115,7 +115,14 @@ report(!missingClasses.length, 'every declared animation rule exists',
 // silently renders frozen.  Purely presentational classes are excluded by design,
 // not by accident: `wan-port` only sets fill / stroke / linecap on the card's
 // paths and is expected to be static.
-const NON_ANIMATED = new Set([ 'wan-port' ]);
+const NON_ANIMATED = new Set([
+	// the exit card's own static geometry: it sets fill / stroke / linecap only
+	'wan-port',
+	// the egress glyph's static geometry.  None of it carries state: which branch
+	// is live is decided by the card's eg-via-* rule, which switches that branch's
+	// .eg-flow overlay on, so the sockets, the bars and the base paths stay still.
+	'eg-dev', 'eg-link', 'eg-port', 'eg-bar'
+]);
 const usedClasses = [ ...new Set(svgs.flatMap(s =>
 	[ ...s.matchAll(/class="([^"]+)"/g) ].flatMap(m => m[1].split(/\s+/)))) ].sort();
 const unbound = usedClasses.filter(c => animClasses.indexOf(c) < 0 && !NON_ANIMATED.has(c));
@@ -146,6 +153,55 @@ for (const ec of [ 'h5net-ecard', 'svgbox', 'ec-content', 'ec-topline', 'ec-titl
 for (const tn of [ 'tone-pending', 'tone-down', 'tone-off' ]) {
 	report(src.indexOf('.h5net-ecard.' + tn) > -1, 'exit card defines .' + tn);
 }
+
+// ---------------------------------------------------------------------------
+// The lead card: two halves, one card, and the egress glyph
+// ---------------------------------------------------------------------------
+// The heading half of the card is not bare text next to a card any more, so the
+// vocabulary both halves are built from has to exist, and the sibling header
+// block it replaced has to be gone.
+for (const cls of [ 'hero-slot', 'hero-div', 'ec-hint' ]) {
+	report(src.indexOf('.' + cls) > -1, 'CSS defines .' + cls);
+}
+for (const st of [ 'is-up', 'is-pending', 'is-down', 'is-off' ]) {
+	report(src.indexOf('.h5net .h5net-ecard .ec-live.' + st) > -1,
+		'CSS gives .ec-live a ' + st + ' colour');
+}
+report(src.indexOf('h5net-head') < 0, 'the two-sibling header block is gone',
+	'the header must be one card, not a heading beside one');
+report(src.indexOf('.h5net .h5net-ecard.hero{flex-direction:column') > -1,
+	'the lead card stacks instead of squeezing on narrow screens');
+
+// The egress glyph.  Its selection class lives on the card rather than inside the
+// markup, which is what keeps every class attribute in the SVG string literal and
+// therefore readable here; these checks pin the other half of that contract - that
+// each branch is switched on by its own state class, and that the two are never
+// crossed, since a crossed binding would draw the traffic leaving the wrong way.
+const egressSvg = svgs.filter(s => s.indexOf('eg-led') > -1);
+report(egressSvg.length === 1, 'exactly one egress glyph', 'found ' + egressSvg.length);
+if (egressSvg.length === 1) {
+	const g = egressSvg[0];
+	report((g.match(/class="eg-flow f-wan"/g) || []).length === 1 &&
+		(g.match(/class="eg-flow f-modem"/g) || []).length === 1,
+		'egress glyph draws one flow overlay per branch');
+	report(g.indexOf('class="eg-port"') > -1, 'egress glyph draws the wired socket');
+	report((g.match(/class="eg-bar"/g) || []).length === 3,
+		'egress glyph draws three cellular bars');
+	report(g.indexOf('viewBox="0 0 64 64"') > -1, 'egress glyph uses the shared 64x64 box');
+}
+for (const via of [ 'eg-via-wan', 'eg-via-modem', 'eg-via-both' ]) {
+	report(src.indexOf('.h5net .h5net-ecard.' + via + ' ') > -1,
+		'egress glyph binds ' + via);
+}
+report(src.indexOf('.h5net .h5net-ecard.eg-via-wan .f-wan{') > -1 &&
+	src.indexOf('.h5net .h5net-ecard.eg-via-modem .f-modem{') > -1,
+	'each branch animates under its own state class');
+report(src.indexOf('eg-via-wan .f-modem') < 0 && src.indexOf('eg-via-modem .f-wan') < 0,
+	'no crossed branch binding');
+report(src.indexOf('.h5net .h5net-ecard.eg-via-none') < 0,
+	'eg-via-none is left unbound on purpose: nothing carrying means nothing moves');
+report(src.indexOf('.h5net .h5net-ecard.is-idle svg,.h5net .h5net-ecard.is-idle svg *') > -1,
+	'a frozen lead card stops the glyph as well');
 
 // ---------------------------------------------------------------------------
 // CSS scope: a media query adds no specificity
