@@ -154,10 +154,6 @@ return view.extend({
 			// live state, so colour means "state" and the sheet's palette only
 			// survives while that subsystem is healthy.
 			'.h5net-stat{margin:0 0 18px}',
-			'.h5net-stat-head{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:14px}',
-			'.h5net-stat-head h2{margin:0 0 5px;font-size:20px;letter-spacing:-.3px}',
-			'.h5net-stat-head p{margin:0;color:var(--text-color-medium,#7d8795);font-size:13px}',
-			'.h5net-stat-badge{padding:7px 11px;border-radius:999px;background:var(--background-color-high,#fff);border:1px solid var(--border-color-low,#e8edf3);color:#687281;font-size:12px;font-weight:700;white-space:nowrap}',
 			'.h5net-stat-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}',
 			'.h5net-stat-item{min-width:0;padding:15px 13px 13px;background:rgba(255,255,255,.72);border:1px solid var(--border-color-low,#e8edf3);border-radius:15px;box-shadow:0 5px 18px rgba(33,48,73,.035)}',
 			'.h5net-stat-icon{height:74px;display:grid;place-items:center;border-radius:12px;margin-bottom:11px;transition:color .3s,background .3s}',
@@ -178,7 +174,7 @@ return view.extend({
 			'.h5net-stat-value{display:block;font-size:12.5px;font-weight:600;color:var(--text-color,#39424e);overflow-wrap:anywhere}',
 			'.h5net-stat-hint{display:block;margin-top:4px;color:#929aa5;font-size:11px;overflow-wrap:anywhere}',
 			'@media(max-width:900px){.h5net-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}',
-			'@media(max-width:620px){.h5net-head{display:block}.h5net-active{margin-top:11px}.h5net-grid{grid-template-columns:1fr}.h5net-foot{display:block}.h5net-buttons{margin-top:12px;flex-direction:column}.h5net-buttons .cbi-button{width:100%}.h5net-stat-head{display:block}.h5net-stat-head p{line-height:1.6}.h5net-stat-badge{display:inline-block;margin-top:10px}.h5net-stat-grid{gap:9px}.h5net-stat-item{padding:12px 9px;border-radius:12px}.h5net-stat-icon{height:64px;margin-bottom:9px;border-radius:10px}.h5net-stat-icon svg{width:46px;height:46px}.h5net-stat-item>b{font-size:13px}.h5net-stat-hint{font-size:10px}}'
+			'@media(max-width:620px){.h5net-head{display:block}.h5net-active{margin-top:11px}.h5net-grid{grid-template-columns:1fr}.h5net-foot{display:block}.h5net-buttons{margin-top:12px;flex-direction:column}.h5net-buttons .cbi-button{width:100%}.h5net-stat-grid{gap:9px}.h5net-stat-item{padding:12px 9px;border-radius:12px}.h5net-stat-icon{height:64px;margin-bottom:9px;border-radius:10px}.h5net-stat-icon svg{width:46px;height:46px}.h5net-stat-item>b{font-size:13px}.h5net-stat-hint{font-size:10px}}'
 		].join(''));
 	},
 
@@ -385,14 +381,11 @@ return view.extend({
 			}
 		];
 
+		// No title row here: the eight tiles are self-describing (each has its own
+		// name + value + hint), and the card above already carries the page's
+		// section heading.  Keeping a second <h2> competed with the "网络出口"
+		// heading for the same visual level.
 		return E('section', { 'class': 'h5net-stat' }, [
-			E('div', { 'class': 'h5net-stat-head' }, [
-				E('div', {}, [
-					E('h2', {}, _('运行状态总览')),
-					E('p', {}, _('图标、配色与动画都来自设备实时状态：正在动的链路才是此刻真的在通则上。'))
-				]),
-				E('span', { 'class': 'h5net-stat-badge' }, _('随页面每 5 秒刷新'))
-			]),
 			E('div', { 'class': 'h5net-stat-grid' }, items.map(function(item) {
 				// The markup goes in through innerHTML, not E(): E() uses
 				// document.createElement(), which yields an HTMLUnknownElement for

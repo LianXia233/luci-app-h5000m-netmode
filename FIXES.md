@@ -744,3 +744,22 @@ uci set h5000m_netmode.settings.health_check=0
 /usr/sbin/h5000m-netmode status | grep health_check    # 期望 0（显式关闭）
 cat /var/run/h5000m-netmode.health                     # wan/modem/ts 三项，ts 用于节流
 ```
+
+### 9.5 总览区块的标题行与出口标题争夺层级
+
+**现象**：出口卡片上方的总览区块自带 `<h2>运行状态总览</h2>` 与一行说明，紧邻下方是出口卡片的 `<h2>网络出口</h2>`。两行标题的字号只差 2px（20px 对 22px），视觉上是两个并列的章节标题，读者却分不清哪个是页面主体——总览是读数区，出口卡片才是可操作的主体。
+
+**根因**：把「区块需要一个名字」当成了默认前提。但这里的 8 个卡片各自带有名称、数值与说明文字，区块本身不需要标题来定义自己；标题行存在的唯一效果是与真正的章节标题争夺层级。徽标「随页面每 5 秒刷新」同理——刷新周期是实现细节，对读者没信息量。
+
+**修复**：直接删除整个标题行（`<h2>` + 说明 `<p>` + 徽标 `<span>`），`statusTiles()` 只返回 `<div class="h5net-stat-grid">`。同步从样式表移除 `.h5net-stat-head`、`.h5net-stat-head h2/p`、`.h5net-stat-badge` 及 620px 小屏分支里对应的三条规则——删节点不删规则会留下永远不命中的死样式。
+
+**注意**：`README.md` 与 `CHANGELOG.md` 里「运行状态总览」仍是这个区块的概念名（章节标题、功能表条目），保留；只有页面内的渲染标题被移除。文档与界面在这一层的差异是刻意的：文档需要索引名，界面不需要。
+
+**验证**：
+
+```sh
+# 页面内不应再有该标题，样式表不应再引用 head/badge 选择器
+grep -c "运行状态总览" htdocs/luci-static/resources/view/h5000m/netmode.js   # 期望 0
+grep -c "h5net-stat-head\|h5net-stat-badge" htdocs/luci-static/resources/view/h5000m/netmode.js   # 期望 0
+grep -c "运行状态总览" README.md CHANGELOG.md   # 概念名保留，非 0
+```
