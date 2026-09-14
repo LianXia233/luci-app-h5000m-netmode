@@ -153,7 +153,7 @@ return view.extend({
 			// for that subsystem; the st-* / is-idle layer overrides it with the
 			// live state, so colour means "state" and the sheet's palette only
 			// survives while that subsystem is healthy.
-			'.h5net-stat{margin-top:25px}',
+			'.h5net-stat{margin:0 0 18px}',
 			'.h5net-stat-head{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:14px}',
 			'.h5net-stat-head h2{margin:0 0 5px;font-size:20px;letter-spacing:-.3px}',
 			'.h5net-stat-head p{margin:0;color:var(--text-color-medium,#7d8795);font-size:13px}',
@@ -828,6 +828,10 @@ return view.extend({
 				E('div', { 'class': badgeClass }, badgeText)
 			]),
 			E('div', { 'class': message.cls }, message.text),
+			// The readout sits above the controls it describes: the tiles state what
+			// the device is doing right now, and the cards below are what the user
+			// changes in response.
+			this.statusTiles(data),
 			E('div', { 'class': 'h5net-grid' }, [
 				this.routeCard('wan', data),
 				this.routeCard('modem', data)
@@ -835,8 +839,7 @@ return view.extend({
 			E('div', { 'class': 'h5net-foot' }, [
 				this.metaBar(data),
 				E('div', { 'class': 'h5net-buttons' }, buttons)
-			]),
-			this.statusTiles(data)
+			])
 		]);
 	},
 
