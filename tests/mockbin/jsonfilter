@@ -1,0 +1,40 @@
+#!/bin/sh
+# Mock of OpenWrt's jsonfilter, supporting the `-e '@.dotted.path'` form.
+#
+# Pure shell on purpose: the test suite is meant to run on the router too, where
+# there is no python, and a process per parsed field would dominate the runtime.
+# A missing key prints an empty line, which bool_value() maps to 0 - the same
+# observable behaviour as the real jsonfilter for the fields this app reads.
+raw=""
+while IFS= read -r line || [ -n "$line" ]; do
+	raw="$raw$line"
+done
+
+emit_value() {
+	value="$1"
+	# trim surrounding whitespace
+	value="${value#"${value%%[![:space:]]*}"}"
+	value="${value%"${value##*[![:space:]]}"}"
+	# strip one layer of JSON quotes
+	case "$value" in
+		\"*\") value="${value#\"}"; value="${value%\"}" ;;
+	esac
+	printf '%s\n' "$value"
+}
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-e)
+			expr="${2:-}"
+			shift 2 2>/dev/null || shift
+			field="${expr#@.}"
+			[ "$field" = "$expr" ] && field="$expr"
+			emit_value "$(printf '%s' "$raw" | \
+				sed -n "s/.*\"$field\"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p")"
+			;;
+		*)
+			shift
+			;;
+	esac
+done
+exit 0

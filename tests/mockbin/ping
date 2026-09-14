@@ -1,0 +1,5 @@
+#!/bin/sh
+# Mock of `ping`: the suite never wants to send real traffic, and the health probe
+# is diagnostic-only, so "reachable" is the harmless default.
+printf 'PING: 1 packets transmitted, 1 packets received\n'
+exit 0

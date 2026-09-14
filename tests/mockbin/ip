@@ -1,0 +1,33 @@
+#!/bin/sh
+# Mock of `ip`.  The scenario supplies fixed tables so route selection can be
+# exercised deterministically without touching a real routing table.
+#   $H5_SCEN/routes/default4   $H5_SCEN/routes/default6
+#   $H5_SCEN/routes/get4       $H5_SCEN/routes/get6
+#   $H5_SCEN/links
+scen="${H5_SCEN:?H5_SCEN not set}"
+
+fam="4"
+rest=""
+for a in "$@"; do
+	case "$a" in
+		-4) fam="4" ;;
+		-6) fam="6" ;;
+		*) rest="$rest $a" ;;
+	esac
+done
+
+# shellcheck disable=SC2086
+set -- $rest
+
+case "${1:-} ${2:-}" in
+	"route show") file="$scen/routes/default$fam" ;;
+	"route get") file="$scen/routes/get$fam" ;;
+	"link show") file="$scen/links" ;;
+	*) exit 1 ;;
+esac
+
+[ -f "$file" ] || exit 1
+while IFS= read -r line || [ -n "$line" ]; do
+	printf '%s\n' "$line"
+done < "$file"
+exit 0

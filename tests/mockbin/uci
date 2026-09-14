@@ -1,0 +1,58 @@
+#!/bin/sh
+# Mock of OpenWrt's `uci` backed by a scenario directory of key/value files.
+#   $H5_SCEN/uci/<key>       -> current value
+#   $H5_SCEN/uci-writes.log  -> append-only log of set/commit operations
+scen="${H5_SCEN:?H5_SCEN not set}"
+
+while [ "$1" = "-q" ]; do shift; done
+cmd="${1:-}"
+[ $# -gt 0 ] && shift
+
+read_first_line() {
+	value=""
+	# No trailing newline is the common case here, so read() returns non-zero
+	# while still having assigned the data.
+	IFS= read -r value < "$1" || true
+	printf '%s' "$value"
+}
+
+case "$cmd" in
+	get)
+		key="${1:-}"
+		if [ -f "$scen/uci/$key" ]; then
+			read_first_line "$scen/uci/$key"
+			exit 0
+		fi
+		exit 1
+		;;
+	set)
+		kv="${1:-}"
+		key="${kv%%=*}"
+		val="${kv#*=}"
+		mkdir -p "$scen/uci"
+		printf '%s' "$val" > "$scen/uci/$key"
+		printf 'set %s=%s\n' "$key" "$val" >> "$scen/uci-writes.log"
+		exit 0
+		;;
+	commit)
+		printf 'commit %s\n' "${1:-}" >> "$scen/uci-writes.log"
+		exit 0
+		;;
+	show)
+		cfg="${1:-}"
+		[ -d "$scen/uci" ] || exit 0
+		for f in "$scen/uci/$cfg".*; do
+			[ -f "$f" ] || continue
+			name="${f##*/}"
+			rest="${name#"$cfg".}"
+			case "$rest" in
+				*.*) continue ;;
+			esac
+			printf '%s=%s\n' "$name" "$(read_first_line "$f")"
+		done
+		exit 0
+		;;
+	*)
+		exit 1
+		;;
+esac

@@ -1,10 +1,76 @@
 #!/bin/sh
+#
+# h5000m-netmode - wired WAN / 5G modem exit priority manager for Hiveton H5000M
+#
+# Three invariants drive the design of this script.  Each one exists because it
+# was violated in the field.
+#
+#   1. The live exit must be read from the kernel forwarding table, never from
+#      the first line of `ip route show default`.
+#      That command only dumps the *main* table.  As soon as a policy rule
+#      redirects traffic into another table (mwan3, qmodem, VPN helpers) the
+#      first main-table line and the route the kernel actually uses disagree.
+#      Measured on the H5000M: with `to 198.51.100.7 lookup 1000` installed the
+#      main table still reported eth1 while the FIB resolved eth2.  Reading the
+#      wrong table is what makes a manager report the standby as active, or fail
+#      to switch at all.
+#      `ip -<fam> route get <probe>` is a pure FIB lookup (it emits no packets)
+#      and therefore honours policy rules; that is the oracle used here, with a
+#      deterministic lowest-metric fallback for when it cannot resolve.
+#
+#   2. IPv4 and IPv6 must leave through the same interface at all times.
+#      A single writer (apply_ipv6_desired) owns the IPv6 default-route/auto
+#      state and always tears the stale family down *before* raising the new
+#      owner, so the two families are never live on different exits.  IPv6 is
+#      never pointed at an exit that has no IPv6 interface: in that case managed
+#      IPv6 is switched off rather than leaked out of the wrong uplink.
+#
+#   3. One invocation evaluates one immutable state snapshot.
+#      The previous implementation re-read the whole state up to three times per
+#      run, so it could align IPv6 with one exit while reporting a different one
+#      to daed.  State is now memoised per process and invalidated explicitly
+#      after an action expected to change it.
+#
+# BusyBox/ash notes: no arrays, no `sleep 0.2` (integer only), `local` is fine.
 
 TAG="h5000m-netmode"
-LOCK_DIR="/var/lock/h5000m-netmode.lock"
-DAED_EXIT_STATE_FILE="/var/run/h5000m-netmode.daed-exit"
 
-mode="$(uci -q get h5000m_netmode.settings.mode || echo wan_first)"
+# Paths are overridable through the environment so the test harness can exercise
+# this exact file against mocked uci/ubus/ip instead of a patched copy.  The
+# defaults are the production values; nothing sets these variables on a router.
+LOCK_DIR="${H5000M_LOCK_DIR:-/var/lock/h5000m-netmode.lock}"
+DAED_EXIT_STATE_FILE="${H5000M_DAED_STATE:-/var/run/h5000m-netmode.daed-exit}"
+HEALTH_STATE_FILE="${H5000M_HEALTH_STATE:-/var/run/h5000m-netmode.health}"
+SYS_CLASS_NET="${H5000M_SYSFS_NET:-/sys/class/net}"
+SELF="${H5000M_SELF:-/usr/sbin/h5000m-netmode}"
+
+# Probes for the FIB lookup.  Both are anycast resolvers, so a lookup on this
+# router can never be answered by one of its own host routes.
+PROBE4="1.1.1.1"
+PROBE6="2606:4700:4700::1111"
+
+# Seconds `reconcile` waits for a competing run before giving up.  Hotplug and
+# the watchdog can fire while an `apply` is still running; without a bounded wait
+# the event would be dropped and the state would stay stale until the next one.
+DEFAULT_RECONCILE_WAIT=5
+
+# Logging is disabled for `status`, which LuCI polls every 5 seconds.
+LOGGING=1
+
+# State snapshot.
+STATE_READY=0
+NETWORK_CHANGED=0
+
+mode="$(uci -q get h5000m_netmode.settings.mode 2>/dev/null || true)"
+
+# ---------------------------------------------------------------------------
+# primitives
+# ---------------------------------------------------------------------------
+
+log_note() {
+	[ "$LOGGING" = "1" ] || return 0
+	logger -t "$TAG" "$*"
+}
 
 normalize_mode() {
 	case "$mode" in
@@ -15,13 +81,70 @@ normalize_mode() {
 
 bool_value() {
 	case "$1" in
-		1|true) echo 1 ;;
+		1|true|yes|on) echo 1 ;;
 		*) echo 0 ;;
 	esac
 }
 
+uci_get() {
+	uci -q get "$1" 2>/dev/null || true
+}
+
 interface_exists() {
 	uci -q get "network.$1" >/dev/null 2>&1
+}
+
+number_or() {
+	case "$1" in
+		''|*[!0-9]*) echo "$2" ;;
+		*) echo "$1" ;;
+	esac
+}
+
+netdev_exists() {
+	[ -n "$1" ] && [ -e "${SYS_CLASS_NET}/$1" ]
+}
+
+# POSIX sh has no arrays, so lists are space separated strings.  add_word appends
+# without introducing duplicates (empty input is never added).
+add_word() {
+	[ -n "$2" ] || { printf '%s' "$1"; return 0; }
+	case " $1 " in
+		*" $2 "*) printf '%s' "$1" ;;
+		*) printf '%s' "${1:+$1 }$2" ;;
+	esac
+}
+
+dedup_words() {
+	local w out
+	for w in $1; do
+		out="$(add_word "$out" "$w")"
+	done
+	printf '%s\n' "$out"
+}
+
+set_field() {
+	# set_field <prefix> <FIELD> <value>
+	eval "${1}_${2}=\"\$3\""
+}
+
+invalidate_state() {
+	STATE_READY=0
+}
+
+# ---------------------------------------------------------------------------
+# interface discovery
+# ---------------------------------------------------------------------------
+
+all_interface_sections() {
+	uci -q show network 2>/dev/null | sed -n 's/^network\.\([^.]*\)=interface$/\1/p'
+}
+
+section_device_raw() {
+	local section="$1" raw
+	raw="$(uci_get "network.${section}.device")"
+	[ -n "$raw" ] || raw="$(uci_get "network.${section}.ifname")"
+	printf '%s\n' "$raw"
 }
 
 append_modem_section() {
@@ -33,6 +156,37 @@ append_modem_section() {
 	esac
 }
 
+# Resolve the real netdevs behind a network section.
+#
+# netifd happily reports symbolic references such as "@2_1" (and bare `ifname`
+# lists) instead of a netdev.  A route's `dev` never equals "@2_1", so comparing
+# the two silently classified every modem IPv6 route as a foreign route:
+# active6 became "other" while the modem was in fact the live exit, and the IPv6
+# alignment then fought the IPv4 exit.  Expanding the reference is therefore
+# mandatory for an accurate primary/backup verdict.
+resolve_section_devices() {
+	local section="$1" depth="$2" raw token ref resolved out
+
+	[ -n "$section" ] || return 0
+	[ "$depth" -lt 4 ] || return 0
+
+	for token in $(section_device_raw "$section"); do
+		case "$token" in
+			@*)
+				resolved="$(resolve_section_devices "${token#@}" $((depth + 1)))"
+				for ref in $resolved; do
+					out="$(add_word "$out" "$ref")"
+				done
+				;;
+			*)
+				netdev_exists "$token" && out="$(add_word "$out" "$token")"
+				;;
+		esac
+	done
+
+	printf '%s\n' "$out"
+}
+
 discover_modem_interfaces() {
 	local section device eth_fallback
 
@@ -40,60 +194,142 @@ discover_modem_interfaces() {
 	MODEM_PRIMARY=""
 	MODEM6_PRIMARY=""
 
-	eth_fallback="$(uci -q get h5000m_netmode.settings.eth_fallback || true)"
+	eth_fallback="$(uci_get h5000m_netmode.settings.eth_fallback)"
 
-	for section in $(uci -q show network 2>/dev/null | sed -n 's/^network\.\([^.]*\)=interface$/\1/p'); do
-		device="$(uci -q get "network.${section}.device" || uci -q get "network.${section}.ifname" || true)"
-
+	for section in $(all_interface_sections); do
 		case "$section" in
 			wan|wan6|loopback|lan) continue ;;
 		esac
-
 		case " $eth_fallback " in
 			*" $section "*) continue ;;
 		esac
 
+		device="$(section_device_raw "$section")"
 		case "$device" in @wan|@wan6) continue ;; esac
 
 		append_modem_section "$section"
 		[ -n "$MODEM_PRIMARY" ] || MODEM_PRIMARY="$section"
 	done
 
-	if [ -n "$MODEM_PRIMARY" ]; then
-		for section in $(uci -q show network 2>/dev/null | sed -n 's/^network\.\([^.]*\)=interface$/\1/p'); do
-			device="$(uci -q get "network.${section}.device" || uci -q get "network.${section}.ifname" || true)"
-			[ "$device" = "@${MODEM_PRIMARY}" ] || continue
-			append_modem_section "$section"
-			[ -n "$MODEM6_PRIMARY" ] || MODEM6_PRIMARY="$section"
-		done
+	[ -n "$MODEM_PRIMARY" ] || return 0
+
+	for section in $(all_interface_sections); do
+		case "$(section_device_raw "$section")" in
+			"@${MODEM_PRIMARY}") ;;
+			*) continue ;;
+		esac
+		append_modem_section "$section"
+		[ -n "$MODEM6_PRIMARY" ] || MODEM6_PRIMARY="$section"
+	done
+}
+
+# ---------------------------------------------------------------------------
+# per-section link/protocol probing
+#
+# `up` alone is not "通".  A cellular netdev keeps proto-up=true (and keeps its
+# default route) after the bearer drops, and `available` only says the device
+# node exists.  The state is therefore split into layers and every layer is
+# reported, so the UI can distinguish 未配置 / 未接入 / 协商中 / 已断开 / 已连接
+# instead of collapsing everything into a bogus "已断开".
+# ---------------------------------------------------------------------------
+
+read_section_state() {
+	local section="$1" json value dev resolved
+
+	SEC_EXISTS=0
+	SEC_AVAILABLE=0
+	SEC_PENDING=0
+	SEC_UP=0
+	SEC_L3DEV=""
+	SEC_DEVS=""
+	SEC_CARRIER="unknown"
+
+	interface_exists "$section" && SEC_EXISTS=1
+
+	json="$(ubus call "network.interface.$section" status 2>/dev/null || true)"
+	if [ -n "$json" ]; then
+		value="$(printf '%s' "$json" | jsonfilter -e '@.available' 2>/dev/null || true)"
+		SEC_AVAILABLE="$(bool_value "$value")"
+		value="$(printf '%s' "$json" | jsonfilter -e '@.pending' 2>/dev/null || true)"
+		SEC_PENDING="$(bool_value "$value")"
+		value="$(printf '%s' "$json" | jsonfilter -e '@.up' 2>/dev/null || true)"
+		SEC_UP="$(bool_value "$value")"
+		SEC_L3DEV="$(printf '%s' "$json" | jsonfilter -e '@.l3_device' 2>/dev/null || true)"
+		[ -n "$SEC_L3DEV" ] || \
+			SEC_L3DEV="$(printf '%s' "$json" | jsonfilter -e '@.device' 2>/dev/null || true)"
 	fi
+
+	# netifd is authoritative when it named a device, but it can also hand back a
+	# symbolic reference, and it reports nothing at all for a section that was
+	# never started.  Expand the UCI side in both of those cases.
+	case "$SEC_L3DEV" in
+		''|@*)
+			resolved="$(resolve_section_devices "$section" 0)"
+			for dev in $SEC_L3DEV $resolved; do
+				case "$dev" in @*) continue ;; esac
+				netdev_exists "$dev" && SEC_DEVS="$(add_word "$SEC_DEVS" "$dev")"
+			done
+			SEC_L3DEV=""
+			;;
+		*)
+			SEC_DEVS="$SEC_L3DEV"
+			;;
+	esac
+
+	# Carrier is advisory only.  On this hardware eth0 reports carrier=0 while
+	# the LAN is fully functional, and the cellular netdev reports
+	# operstate=unknown, so carrier must never be the sole "link down" signal.
+	for dev in $SEC_DEVS; do
+		if [ -r "${SYS_CLASS_NET}/${dev}/carrier" ]; then
+			SEC_CARRIER="$(cat "${SYS_CLASS_NET}/${dev}/carrier" 2>/dev/null || echo unknown)"
+			break
+		fi
+	done
+	case "$SEC_CARRIER" in
+		0|1) ;;
+		*) SEC_CARRIER="unknown" ;;
+	esac
 }
-read_interface() {
-	local name="$1" json value
 
-	IFACE_PRESENT=0
-	IFACE_UP=0
-	IFACE_AVAILABLE=0
-	IFACE_DEVICE=""
-	interface_exists "$name" && IFACE_PRESENT=1
+# ---------------------------------------------------------------------------
+# routing table oracles
+# ---------------------------------------------------------------------------
 
-	json="$(ubus call "network.interface.$name" status 2>/dev/null || true)"
-	[ -n "$json" ] || {
-		IFACE_DEVICE="$(uci -q get "network.$name.device" || uci -q get "network.$name.ifname" || true)"
-		return 0
-	}
-
-	value="$(printf '%s' "$json" | jsonfilter -e '@.up' 2>/dev/null || true)"
-	IFACE_UP="$(bool_value "$value")"
-	value="$(printf '%s' "$json" | jsonfilter -e '@.available' 2>/dev/null || true)"
-	IFACE_AVAILABLE="$(bool_value "$value")"
-	IFACE_DEVICE="$(printf '%s' "$json" | jsonfilter -e '@.l3_device' 2>/dev/null || true)"
-	[ -n "$IFACE_DEVICE" ] || IFACE_DEVICE="$(printf '%s' "$json" | jsonfilter -e '@.device' 2>/dev/null || true)"
-	[ -n "$IFACE_DEVICE" ] || IFACE_DEVICE="$(uci -q get "network.$name.device" || uci -q get "network.$name.ifname" || true)"
+route_dev() {
+	printf '%s\n' "$1" | sed -n 's/.*[[:space:]]dev[[:space:]]\([^[:space:]]*\).*/\1/p'
 }
 
-route_device() {
-	printf '%s\n' "$1" | sed -n 's/.* dev \([^ ]*\).*/\1/p'
+# Lowest-metric default route of one family.  Deterministic selection instead of
+# relying on dump order, which is not part of any kernel interface contract.
+best_default_route() {
+	local family="$1"
+	ip "-${family}" route show default 2>/dev/null | awk '
+		{
+			metric = 0
+			for (i = 1; i < NF; i++)
+				if ($i == "metric")
+					metric = $(i + 1) + 0
+			if (!found || metric < best) {
+				found = 1
+				best = metric
+				line = $0
+			}
+		}
+		END { if (found) print line }
+	'
+}
+
+# The device the kernel would actually use for a global destination.  Pure FIB
+# lookup: nothing is transmitted, and policy rules are honoured.
+fib_egress() {
+	local family="$1" probe line dev
+
+	if [ "$family" = "6" ]; then probe="$PROBE6"; else probe="$PROBE4"; fi
+
+	line="$(ip "-${family}" route get "$probe" 2>/dev/null | head -n 1 || true)"
+	dev="$(route_dev "$line")"
+	[ -n "$dev" ] || dev="$(route_dev "$(best_default_route "$family")")"
+	printf '%s\n' "$dev"
 }
 
 has_default_route() {
@@ -101,6 +337,8 @@ has_default_route() {
 	[ -n "$device" ] || return 1
 	ip "-${family}" route show default 2>/dev/null | awk -v device="$device" '
 		{
+			if ($1 == "prohibit" || $1 == "unreachable" || $1 == "blackhole")
+				next
 			for (i = 1; i < NF; i++)
 				if ($i == "dev" && $(i + 1) == device)
 					found = 1
@@ -112,6 +350,7 @@ has_default_route() {
 device_matches() {
 	local device="$1" candidate
 	shift
+	[ -n "$device" ] || return 1
 	for candidate in "$@"; do
 		[ -n "$candidate" ] && [ "$device" = "$candidate" ] && return 0
 	done
@@ -120,16 +359,398 @@ device_matches() {
 
 route_owner() {
 	local device="$1"
-	shift
 	[ -n "$device" ] || { echo none; return 0; }
-	if device_matches "$device" "$WAN_DEVICE" "$WAN6_DEVICE"; then
+	if device_matches "$device" $WAN_DEVICES; then
 		echo wan
-	elif device_matches "$device" "$MODEM_DEVICE" "$MODEM6_DEVICE"; then
+	elif device_matches "$device" $MODEM_DEVICES; then
 		echo modem
 	else
 		echo other
 	fi
 }
+
+# ---------------------------------------------------------------------------
+# state snapshot
+# ---------------------------------------------------------------------------
+
+read_role_state() {
+	# read_role_state <PREFIX> <section4> <section6>
+	local prefix="$1" sec4="$2" sec6="$3"
+
+	read_section_state "$sec4"
+	set_field "$prefix" PRESENT "$SEC_EXISTS"
+	set_field "$prefix" AVAILABLE "$SEC_AVAILABLE"
+	set_field "$prefix" PENDING "$SEC_PENDING"
+	set_field "$prefix" UP "$SEC_UP"
+	set_field "$prefix" CARRIER "$SEC_CARRIER"
+	set_field "${prefix}4" DEVS "$SEC_DEVS"
+	set_field "$prefix" SOURCE4 "$sec4"
+
+	read_section_state "$sec6"
+	set_field "${prefix}6" PRESENT "$SEC_EXISTS"
+	set_field "${prefix}6" AVAILABLE "$SEC_AVAILABLE"
+	set_field "${prefix}6" PENDING "$SEC_PENDING"
+	set_field "${prefix}6" UP "$SEC_UP"
+	set_field "${prefix}6" CARRIER "$SEC_CARRIER"
+	set_field "${prefix}6" DEVS "$SEC_DEVS"
+	set_field "$prefix" SOURCE6 "$sec6"
+}
+
+# Keep the dashboard honest when the modem is plugged in but not (yet)
+# configured as a network interface.
+detect_physical_modem() {
+	local dev
+
+	if [ -r /usr/share/mt5700m/usb.sh ]; then
+		. /usr/share/mt5700m/usb.sh
+		if mt5700m_usb_info >/dev/null 2>&1; then
+			MODEM_PRESENT=1
+			dev="$(mt5700m_netdev || true)"
+			[ -n "$dev" ] && MODEM4_DEVS="$(add_word "$MODEM4_DEVS" "$dev")"
+			[ -n "$dev" ] && netdev_exists "$dev" && MODEM_DEVICES="$(add_word "$MODEM_DEVICES" "$dev")"
+		fi
+		return 0
+	fi
+	if [ -r /usr/share/qmodem/usb.sh ]; then
+		. /usr/share/qmodem/usb.sh
+		if qmodem_usb_info >/dev/null 2>&1; then
+			MODEM_PRESENT=1
+			dev="$(qmodem_netdev || true)"
+			[ -n "$dev" ] && MODEM4_DEVS="$(add_word "$MODEM4_DEVS" "$dev")"
+			[ -n "$dev" ] && netdev_exists "$dev" && MODEM_DEVICES="$(add_word "$MODEM_DEVICES" "$dev")"
+		fi
+	fi
+	return 0
+}
+
+read_live_state() {
+	[ "$STATE_READY" = "1" ] && return 0
+
+	local wan_dev_manual modem_dev_manual dev shared mm
+
+	discover_modem_interfaces
+	read_role_state WAN wan wan6
+	read_role_state MODEM "${MODEM_PRIMARY:-__missing_modem__}" "${MODEM6_PRIMARY:-__missing_modem6__}"
+
+	if [ "$MODEM_PRESENT" != "1" ]; then
+		detect_physical_modem
+	fi
+
+	# Manual device mapping overrides automatic discovery for the whole role,
+	# including its IPv6 member.  The previous code only overrode the IPv4 device
+	# and then checked IPv6 readiness against the stale one.
+	wan_dev_manual="$(uci_get h5000m_netmode.settings.wan_device)"
+	modem_dev_manual="$(uci_get h5000m_netmode.settings.modem_device)"
+
+	if [ -n "$wan_dev_manual" ]; then
+		WAN_DEVICES="$wan_dev_manual"
+		WAN_DEVICE="$wan_dev_manual"
+		WAN_DEVICE_SOURCE="manual"
+	else
+		WAN_DEVICES="$(dedup_words "${WAN4_DEVS:-} ${WAN6_DEVS:-}")"
+		WAN_DEVICE="${WAN4_DEVS%% *}"
+		WAN_DEVICE_SOURCE="auto"
+	fi
+	if [ -n "$modem_dev_manual" ]; then
+		MODEM_DEVICES="$modem_dev_manual"
+		MODEM_DEVICE="$modem_dev_manual"
+		MODEM_DEVICE_SOURCE="manual"
+	else
+		MODEM_DEVICES="$(dedup_words "${MODEM4_DEVS:-} ${MODEM6_DEVS:-}")"
+		MODEM_DEVICE="${MODEM4_DEVS%% *}"
+		MODEM_DEVICE_SOURCE="auto"
+	fi
+
+	# Display-only fallback: the raw UCI device is better than an empty string
+	# for the picker in the UI even when the netdev does not exist yet.
+	[ -n "$WAN_DEVICE" ] || WAN_DEVICE="$(section_device_raw "${WAN_SOURCE4:-wan}")"
+	[ -n "$MODEM_DEVICE" ] || MODEM_DEVICE="$(section_device_raw "${MODEM_SOURCE4:-}")"
+
+	# A device claimed by both roles makes every verdict ambiguous.  The wired
+	# side wins (documented behaviour) and the conflict is logged loudly.
+	for dev in $MODEM_DEVICES; do
+		device_matches "$dev" $WAN_DEVICES && shared="$dev"
+	done
+	if [ -n "$shared" ]; then
+		log_note "warning: device $shared is mapped to both exits; treating it as wired WAN"
+	fi
+
+	WAN4_READY=0; WAN6_READY=0; MODEM4_READY=0; MODEM6_READY=0
+	for dev in $WAN_DEVICES; do
+		has_default_route 4 "$dev" && WAN4_READY=1
+		has_default_route 6 "$dev" && WAN6_READY=1
+	done
+	for dev in $MODEM_DEVICES; do
+		has_default_route 4 "$dev" && MODEM4_READY=1
+		has_default_route 6 "$dev" && MODEM6_READY=1
+	done
+
+	WAN6_CAPABLE=0
+	interface_exists wan6 && WAN6_CAPABLE=1
+	MODEM6_CAPABLE=0
+	[ -n "$MODEM6_PRIMARY" ] && interface_exists "$MODEM6_PRIMARY" && MODEM6_CAPABLE=1
+
+	EGRESS4="$(fib_egress 4)"
+	EGRESS6="$(fib_egress 6)"
+	DEFAULT4="$(best_default_route 4)"
+	DEFAULT6="$(best_default_route 6)"
+	ACTIVE4="$(route_owner "$EGRESS4")"
+	ACTIVE6="$(route_owner "$EGRESS6")"
+
+	STATE_READY=1
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# health (diagnostic, opt-in)
+#
+# The probe deliberately targets public anycast resolvers instead of the next
+# hop.  Measured on the H5000M: the cellular uplink passes traffic (0% loss to
+# 223.5.5.5) while its gateway 10.13.35.1 answers 0 of 2 ICMP echoes.  A
+# next-hop probe would therefore report a healthy cellular uplink as dead and
+# provoke a spurious failover, which is why a verdict here never moves traffic.
+# ---------------------------------------------------------------------------
+
+health_targets() {
+	local targets
+	targets="$(uci_get h5000m_netmode.settings.health_targets)"
+	[ -n "$targets" ] || targets="223.5.5.5 1.1.1.1"
+	printf '%s\n' "$targets"
+}
+
+health_check_enabled() {
+	case "$(uci_get h5000m_netmode.settings.health_check)" in
+		1|true|yes|on) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+probe_reachable() {
+	local family="$1" devices="$2" target dev
+
+	for target in $(health_targets); do
+		case "$target" in
+			*:*) [ "$family" = "6" ] || continue ;;
+			*) [ "$family" = "4" ] || continue ;;
+		esac
+		for dev in $devices; do
+			netdev_exists "$dev" || continue
+			ping -c 1 -W 2 -I "$dev" "$target" >/dev/null 2>&1 && return 0
+		done
+	done
+	return 1
+}
+
+refresh_health() {
+	local wan=unknown modem=unknown devices previous
+
+	read_live_state
+
+	if [ "$WAN4_READY" = "1" ]; then
+		devices="$WAN_DEVICES"
+		if probe_reachable 4 "$devices"; then wan=1; else wan=0; fi
+	fi
+	if [ "$MODEM4_READY" = "1" ]; then
+		devices="$MODEM_DEVICES"
+		if probe_reachable 4 "$devices"; then modem=1; else modem=0; fi
+	fi
+
+	umask 077
+	printf 'wan=%s\nmodem=%s\n' "$wan" "$modem" > "${HEALTH_STATE_FILE}.$$" 2>/dev/null || return 0
+	mv -f "${HEALTH_STATE_FILE}.$$" "$HEALTH_STATE_FILE" 2>/dev/null || true
+	previous="$(cat "$HEALTH_STATE_FILE" 2>/dev/null || true)"
+	log_note "health check: wan=$wan modem=$modem"
+	return 0
+}
+
+cached_health() {
+	# cached_health <wan|modem>
+	local value
+	value="$(sed -n "s/^$1=//p" "$HEALTH_STATE_FILE" 2>/dev/null | head -n 1)"
+	case "$value" in
+		1|0) printf '%s\n' "$value" ;;
+		*) printf 'unknown\n' ;;
+	esac
+}
+
+# ---------------------------------------------------------------------------
+# IPv6 alignment - the single writer of the IPv6 default-route state
+# ---------------------------------------------------------------------------
+
+# Decide where the IPv6 default route may live.
+#
+#   IPV6_DESIRED = wan | modem | off | keep
+#
+# `keep` means "there is no IPv4 egress to stay consistent with, so do not touch
+# IPv6".  Every state that would place IPv6 on an exit other than the live IPv4
+# exit resolves to `off`, which disables both managed IPv6 default routes rather
+# than letting IPv6 leak out of the wrong uplink.
+select_ipv6_desired() {
+	case "$ACTIVE4" in
+		wan|modem)
+			IPV6_DESIRED="$ACTIVE4"
+			;;
+		other)
+			case "$ACTIVE6" in
+				wan|modem) IPV6_DESIRED="off" ;;
+				*) IPV6_DESIRED="keep" ;;
+			esac
+			;;
+		*)
+			# No IPv4 default at all: keep following whichever managed exit
+			# currently owns IPv6 instead of flapping between the two.
+			case "$ACTIVE6" in
+				wan|modem) IPV6_DESIRED="$ACTIVE6" ;;
+				*) IPV6_DESIRED="keep" ;;
+			esac
+			;;
+	esac
+
+	# A single-exit policy must not leave IPv6 parked on the exit it disables
+	# while IPv4 has no default route at all.
+	case "$mode" in
+		wan_only)
+			[ "$ACTIVE4" = "none" ] && [ "$IPV6_DESIRED" = "modem" ] && IPV6_DESIRED="off"
+			;;
+		modem_only)
+			[ "$ACTIVE4" = "none" ] && [ "$IPV6_DESIRED" = "wan" ] && IPV6_DESIRED="off"
+			;;
+	esac
+
+	# Capability guard: never point IPv6 at an exit that has no IPv6 interface.
+	case "$IPV6_DESIRED" in
+		wan)
+			if [ "$WAN6_CAPABLE" != "1" ]; then
+				log_note "IPv6 would follow the wired exit but no wan6 interface exists; disabling managed IPv6 to avoid a split egress"
+				IPV6_DESIRED="off"
+			fi
+			;;
+		modem)
+			if [ "$MODEM6_CAPABLE" != "1" ]; then
+				log_note "IPv6 would follow the 5G exit but no modem IPv6 interface exists; disabling managed IPv6 to avoid a split egress"
+				IPV6_DESIRED="off"
+			fi
+			;;
+	esac
+	return 0
+}
+
+set_network_option() {
+	local section="$1" option="$2" value="$3"
+	interface_exists "$section" || return 0
+	uci -q set "network.${section}.${option}=${value}"
+}
+
+set_network_option_if_changed() {
+	local section="$1" option="$2" value="$3" current
+	interface_exists "$section" || return 0
+	current="$(uci_get "network.${section}.${option}")"
+	[ "$current" = "$value" ] && return 0
+	uci -q set "network.${section}.${option}=${value}" || return 1
+	NETWORK_CHANGED=1
+	return 0
+}
+
+apply_ipv6_desired() {
+	local previous
+
+	previous="$(uci_get h5000m_netmode.settings.ipv6_owner)"
+
+	case "$IPV6_DESIRED" in
+		keep)
+			return 0
+			;;
+		wan)
+			NETWORK_CHANGED=0
+			set_network_option_if_changed wan6 defaultroute 1 || return 1
+			set_network_option_if_changed wan6 auto 1 || return 1
+			if [ -n "$MODEM6_PRIMARY" ]; then
+				set_network_option_if_changed "$MODEM6_PRIMARY" defaultroute 0 || return 1
+				set_network_option_if_changed "$MODEM6_PRIMARY" auto 0 || return 1
+			fi
+			;;
+		modem)
+			NETWORK_CHANGED=0
+			set_network_option_if_changed wan6 defaultroute 0 || return 1
+			set_network_option_if_changed wan6 auto 0 || return 1
+			set_network_option_if_changed "$MODEM6_PRIMARY" defaultroute 1 || return 1
+			set_network_option_if_changed "$MODEM6_PRIMARY" auto 1 || return 1
+			;;
+		off)
+			NETWORK_CHANGED=0
+			set_network_option_if_changed wan6 defaultroute 0 || return 1
+			set_network_option_if_changed wan6 auto 0 || return 1
+			if [ -n "$MODEM6_PRIMARY" ]; then
+				set_network_option_if_changed "$MODEM6_PRIMARY" defaultroute 0 || return 1
+				set_network_option_if_changed "$MODEM6_PRIMARY" auto 0 || return 1
+			fi
+			;;
+	esac
+
+	[ "$NETWORK_CHANGED" = "0" ] || uci -q commit network || return 1
+
+	# The owner is persisted so a reboot reproduces the state that is live now,
+	# and so `keep` stays auditable from the status output.
+	if [ "$previous" != "$IPV6_DESIRED" ]; then
+		uci -q set "h5000m_netmode.settings.ipv6_owner=${IPV6_DESIRED}" || return 1
+		uci -q commit h5000m_netmode || return 1
+		log_note "IPv6 exit ${previous:-none}->${IPV6_DESIRED} (active4=${ACTIVE4} active6=${ACTIVE6} mode=${mode})"
+	fi
+
+	# Enforce the live side.  The stale family is always taken down *before* the
+	# new owner is raised, so the two families are never live on different exits
+	# at the same time.  `auto` is written to match, because the kernel only
+	# honours it at boot: within a session netifd needs the explicit ifup/ifdown.
+	# The old code wrote auto=1 from the policy while requesting an ifdown here,
+	# which made netifd resurrect the interface forever.
+	case "$IPV6_DESIRED" in
+		wan)
+			if [ -n "$MODEM6_PRIMARY" ] && [ "$MODEM6_UP" = "1" ]; then
+				ifdown "$MODEM6_PRIMARY" >/dev/null 2>&1 || true
+			fi
+			if [ "$WAN_UP" = "1" ] && [ "$WAN6_UP" != "1" ] && [ "$WAN6_PRESENT" = "1" ]; then
+				ifup wan6 >/dev/null 2>&1 || true
+			fi
+			;;
+		modem)
+			if [ "$WAN6_UP" = "1" ]; then
+				ifdown wan6 >/dev/null 2>&1 || true
+			fi
+			if [ "$MODEM_UP" = "1" ] && [ "$MODEM6_UP" != "1" ] && [ -n "$MODEM6_PRIMARY" ]; then
+				ifup "$MODEM6_PRIMARY" >/dev/null 2>&1 || true
+			fi
+			;;
+		off)
+			[ "$WAN6_UP" != "1" ] || ifdown wan6 >/dev/null 2>&1 || true
+			if [ -n "$MODEM6_PRIMARY" ] && [ "$MODEM6_UP" = "1" ]; then
+				ifdown "$MODEM6_PRIMARY" >/dev/null 2>&1 || true
+			fi
+			;;
+	esac
+
+	return 0
+}
+
+# Hard violation of invariant 2, restricted to the mismatches this service can
+# actually repair (a foreign exit's IPv6 route is not ours to remove; it is
+# reported through `split=` in the status output instead of being retried).
+ipv6_diverged() {
+	case "$ACTIVE4" in
+		wan) [ "$ACTIVE6" = "modem" ] && return 0; return 1 ;;
+		modem) [ "$ACTIVE6" = "wan" ] && return 0; return 1 ;;
+		other)
+			case "$ACTIVE6" in
+				wan|modem) return 0 ;;
+				*) return 1 ;;
+			esac
+			;;
+		*) return 1 ;;
+	esac
+}
+
+# ---------------------------------------------------------------------------
+# daed reload
+# ---------------------------------------------------------------------------
 
 store_daed_exit_state() {
 	local owner="$1" temporary
@@ -155,7 +776,7 @@ reload_daed_on_exit_change() {
 		wan|modem) ;;
 		*)
 			store_daed_exit_state "$current"
-			logger -t "$TAG" "recorded initial daed IPv4 exit=$current"
+			log_note "recorded initial daed IPv4 exit=$current"
 			return 0
 			;;
 	esac
@@ -168,276 +789,107 @@ reload_daed_on_exit_change() {
 	pid="$(pgrep -f '^/usr/bin/daed run([[:space:]]|$)' 2>/dev/null | head -n 1)"
 	if [ -z "$pid" ]; then
 		store_daed_exit_state "$current"
-		logger -t "$TAG" "daed IPv4 exit changed ${previous}->${current}; daemon is not running"
+		log_note "daed IPv4 exit changed ${previous}->${current}; daemon is not running"
 		return 0
 	fi
 	if [ ! -x /etc/init.d/daed ] || ! /etc/init.d/daed restart >/dev/null 2>&1; then
-		logger -t "$TAG" "failed to restart daed after IPv4 exit changed ${previous}->${current}"
+		log_note "failed to restart daed after IPv4 exit changed ${previous}->${current}"
 		return 1
 	fi
 	store_daed_exit_state "$current" || return 1
-	logger -t "$TAG" "restarted daed after IPv4 exit changed ${previous}->${current}"
+	log_note "restarted daed after IPv4 exit changed ${previous}->${current}"
 	return 0
 }
 
-read_live_state() {
-	local modem
-	discover_modem_interfaces
+# ---------------------------------------------------------------------------
+# reconcile
+# ---------------------------------------------------------------------------
 
-	read_interface wan
-	WAN_PRESENT="$IFACE_PRESENT"; WAN_UP="$IFACE_UP"; WAN_AVAILABLE="$IFACE_AVAILABLE"; WAN_DEVICE="$IFACE_DEVICE"
-	read_interface wan6
-	WAN6_PRESENT="$IFACE_PRESENT"; WAN6_UP="$IFACE_UP"; WAN6_AVAILABLE="$IFACE_AVAILABLE"; WAN6_DEVICE="$IFACE_DEVICE"
-	read_interface "${MODEM_PRIMARY:-__missing_modem__}"
-	MODEM_PRESENT="$IFACE_PRESENT"; MODEM_UP="$IFACE_UP"; MODEM_AVAILABLE="$IFACE_AVAILABLE"; MODEM_DEVICE="$IFACE_DEVICE"
-	read_interface "${MODEM6_PRIMARY:-__missing_modem6__}"
-	MODEM6_PRESENT="$IFACE_PRESENT"; MODEM6_UP="$IFACE_UP"; MODEM6_AVAILABLE="$IFACE_AVAILABLE"; MODEM6_DEVICE="$IFACE_DEVICE"
+reconcile_body() {
+	invalidate_state
+	read_live_state
+	select_ipv6_desired
+	apply_ipv6_desired
+}
 
-	# Override with manual device mapping from UCI
-	local wan_dev_manual modem_dev_manual
-	wan_dev_manual="$(uci -q get h5000m_netmode.settings.wan_device 2>/dev/null || true)"
-	modem_dev_manual="$(uci -q get h5000m_netmode.settings.modem_device 2>/dev/null || true)"
-	[ -n "$wan_dev_manual" ] && WAN_DEVICE="$wan_dev_manual"
-	[ -n "$modem_dev_manual" ] && MODEM_DEVICE="$modem_dev_manual"
+run_reconcile() {
+	local retried=0
 
-	# If no modem interface was found in UCI, try to detect the physical
-	# 5G modem device through the MT5700M manager or any known USB helper.
-	# This treats the modem as "present" (just disconnected) rather than
-	# "not configured", giving clearer status in the dashboard.
-	if [ "$MODEM_PRESENT" != "1" ]; then
-		if [ -r /usr/share/mt5700m/usb.sh ]; then
-			. /usr/share/mt5700m/usb.sh
-			if mt5700m_usb_info >/dev/null 2>&1; then
-				MODEM_PRESENT=1
-				MODEM_DEVICE="$(mt5700m_netdev || true)"
-				if [ -n "$MODEM_DEVICE" ] && [ -d "/sys/class/net/${MODEM_DEVICE}" ]; then
-					ip -4 addr show dev "$MODEM_DEVICE" 2>/dev/null | grep -q 'inet ' && MODEM_UP=1
-				fi
-			fi
-		elif [ -r /usr/share/qmodem/usb.sh ]; then
-			. /usr/share/qmodem/usb.sh
-			if qmodem_usb_info >/dev/null 2>&1; then
-				MODEM_PRESENT=1
-				MODEM_DEVICE="$(qmodem_netdev || true)"
-				if [ -n "$MODEM_DEVICE" ] && [ -d "/sys/class/net/${MODEM_DEVICE}" ]; then
-					ip -4 addr show dev "$MODEM_DEVICE" 2>/dev/null | grep -q 'inet ' && MODEM_UP=1
-				fi
-			fi
+	reconcile_body || return 1
+
+	# One corrective pass.  netifd can re-add a route right after an interface is
+	# torn down, and a freshly raised owner needs a moment before its address
+	# appears in the FIB.
+	invalidate_state
+	read_live_state
+	if ipv6_diverged; then
+		log_note "IPv4/IPv6 still diverge (active4=${ACTIVE4} active6=${ACTIVE6}); retrying alignment"
+		sleep 1
+		reconcile_body || return 1
+		retried=1
+		invalidate_state
+		read_live_state
+		if ipv6_diverged; then
+			log_note "IPv4/IPv6 still diverge after the corrective pass (active4=${ACTIVE4} active6=${ACTIVE6})"
 		fi
 	fi
 
-	DEFAULT4="$(ip -4 route show default 2>/dev/null | head -n 1)"
-	DEFAULT6="$(ip -6 route show default 2>/dev/null | head -n 1)"
-	ACTIVE4="$(route_owner "$(route_device "$DEFAULT4")")"
-	ACTIVE6="$(route_owner "$(route_device "$DEFAULT6")")"
-	WAN4_READY=0; WAN6_READY=0; MODEM4_READY=0; MODEM6_READY=0
-	has_default_route 4 "$WAN_DEVICE" && WAN4_READY=1
-	has_default_route 6 "${WAN6_DEVICE:-$WAN_DEVICE}" && WAN6_READY=1
-	has_default_route 4 "$MODEM_DEVICE" && MODEM4_READY=1
-	has_default_route 6 "${MODEM6_DEVICE:-$MODEM_DEVICE}" && MODEM6_READY=1
-}
-
-print_status() {
-	local modem_metric ipv6_owner
-
-	read_live_state
-	ipv6_owner="$(uci -q get h5000m_netmode.settings.ipv6_owner || true)"
-	modem_metric="$(uci -q get network.MT5700M.metric 2>/dev/null || uci -q get mt5700m.connection.metric 2>/dev/null || true)"
-
-	echo "mode=$mode"
-	echo "ipv6_policy=follow_preferred"
-	echo "ipv6_owner=${ipv6_owner:-none}"
-	echo "wan_present=$WAN_PRESENT"
-	echo "wan_up=$WAN_UP"
-	echo "wan6_up=$WAN6_UP"
-	echo "wan4_ready=$WAN4_READY"
-	echo "wan6_ready=$WAN6_READY"
-	echo "wan_device=$WAN_DEVICE"
-	echo "modem_present=$MODEM_PRESENT"
-	echo "modem_up=$MODEM_UP"
-	echo "modem6_up=$MODEM6_UP"
-	echo "modem4_ready=$MODEM4_READY"
-	echo "modem6_ready=$MODEM6_READY"
-	echo "modem_device=$MODEM_DEVICE"
-	echo "modem_interface=$MODEM_PRIMARY"
-	echo "modem6_interface=$MODEM6_PRIMARY"
-	echo "active4=$ACTIVE4"
-	echo "active6=$ACTIVE6"
-	echo "daed_exit_state=$(cat "$DAED_EXIT_STATE_FILE" 2>/dev/null || echo none)"
-	echo "eth_fallback=$(uci -q get h5000m_netmode.settings.eth_fallback || true)"
-	echo "wan_metric=$(uci -q get network.wan.metric || true)"
-	echo "wan6_metric=$(uci -q get network.wan6.metric || true)"
-	echo "usb_metric=$(uci -q get "network.${MODEM_PRIMARY}.metric" || true)"
-	echo "usbv6_metric=$(uci -q get "network.${MODEM6_PRIMARY}.metric" || true)"
-	echo "wan_defaultroute=$(uci -q get network.wan.defaultroute || echo 1)"
-	echo "wan6_defaultroute=$(uci -q get network.wan6.defaultroute || echo 1)"
-	echo "wan6_auto=$(uci -q get network.wan6.auto || echo 1)"
-	echo "usb_defaultroute=$(uci -q get "network.${MODEM_PRIMARY}.defaultroute" || echo 1)"
-	echo "usbv6_defaultroute=$(uci -q get "network.${MODEM6_PRIMARY}.defaultroute" || echo 1)"
-	echo "usbv6_auto=$(uci -q get "network.${MODEM6_PRIMARY}.auto" || echo 1)"
-	echo "modem_metric=$modem_metric"
-	echo "default4=$DEFAULT4"
-	echo "default6=$DEFAULT6"
-}
-
-set_network_option() {
-	local section="$1" option="$2" value="$3"
-	interface_exists "$section" || return 0
-	uci -q set "network.${section}.${option}=${value}"
-}
-
-set_network_option_if_changed() {
-	local section="$1" option="$2" value="$3" current
-	interface_exists "$section" || return 0
-	current="$(uci -q get "network.${section}.${option}" || true)"
-	[ "$current" = "$value" ] && return 0
-	uci -q set "network.${section}.${option}=${value}" || return 1
-	NETWORK_CHANGED=1
-}
-
-select_ipv6_owner() {
-	read_live_state
-	case "$mode" in
-		wan_only) IPV6_OWNER="wan" ;;
-		modem_only) IPV6_OWNER="modem" ;;
-		wan_first|modem_first)
-			case "$ACTIVE4" in
-				wan|modem) IPV6_OWNER="$ACTIVE4" ;;
-				*) [ "$mode" = "modem_first" ] && IPV6_OWNER="modem" || IPV6_OWNER="wan" ;;
-			esac
-		;;
-	esac
-}
-
-align_ipv6_to_active4() {
-	local previous_owner
-
-	select_ipv6_owner
-	previous_owner="$(uci -q get h5000m_netmode.settings.ipv6_owner || true)"
-	NETWORK_CHANGED=0
-
-	case "$IPV6_OWNER" in
-		modem)
-			set_network_option_if_changed wan6 defaultroute 0 || return 1
-			set_network_option_if_changed wan6 auto 0 || return 1
-			[ -n "$MODEM6_PRIMARY" ] && set_network_option_if_changed "$MODEM6_PRIMARY" defaultroute 1 || true
-			[ -n "$MODEM6_PRIMARY" ] && set_network_option_if_changed "$MODEM6_PRIMARY" auto 1 || true
-			;;
-		*)
-			IPV6_OWNER="wan"
-			set_network_option_if_changed wan6 defaultroute 1 || return 1
-			set_network_option_if_changed wan6 auto 1 || return 1
-			[ -n "$MODEM6_PRIMARY" ] && set_network_option_if_changed "$MODEM6_PRIMARY" defaultroute 0 || true
-			[ -n "$MODEM6_PRIMARY" ] && set_network_option_if_changed "$MODEM6_PRIMARY" auto 0 || true
-			;;
-	esac
-
-	if [ "$previous_owner" != "$IPV6_OWNER" ]; then
-		uci -q set "h5000m_netmode.settings.ipv6_owner=${IPV6_OWNER}" || return 1
-		uci -q commit h5000m_netmode || return 1
-	fi
-	[ "$NETWORK_CHANGED" = "0" ] || uci -q commit network || return 1
-
-	case "$IPV6_OWNER" in
-		modem)
-			[ "$WAN6_UP" != "1" ] || ifdown wan6 >/dev/null 2>&1 || true
-			if [ "$MODEM_UP" = "1" ] && [ "$MODEM6_UP" != "1" ] && [ -n "$MODEM6_PRIMARY" ]; then
-				ifup "$MODEM6_PRIMARY" >/dev/null 2>&1 || true
-			fi
-			;;
-		wan)
-			[ "$MODEM6_UP" != "1" ] || ifdown "$MODEM6_PRIMARY" >/dev/null 2>&1 || true
-			if [ "$WAN_UP" = "1" ] && [ "$WAN6_UP" != "1" ]; then
-				ifup wan6 >/dev/null 2>&1 || true
-			fi
-			;;
-	esac
-
-	if [ "$previous_owner" != "$IPV6_OWNER" ]; then
-		logger -t "$TAG" "IPv6 owner changed ${previous_owner:-none}->${IPV6_OWNER} active4=${ACTIVE4} mode=${mode}"
+	if health_check_enabled; then
+		refresh_health
 	fi
 	return 0
 }
 
-acquire_lock() {
-	local owner
-	if mkdir "$LOCK_DIR" 2>/dev/null; then
-		echo "$$" > "$LOCK_DIR/pid"
-		return 0
-	fi
-	owner="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-	case "$owner" in
-		''|*[!0-9]*) owner="" ;;
-	esac
-	if [ -z "$owner" ] || ! kill -0 "$owner" 2>/dev/null; then
-		rm -rf "$LOCK_DIR" 2>/dev/null
-		mkdir "$LOCK_DIR" 2>/dev/null || return 1
-		echo "$$" > "$LOCK_DIR/pid"
-		return 0
-	fi
-	return 1
-}
-
-release_lock() {
-	rm -rf "$LOCK_DIR" 2>/dev/null
-}
+# ---------------------------------------------------------------------------
+# policy application
+# ---------------------------------------------------------------------------
 
 apply_policy() {
-	local wan_metric modem_metric wan4_defaultroute wan6_defaultroute modem4_defaultroute modem6_defaultroute wan6_auto modem6_auto modem section device
+	local wan_metric modem_metric wan4_defaultroute modem4_defaultroute section device
 
 	discover_modem_interfaces
 
 	case "$mode" in
 		modem_first)
 			wan_metric=50; modem_metric=10
-			wan4_defaultroute=1; wan6_defaultroute=0
-			modem4_defaultroute=1; modem6_defaultroute=1
-			wan6_auto=0; modem6_auto=1
+			wan4_defaultroute=1; modem4_defaultroute=1
 			;;
 		wan_only)
 			wan_metric=10; modem_metric=50
-			wan4_defaultroute=1; wan6_defaultroute=1
-			modem4_defaultroute=0; modem6_defaultroute=0
-			wan6_auto=1; modem6_auto=0
+			wan4_defaultroute=1; modem4_defaultroute=0
 			;;
 		modem_only)
 			wan_metric=50; modem_metric=10
-			wan4_defaultroute=0; wan6_defaultroute=0
-			modem4_defaultroute=1; modem6_defaultroute=1
-			wan6_auto=0; modem6_auto=1
+			wan4_defaultroute=0; modem4_defaultroute=1
 			;;
 		*)
 			mode=wan_first
 			wan_metric=10; modem_metric=50
-			wan4_defaultroute=1; wan6_defaultroute=1
-			modem4_defaultroute=1; modem6_defaultroute=0
-			wan6_auto=1; modem6_auto=0
+			wan4_defaultroute=1; modem4_defaultroute=1
 			;;
 	esac
 
-	# Preserve eth_fallback across policy changes.
-	local saved_fallback
-	saved_fallback="$(uci -q get h5000m_netmode.settings.eth_fallback || true)"
-	uci -q set h5000m_netmode.settings='settings' || return 1
+	# Only the IPv4 side and the metrics are written here.  The IPv6
+	# default-route state belongs exclusively to apply_ipv6_desired: two writers
+	# racing over `auto` produced an interface that netifd kept restarting while
+	# reconcile kept stopping it.
+	uci -q get h5000m_netmode.settings >/dev/null 2>&1 || \
+		uci -q set h5000m_netmode.settings='settings' || return 1
 	uci -q set "h5000m_netmode.settings.mode=${mode}" || return 1
-	[ -n "$saved_fallback" ] && uci -q set "h5000m_netmode.settings.eth_fallback=${saved_fallback}" || true
 	uci -q commit h5000m_netmode || return 1
 
 	set_network_option wan metric "$wan_metric" || return 1
 	set_network_option wan6 metric "$wan_metric" || return 1
 	set_network_option wan norelease 1 || return 1
 	set_network_option wan defaultroute "$wan4_defaultroute" || return 1
-	set_network_option wan6 defaultroute "$wan6_defaultroute" || return 1
-	set_network_option wan6 auto "$wan6_auto" || return 1
 	for section in $MODEM_SECTIONS; do
 		set_network_option "$section" metric "$modem_metric" || return 1
-		device="$(uci -q get "network.${section}.device" || uci -q get "network.${section}.ifname" || true)"
-		if [ "$section" = "$MODEM6_PRIMARY" ] || [ "$device" = "@${MODEM_PRIMARY}" ]; then
-			set_network_option "$section" defaultroute "$modem6_defaultroute" || return 1
-			set_network_option "$section" auto "$modem6_auto" || return 1
-		else
-			set_network_option "$section" defaultroute "$modem4_defaultroute" || return 1
-		fi
+		# The IPv6 member of the modem must never carry an IPv4 default route.
+		[ "$section" = "$MODEM6_PRIMARY" ] && continue
+		case "$(section_device_raw "$section")" in
+			"@${MODEM_PRIMARY}") continue ;;
+		esac
+		set_network_option "$section" defaultroute "$modem4_defaultroute" || return 1
 	done
 	uci -q commit network || return 1
 
@@ -448,15 +900,207 @@ apply_policy() {
 	return 0
 }
 
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+
+print_status() {
+	local ipv6_owner split watcher modem_metric
+
+	read_live_state
+	select_ipv6_desired
+
+	ipv6_owner="$(uci_get h5000m_netmode.settings.ipv6_owner)"
+	split=0
+	if [ -n "$EGRESS4" ] && [ -n "$EGRESS6" ] && [ "$EGRESS4" != "$EGRESS6" ]; then
+		split=1
+	fi
+
+	if pgrep -f 'h5000m-netmode watch' >/dev/null 2>&1; then
+		watcher="on"
+	else
+		watcher="off"
+	fi
+
+	modem_metric="$(uci_get network.MT5700M.metric)"
+	[ -n "$modem_metric" ] || modem_metric="$(uci_get mt5700m.connection.metric)"
+
+	echo "mode=$mode"
+	echo "ipv6_policy=follow_active4"
+	echo "ipv6_owner=${ipv6_owner:-none}"
+	echo "ipv6_desired=$IPV6_DESIRED"
+	echo "ipv6_capable_wan=$WAN6_CAPABLE"
+	echo "ipv6_capable_modem=$MODEM6_CAPABLE"
+
+	echo "wan_present=$WAN_PRESENT"
+	echo "wan_available=$WAN_AVAILABLE"
+	echo "wan_pending=$WAN_PENDING"
+	echo "wan_carrier=$WAN_CARRIER"
+	echo "wan_up=$WAN_UP"
+	echo "wan6_up=${WAN6_UP:-0}"
+	echo "wan4_ready=$WAN4_READY"
+	echo "wan6_ready=$WAN6_READY"
+	echo "wan_device=$WAN_DEVICE"
+	echo "wan_devices=$WAN_DEVICES"
+	echo "wan_device_source=$WAN_DEVICE_SOURCE"
+
+	echo "modem_present=$MODEM_PRESENT"
+	echo "modem_available=$MODEM_AVAILABLE"
+	echo "modem_pending=$MODEM_PENDING"
+	echo "modem_carrier=$MODEM_CARRIER"
+	echo "modem_up=$MODEM_UP"
+	echo "modem6_up=${MODEM6_UP:-0}"
+	echo "modem4_ready=$MODEM4_READY"
+	echo "modem6_ready=$MODEM6_READY"
+	echo "modem_device=$MODEM_DEVICE"
+	echo "modem_devices=$MODEM_DEVICES"
+	echo "modem_device_source=$MODEM_DEVICE_SOURCE"
+	echo "modem_interface=$MODEM_PRIMARY"
+	echo "modem6_interface=$MODEM6_PRIMARY"
+
+	echo "egress4=${EGRESS4:-none}"
+	echo "egress6=${EGRESS6:-none}"
+	echo "active4=$ACTIVE4"
+	echo "active6=$ACTIVE6"
+	echo "split=$split"
+	echo "default4=$DEFAULT4"
+	echo "default6=$DEFAULT6"
+
+	echo "daed_exit_state=$(cat "$DAED_EXIT_STATE_FILE" 2>/dev/null || echo none)"
+	echo "watcher=$watcher"
+	if health_check_enabled; then
+		echo "health_check=1"
+	else
+		echo "health_check=0"
+	fi
+	echo "wan_health=$(cached_health wan)"
+	echo "modem_health=$(cached_health modem)"
+
+	echo "eth_fallback=$(uci_get h5000m_netmode.settings.eth_fallback)"
+	echo "wan_metric=$(uci_get network.wan.metric)"
+	echo "wan6_metric=$(uci_get network.wan6.metric)"
+	echo "usb_metric=$(uci_get "network.${MODEM_PRIMARY}.metric")"
+	echo "usbv6_metric=$(uci_get "network.${MODEM6_PRIMARY}.metric")"
+	echo "wan_defaultroute=$(uci_get network.wan.defaultroute)"
+	echo "wan6_defaultroute=$(uci_get network.wan6.defaultroute)"
+	echo "wan6_auto=$(uci_get network.wan6.auto)"
+	echo "usb_defaultroute=$(uci_get "network.${MODEM_PRIMARY}.defaultroute")"
+	echo "usbv6_defaultroute=$(uci_get "network.${MODEM6_PRIMARY}.defaultroute")"
+	echo "usbv6_auto=$(uci_get "network.${MODEM6_PRIMARY}.auto")"
+	echo "modem_metric=$modem_metric"
+}
+
+# ---------------------------------------------------------------------------
+# locking
+# ---------------------------------------------------------------------------
+
+acquire_lock() {
+	local wait_s owner waited=0
+
+	wait_s="$(number_or "${1:-0}" 0)"
+
+	while :; do
+		if mkdir "$LOCK_DIR" 2>/dev/null; then
+			echo "$$" > "$LOCK_DIR/pid"
+			return 0
+		fi
+
+		owner="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+		case "$owner" in
+			''|*[!0-9]*) owner="" ;;
+		esac
+		if [ -z "$owner" ] || ! kill -0 "$owner" 2>/dev/null; then
+			rm -rf "$LOCK_DIR" 2>/dev/null
+			continue
+		fi
+
+		[ "$waited" -lt "$wait_s" ] || return 1
+		sleep 1
+		waited=$((waited + 1))
+	done
+}
+
+release_lock() {
+	rm -rf "$LOCK_DIR" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# watch (procd-managed watchdog)
+# ---------------------------------------------------------------------------
+
+watch_interval() {
+	local interval
+	interval="$(number_or "$(uci_get h5000m_netmode.settings.watch_interval)" 10)"
+	[ "$interval" -ge 3 ] || interval=3
+	[ "$interval" -le 3600 ] || interval=3600
+	printf '%s\n' "$interval"
+}
+
+run_watch() {
+	local interval
+	interval="$(watch_interval)"
+	log_note "watcher started, interval=${interval}s"
+
+	# Bring the invariant in line immediately, then re-check on a fixed cadence.
+	# A hotplug event that arrives while another run holds the lock is queued
+	# rather than dropped, but a genuinely lost event is still recovered within
+	# one interval.
+	"$SELF" reconcile >/dev/null 2>&1 || true
+
+	while :; do
+		sleep "$interval"
+		"$SELF" reconcile >/dev/null 2>&1 || true
+	done
+}
+
+# ---------------------------------------------------------------------------
+# dispatch
+# ---------------------------------------------------------------------------
+
 normalize_mode
 action="${1:-}"
+LOCK_WAIT=0
+
 case "$action" in
 	status)
+		LOGGING=0
 		print_status
 		exit 0
 		;;
+	iface-role)
+		# Single source of truth for hotplug: classify a section exactly the way
+		# the state reader does, so a modem whose section lacks the qmodem
+		# `modem_config` marker still triggers a reconcile.
+		case "${2:-}" in
+			''|*[!a-zA-Z0-9_.@-]*) exit 64 ;;
+		esac
+		discover_modem_interfaces
+		case "$2" in
+			wan|wan6) echo wan ;;
+			loopback|lan) echo other ;;
+			*)
+				case " $MODEM_SECTIONS " in
+					*" $2 "*) echo modem ;;
+					*) echo other ;;
+				esac
+				;;
+		esac
+		exit 0
+		;;
+	list-devices)
+		ip link show 2>/dev/null | sed -n 's/^[0-9]*: \([eu][ths][b0-9a-zA-Z.]*\):.*/\1/p' | sort -V
+		exit 0
+		;;
+	get-device-map)
+		read_live_state
+		echo "wan=$WAN_DEVICE"
+		echo "modem=$MODEM_DEVICE"
+		echo "wan_source=$WAN_DEVICE_SOURCE"
+		echo "modem_source=$MODEM_DEVICE_SOURCE"
+		exit 0
+		;;
 	eth-candidates)
-		uci -q show network 2>/dev/null | sed -n 's/^network\.\([^.]*\)=interface$/\1/p' | while IFS= read -r section; do
+		all_interface_sections | while IFS= read -r section; do
 			case "$section" in wan|wan6|loopback|lan) continue ;; esac
 			printf '%s\n' "$section"
 		done
@@ -464,15 +1108,12 @@ case "$action" in
 		;;
 	eth-fallback)
 		case "${2:-}" in
-			set)
-				shift 2
-				uci -q set "h5000m_netmode.settings.eth_fallback=${*}" || exit 1
-				uci -q commit h5000m_netmode || exit 1
+			get)
+				uci_get h5000m_netmode.settings.eth_fallback
 				exit 0
 				;;
-			get)
-				uci -q get h5000m_netmode.settings.eth_fallback || true
-				exit 0
+			set)
+				[ $# -ge 3 ] || { echo "Usage: $0 eth-fallback set <sections>" >&2; exit 64; }
 				;;
 			*)
 				echo "Usage: $0 eth-fallback {set <sections>|get}" >&2
@@ -480,33 +1121,13 @@ case "$action" in
 				;;
 		esac
 		;;
-	list-devices)
-		ip link show 2>/dev/null | sed -n "s/^[0-9]*: \([eu][ths][b0-9a-zA-Z]*\):.*/\1/p" | sort -V
+	health)
+		refresh_health
+		echo "wan=$(cached_health wan)"
+		echo "modem=$(cached_health modem)"
+		echo "wan_devices=$WAN_DEVICES"
+		echo "modem_devices=$MODEM_DEVICES"
 		exit 0
-		;;
-	get-device-map)
-		w=$(uci -q get h5000m_netmode.settings.wan_device 2>/dev/null)
-		[ -n "$w" ] || w=$(uci -q get "network.wan.device" 2>/dev/null || uci -q get "network.wan.ifname" 2>/dev/null || echo eth1)
-		m=$(uci -q get h5000m_netmode.settings.modem_device 2>/dev/null)
-		[ -n "$m" ] || m=eth2
-		echo "wan=$w"
-		echo "modem=$m"
-		exit 0
-		;;
-	set-device-map)
-		case "${2:-}" in
-			wan|modem)
-				dev="${3:-}"
-				[ -n "$dev" ] || { echo "Usage: $0 set-device-map {wan|modem} <device>" >&2; exit 64; }
-				uci -q set "h5000m_netmode.settings.${2}_device=${dev}" || exit 1
-				uci -q commit h5000m_netmode || exit 1
-				exit 0
-				;;
-			*)
-				echo "Usage: $0 set-device-map {wan|modem} <device>" >&2
-				exit 64
-				;;
-		esac
 		;;
 	set)
 		case "${2:-}" in
@@ -514,51 +1135,96 @@ case "$action" in
 			*) echo "invalid exit policy" >&2; exit 64 ;;
 		esac
 		;;
-	reconcile) ;;
+	set-device-map)
+		case "${2:-}" in
+			wan|modem) ;;
+			*)
+				echo "Usage: $0 set-device-map {wan|modem} <device>" >&2
+				exit 64
+				;;
+		esac
+		[ -n "${3:-}" ] || { echo "Usage: $0 set-device-map {wan|modem} <device>" >&2; exit 64; }
+		;;
+	watch)
+		run_watch
+		exit 0
+		;;
+	reconcile)
+		LOCK_WAIT="$(number_or "${H5000M_LOCK_WAIT:-}" "$DEFAULT_RECONCILE_WAIT")"
+		;;
 	apply|'') ;;
-	*) echo "Usage: $0 {status|apply|reconcile|set MODE|eth-fallback|eth-candidates}" >&2; exit 64 ;;
+	*)
+		echo "Usage: $0 {status|apply|reconcile|watch|set MODE|iface-role SECTION|health|list-devices|get-device-map|set-device-map|eth-candidates|eth-fallback}" >&2
+		exit 64
+		;;
 esac
 
-if ! acquire_lock; then
+# Every mutating action is serialised.  `set-device-map` used to run outside the
+# lock, and UCI rewrites the whole config file on every `uci set`, so a mapping
+# saved while a mode change was in flight could be silently overwritten.
+if ! acquire_lock "$LOCK_WAIT"; then
 	echo "another exit policy update is already running" >&2
 	exit 2
 fi
 trap release_lock EXIT INT TERM
 
-if [ "$action" = "reconcile" ]; then
-	if ! align_ipv6_to_active4; then
-		logger -t "$TAG" "failed to align IPv6 with the active IPv4 exit"
-		exit 1
-	fi
-	if ! reload_daed_on_exit_change; then
-		exit 1
-	fi
-	exit 0
-fi
+case "$action" in
+	eth-fallback)
+		shift 2
+		uci -q set "h5000m_netmode.settings.eth_fallback=$*" || exit 1
+		uci -q commit h5000m_netmode || exit 1
+		log_note "eth_fallback=$*"
+		exit 0
+		;;
+	set-device-map)
+		dev="${3:-}"
+		netdev_exists "$dev" || log_note "warning: $dev is not present in /sys/class/net"
+		uci -q set "h5000m_netmode.settings.${2}_device=${dev}" || exit 1
+		uci -q commit h5000m_netmode || exit 1
+		log_note "manual device map ${2}=${dev}"
+		exit 0
+		;;
+	reconcile)
+		if ! run_reconcile; then
+			log_note "failed to reconcile the exit state"
+			exit 1
+		fi
+		exit 0
+		;;
+esac
 
 if ! apply_policy; then
-	logger -t "$TAG" "failed to persist exit policy mode=$mode"
+	log_note "failed to persist exit policy mode=$mode"
 	echo "failed to persist exit policy" >&2
 	exit 1
 fi
 
 if [ "$action" = "apply" ] || [ "$action" = "set" ]; then
 	if ! /etc/init.d/network reload >/dev/null 2>&1; then
-		logger -t "$TAG" "network reload failed after applying mode=$mode"
+		log_note "network reload failed after applying mode=$mode"
 		echo "network reload failed" >&2
 		exit 1
 	fi
 	# Reconcile the dedicated manager after netifd recreates the interfaces.
 	if [ -x /usr/sbin/mt5700m-manager ] && ! /usr/sbin/mt5700m-manager sync >/dev/null 2>&1; then
-		logger -t "$TAG" "MT5700M manager sync failed after applying mode=$mode"
+		log_note "MT5700M manager sync failed after applying mode=$mode"
 		echo "MT5700M manager sync failed" >&2
 		exit 1
 	fi
-	# Route both address families through the same live exit. In priority modes
-	# this also enables IPv6 on the backup only after IPv4 has failed over.
+	# Give netifd a moment to install the fresh routes before deciding which
+	# family is live; the alignment result is verified inside run_reconcile.
 	sleep 1
-	align_ipv6_to_active4 || true
-	logger -t "$TAG" "applied exit policy mode=$mode"
+fi
+
+if ! reconcile_body; then
+	log_note "failed to align the IPv6 exit with the live IPv4 exit"
+fi
+if health_check_enabled; then
+	refresh_health
+fi
+
+if [ "$action" = "apply" ] || [ "$action" = "set" ]; then
+	log_note "applied exit policy mode=$mode"
 fi
 
 if ! reload_daed_on_exit_change; then

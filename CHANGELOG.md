@@ -2,6 +2,38 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.5.0] — 2026-09-14
+
+本次发布修正了出口判定、IPv6 对齐与界面交互中的若干实质缺陷。根因分析与排查手法见 [FIXES.md](FIXES.md)。
+
+### 新增
+
+- 新增 procd 看门狗服务 `/etc/init.d/h5000m-netmode`：周期重算出口状态，覆盖 Hotplug 无法感知的场景（锁竞争期间丢失的事件、其他管理器改动默认路由、接口 proto-up 但路由消失）；稳定配置下不产生任何写入
+- 后端新增 `watch` 子命令（看门狗主体）与 `iface-role <section>` 子命令（Hotplug 分类的唯一来源）
+- 后端新增 `health` 子命令与可选的链路健康探测，探测目标为公共 anycast 地址而非下一跳
+- UCI 新增 `watcher`、`watch_interval`、`health_check` 三个配置项
+- 前端新增「仅用此出口」独立控件、「对齐出口」按钮，以及看门狗与健康探测的运行状态显示
+- 新增 `tests/run_tests.sh` 与 `tests/mockbin/*`：135 项断言的确定性测试，可在设备上的 BusyBox ash 与 CI 的 dash 下运行
+
+### 变更
+
+- 出口判定改用 FIB 查询（`ip route get`）并用最低 metric 选路，取代只读 main 表且依赖路由 dump 顺序的旧写法
+- IPv6 对齐改为单一写者（`apply_ipv6_desired`），切换时先拆除旧族默认路由再建立新族
+- Hotplug 脚本不再自行判断 section 类型，改为委托后端，消除两处分类逻辑漂移导致的漏触发
+- 接口通断判定改为分级（`available` / `pending` / `up`），网卡 carrier 仅作参考信号
+- 所有写动作（含 `set-device-map`）纳入同一把锁串行执行
+- 单击出口卡片改为「设为首选并保留备用」，不再降级为 only 模式
+- 设备下拉框的未提交编辑不再被状态轮询覆盖
+
+### 修复
+
+- 修复策略路由（mwan3 / qmodem / VPN / daed）环境下默认出口判定错误的问题
+- 修复 netifd 返回符号设备引用（如 `@2_1`）导致 IPv6 出口判定失真的问题
+- 修复 IPv4 与 IPv6 可能走不同出口造成双栈分流的问题
+- 修复模组 section 缺少标识字段时不触发 Hotplug 重算的问题
+- 修复单击卡片即禁用备用链路导致的误触发
+- 修复接口协商期间被误报为「已断开」的问题
+
 ## [v1.4.0] — 2026-08-04
 
 ### 新增

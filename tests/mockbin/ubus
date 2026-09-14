@@ -1,0 +1,22 @@
+#!/bin/sh
+# Mock of `ubus` for network interface status queries.
+#   $H5_SCEN/ubus/<section>.json  -> `ubus call network.interface.<section> status`
+scen="${H5_SCEN:?H5_SCEN not set}"
+
+case "${1:-}" in
+	call)
+		case "${2:-}" in
+			network.interface.*)
+				name="${2#network.interface.}"
+				f="$scen/ubus/$name.json"
+				[ -f "$f" ] || exit 1
+				while IFS= read -r line || [ -n "$line" ]; do
+					printf '%s\n' "$line"
+				done < "$f"
+				exit 0
+				;;
+			*) exit 1 ;;
+		esac
+		;;
+	*) exit 1 ;;
+esac

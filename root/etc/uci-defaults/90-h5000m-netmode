@@ -1,5 +1,30 @@
 #!/bin/sh
+#
+# First-install defaults and one-shot migration, executed once per package
+# install / first boot.
 
+# Keep the settings section usable even if an older config only carried `mode`.
+uci -q get h5000m_netmode.settings >/dev/null 2>&1 || \
+	uci -q set h5000m_netmode.settings='settings'
+
+# The watchdog is opt-out: settings.watcher=0 stops the service from registering.
+uci -q get h5000m_netmode.settings.watcher >/dev/null 2>&1 || \
+	uci -q set h5000m_netmode.settings.watcher='1'
+uci -q get h5000m_netmode.settings.watch_interval >/dev/null 2>&1 || \
+	uci -q set h5000m_netmode.settings.watch_interval='10'
+
+# Health probing is opt-in.  A cellular gateway can drop every ICMP echo while
+# passing traffic normally (measured on the H5000M), so a probe result is
+# diagnostic only and must never be switched on without the operator asking.
+uci -q get h5000m_netmode.settings.health_check >/dev/null 2>&1 || \
+	uci -q set h5000m_netmode.settings.health_check='0'
+
+uci -q commit h5000m_netmode
+
+# Write the policy once so a fresh install starts from a consistent configuration
+# instead of waiting for the first hotplug event.
 /usr/sbin/h5000m-netmode >/dev/null 2>&1 || true
+
+[ -x /etc/init.d/h5000m-netmode ] && /etc/init.d/h5000m-netmode enable >/dev/null 2>&1
 
 exit 0

@@ -1,0 +1,38 @@
+#!/bin/sh /etc/rc.common
+#
+# Periodic re-evaluation of the "IPv4 and IPv6 share one exit" invariant.
+#
+# Hotplug covers interface up/down transitions.  This watchdog covers everything
+# hotplug cannot see: an event lost while another run held the lock, a default
+# route installed or removed by another manager, an interface that stays proto-up
+# while its route disappears.  reconcile only writes when the observed state
+# deviates from the required state, so a steady configuration costs two short
+# command runs per interval and nothing else.
+#
+# Disable with: uci set h5000m_netmode.settings.watcher=0 && uci commit
+
+START=95
+STOP=10
+USE_PROCD=1
+
+start_service() {
+	local enabled
+
+	enabled="$(uci -q get h5000m_netmode.settings.watcher 2>/dev/null)"
+	case "$enabled" in
+		0|off|false|no) return 0 ;;
+	esac
+
+	procd_open_instance
+	procd_set_param command /usr/sbin/h5000m-netmode watch
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 0
+	procd_set_param stderr 0
+	procd_set_param nice 10
+	procd_close_instance
+}
+
+reload_service() {
+	stop
+	start
+}

@@ -1,2 +1,5 @@
 config settings 'settings'
 	option mode 'wan_first'
+	option watcher '1'
+	option watch_interval '10'
+	option health_check '0'

@@ -1,0 +1,11 @@
+#!/bin/sh
+# Mock of `pgrep`.  A scenario declares running processes in $H5_SCEN/pgrep.out;
+# its absence means "nothing matches".
+scen="${H5_SCEN:?H5_SCEN not set}"
+if [ -s "$scen/pgrep.out" ]; then
+	while IFS= read -r line || [ -n "$line" ]; do
+		printf '%s\n' "$line"
+	done < "$scen/pgrep.out"
+	exit 0
+fi
+exit 1

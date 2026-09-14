@@ -1,22 +1,31 @@
 #!/bin/sh
+#
+# Trigger a re-evaluation of the exit policy when a participating interface comes
+# up or goes down.
+#
+# Classification is delegated to the backend rather than re-implemented here.
+# The previous version required either the qmodem `modem_config` marker or
+# `managed_by=mt5700m` to recognise a modem section, so any layout that carried
+# neither (a plain static interface on a cellular netdev, a renamed manager
+# section) produced no reconcile at all and a failover went unnoticed until some
+# unrelated event happened to fire.
 
 case "$ACTION" in
 	ifup|ifdown) ;;
 	*) exit 0 ;;
 esac
 
-case "$INTERFACE" in
-	wan|wan6) ;;
-	*)
-		[ -n "$INTERFACE" ] || exit 0
-		modem_config="$(uci -q get "network.${INTERFACE}.modem_config" || true)"
-		managed_by="$(uci -q get "network.${INTERFACE}.managed_by" || true)"
-		[ -n "$modem_config" ] || [ "$managed_by" = 'mt5700m' ] || exit 0
-		;;
+[ -n "$INTERFACE" ] || exit 0
+
+role="$(/usr/sbin/h5000m-netmode iface-role "$INTERFACE" 2>/dev/null || echo other)"
+case "$role" in
+	wan|modem) ;;
+	*) exit 0 ;;
 esac
 
-# Let netifd finish adding or removing the IPv4 default route before deciding
-# which IPv6 client should be active. The command is idempotent and locked.
+# Let netifd finish adding or removing the routes before deciding which IPv6
+# client may be active.  reconcile is idempotent and locked, and it waits for a
+# run that is already in progress instead of dropping this event.
 (
 	sleep 1
 	/usr/sbin/h5000m-netmode reconcile >/dev/null 2>&1

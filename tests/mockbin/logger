@@ -1,0 +1,5 @@
+#!/bin/sh
+scen="${H5_SCEN:?H5_SCEN not set}"
+shift 2>/dev/null || true
+printf 'logger %s\n' "$*" >> "$scen/logger.log"
+exit 0
