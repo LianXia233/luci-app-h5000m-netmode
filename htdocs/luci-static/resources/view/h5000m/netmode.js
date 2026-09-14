@@ -77,8 +77,57 @@ return view.extend({
 			'.h5net{--net-blue:#4f8ff7;--net-green:#31b985;--net-amber:#e7a33e;--net-red:#e45f5f}',
 			'.h5net-head{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:2px 2px 14px;margin-bottom:14px;border-bottom:1px solid var(--border-color-low,#e8e8e8)}',
 			'.h5net-head h2{margin:0 0 4px;font-size:22px;line-height:1.3}.h5net-head p{margin:0;color:var(--text-color-medium,#666);font-size:13px}',
-			'.h5net-active{display:inline-flex;align-items:center;gap:7px;padding:6px 10px;border-radius:999px;background:rgba(49,185,133,.11);color:var(--net-green);font-size:12px;font-weight:600;white-space:nowrap}',
-			'.h5net-active:before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}.h5net-active.warn{color:var(--net-amber);background:rgba(231,163,62,.11)}.h5net-active.fail{color:var(--net-red);background:rgba(228,95,95,.11)}',
+			// --- live egress card --------------------------------------------------
+			// The design sheet's `.status` card, carrying the uplink that is actually
+			// holding the default route.  Only one is rendered: the sheet's demo shows
+			// a WAN card and a cellular card side by side, both labelled "在线", and
+			// copying that markup as-is would print a state the device may not be in.
+			//
+			// The SVG markup inside the card, including its own class attributes
+			// (wan-port / wan-flow / wan-led / wan-ring / cell-wave / cell-core /
+			// cell-signal / cell-packet), is copied unchanged.  The sheet's wrapper
+			// classes that are generic inside a LuCI page - .content / .topline /
+			// .title / .live / .live-dot / .meta / .badge / .separator / .interface -
+			// carry an ec- prefix so they can neither be caught by theme rules nor
+			// leak onto other pages.  Every property value is the sheet's.
+			'.h5net .h5net-ecard{--accent:var(--net-green);--soft:#e8f8f2;position:relative;min-width:0;overflow:hidden;display:flex;align-items:center;gap:13px;min-height:72px;padding:10px 17px 10px 11px;border:1px solid var(--border-color-low,#e8edf3);border-radius:18px;background:rgba(255,255,255,.82);box-shadow:0 12px 35px rgba(28,45,66,.07),0 2px 7px rgba(28,45,66,.025);flex:0 1 auto}',
+			'.h5net .h5net-ecard.cell{--accent:#4f8dff;--soft:#edf4ff}',
+			'.h5net .h5net-ecard.tone-pending{--accent:var(--net-amber);--soft:#fff5e9}',
+			'.h5net .h5net-ecard.tone-down{--accent:var(--net-red);--soft:#fff0f2}',
+			'.h5net .h5net-ecard.tone-off{--accent:#8b95a3;--soft:#f1f4f7}',
+			'.h5net .h5net-ecard:before{content:"";position:absolute;left:0;top:13px;bottom:13px;width:3px;border-radius:0 4px 4px 0;background:var(--accent);opacity:.7}',
+			'.h5net .h5net-ecard:after{content:"";position:absolute;width:130px;height:130px;right:-60px;top:-70px;border-radius:50%;background:var(--soft);opacity:.7;pointer-events:none}',
+			'.h5net .h5net-ecard .svgbox{position:relative;z-index:1;width:50px;height:50px;flex:none;display:grid;place-items:center;border-radius:15px;background:var(--soft);color:var(--accent)}',
+			'.h5net .h5net-ecard .svgbox svg{width:43px;height:43px;overflow:visible}',
+			'.h5net .h5net-ecard .ec-content{position:relative;z-index:1;min-width:0;flex:1}',
+			'.h5net .h5net-ecard .ec-topline{display:flex;align-items:center;gap:8px;min-width:0}',
+			'.h5net .h5net-ecard .ec-title{margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:15px;font-weight:760;letter-spacing:.05px}',
+			'.h5net .h5net-ecard .ec-live{display:inline-flex;align-items:center;gap:5px;flex:none;color:var(--accent);font-size:11px;font-weight:700;white-space:nowrap}',
+			'.h5net .h5net-ecard .ec-dot{width:6px;height:6px;border-radius:50%;background:currentColor;box-shadow:0 0 0 3px rgba(0,0,0,.05);animation:breath 1.8s ease-in-out infinite}',
+			'.h5net .h5net-ecard .ec-meta{display:flex;align-items:center;gap:7px;margin-top:6px;min-width:0;color:#8b95a1;font-size:11px}',
+			'.h5net .h5net-ecard .ec-badge{padding:4px 7px;border-radius:7px;background:var(--soft);color:var(--accent);font-weight:700;white-space:nowrap}',
+			'.h5net .h5net-ecard .ec-sep{opacity:.35}',
+			'.h5net .h5net-ecard .ec-iface{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;opacity:.8;white-space:nowrap}',
+			'.h5net .h5net-ecard .ec-role{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+			// The sheet rings the live dot with color-mix(in srgb,currentColor 10%,
+			// transparent).  That syntax is 2023+ only, and where it is unsupported the
+			// declaration is dropped outright, which would cost the halo entirely - so
+			// the ring is a flat shadow instead, which degrades to a plain dot.
+			// A fault is still, here as everywhere else on this page: red and grey
+			// cards stop animating, so motion keeps meaning "traffic is flowing".
+			'.h5net .h5net-ecard.tone-down svg,.h5net .h5net-ecard.tone-down svg *,.h5net .h5net-ecard.tone-off svg,.h5net .h5net-ecard.tone-off svg *{animation:none!important}',
+			'.h5net .h5net-ecard.is-idle svg,.h5net .h5net-ecard.is-idle svg *,.h5net .h5net-ecard.is-idle .ec-dot{animation:none!important}',
+			'.h5net .h5net-ecard .wan-port{fill:none;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round}',
+			'.h5net .h5net-ecard .wan-flow{stroke-dasharray:4 4;animation:dash 1s linear infinite}',
+			'.h5net .h5net-ecard .wan-led{animation:led 1.5s ease-in-out infinite}',
+			'.h5net .h5net-ecard .wan-ring{transform-box:fill-box;transform-origin:center;animation:ec-ring 2.4s ease-out infinite}',
+			'.h5net .h5net-ecard .cell-wave{fill:none;stroke:currentColor;stroke-linecap:round;transform-box:fill-box;transform-origin:center;animation:ec-wave 1.9s ease-out infinite}',
+			'.h5net .h5net-ecard .cell-wave.w2{animation-delay:.63s}',
+			'.h5net .h5net-ecard .cell-wave.w3{animation-delay:1.26s}',
+			'.h5net .h5net-ecard .cell-core{animation:breath 1.5s ease-in-out infinite}',
+			'.h5net .h5net-ecard .cell-signal{stroke-dasharray:3 5;animation:dash 1.15s linear infinite}',
+			'.h5net .h5net-ecard .cell-packet{animation:packet 1.7s ease-in-out infinite}',
+			'.h5net .h5net-ecard .cell-packet.p2{animation-delay:.85s}',
 			'.h5net-note{margin:0 0 14px;padding:10px 12px;border-left:3px solid var(--net-blue);border-radius:4px;background:rgba(79,143,247,.07);color:var(--text-color-medium,#555);font-size:13px}',
 			'.h5net-note.alert{border-left-color:var(--net-red);background:rgba(228,95,95,.08);color:var(--net-red);font-weight:500}',
 			'.h5net-note.warn{border-left-color:var(--net-amber);background:rgba(231,163,62,.08)}',
@@ -104,7 +153,8 @@ return view.extend({
 			// --- animated SVG icons ------------------------------------------------
 			// Reproduced verbatim from the supplied design sheet.  The keyframe names
 			// (pulse / flow / wave / ring / signal / travel / progress / upload /
-			// scan / node) are kept exactly as written: the LuCI theme only defines
+			// scan / node / breath / led / dash / packet) are kept exactly as written:
+			// the LuCI theme only defines
 			// aurora-fade-in, divider-in, sidebar-run-* and spin, so there is no
 			// collision.  Only the *class selectors* carry a .h5net scope, because
 			// generic names such as .node / .progress / .scan must not leak into
@@ -137,6 +187,18 @@ return view.extend({
 			'@keyframes upload{0%,100%{transform:translateY(3px);opacity:.45}50%{transform:translateY(-3px);opacity:1}}',
 			'@keyframes scan{0%,100%{transform:translateX(0);opacity:.35}50%{transform:translateX(29px);opacity:1}}',
 			'@keyframes node{0%,100%{opacity:.35}50%{opacity:1}}',
+			// The exit card's keyframes, transcribed from the sheet.  breath / led / dash /
+			// packet keep the sheet's names.  ring and wave had to be renamed: this page
+			// already defines both for its tile icons with a different body (ring =
+			// rotate, wave = a slow opacity breathe), and a second definition under the
+			// same name would silently replace the tiles' motion.  The card's rules
+			// above bind the renamed keyframes, so the rendered motion is the sheet's.
+			'@keyframes breath{0%,100%{opacity:.55;transform:scale(.9)}50%{opacity:1;transform:scale(1.06)}}',
+			'@keyframes led{0%,100%{opacity:.35}50%{opacity:1}}',
+			'@keyframes dash{to{stroke-dashoffset:-16}}',
+			'@keyframes ec-ring{0%{transform:scale(.55);opacity:.55}100%{transform:scale(1.5);opacity:0}}',
+			'@keyframes ec-wave{0%{transform:scale(.72);opacity:.7}70%,100%{transform:scale(1.08);opacity:0}}',
+			'@keyframes packet{0%,100%{transform:translateY(4px);opacity:.15}45%{opacity:1}50%{transform:translateY(-7px)}85%{opacity:.9}}',
 			// The icon is part of the readout, not decoration: colour and motion are
 			// driven by the same fields the cards use, so an icon that is moving
 			// always means "this path is live right now".  A link that is down or
@@ -173,8 +235,8 @@ return view.extend({
 			'.h5net-stat-item>b{display:block;font-size:14px;margin-bottom:6px}',
 			'.h5net-stat-value{display:block;font-size:12.5px;font-weight:600;color:var(--text-color,#39424e);overflow-wrap:anywhere}',
 			'.h5net-stat-hint{display:block;margin-top:4px;color:#929aa5;font-size:11px;overflow-wrap:anywhere}',
-			'@media(max-width:900px){.h5net-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}',
-			'@media(max-width:620px){.h5net-head{display:block}.h5net-active{margin-top:11px}.h5net-grid{grid-template-columns:1fr}.h5net-foot{display:block}.h5net-buttons{margin-top:12px;flex-direction:column}.h5net-buttons .cbi-button{width:100%}.h5net-stat-grid{gap:9px}.h5net-stat-item{padding:12px 9px;border-radius:12px}.h5net-stat-icon{height:64px;margin-bottom:9px;border-radius:10px}.h5net-stat-icon svg{width:46px;height:46px}.h5net-stat-item>b{font-size:13px}.h5net-stat-hint{font-size:10px}}'
+			'@media(max-width:900px){.h5net-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.h5net-head{flex-wrap:wrap}.h5net .h5net-ecard{flex:1 1 100%;margin-top:10px}}',
+			'@media(max-width:620px){.h5net-head{display:block}.h5net .h5net-ecard{margin-top:11px}.h5net-grid{grid-template-columns:1fr}.h5net-foot{display:block}.h5net-buttons{margin-top:12px;flex-direction:column}.h5net-buttons .cbi-button{width:100%}.h5net-stat-grid{gap:9px}.h5net-stat-item{padding:12px 9px;border-radius:12px}.h5net-stat-icon{height:64px;margin-bottom:9px;border-radius:10px}.h5net-stat-icon svg{width:46px;height:46px}.h5net-stat-item>b{font-size:13px}.h5net-stat-hint{font-size:10px}.h5net .h5net-ecard{min-height:68px;border-radius:16px;padding-right:14px}.h5net .h5net-ecard .svgbox{width:46px;height:46px;border-radius:13px}.h5net .h5net-ecard .svgbox svg{width:39px;height:39px}.h5net .h5net-ecard .ec-title{font-size:14px}.h5net .h5net-ecard .ec-meta,.h5net .h5net-ecard .ec-live{font-size:10px}}'
 		].join(''));
 	},
 
@@ -204,6 +266,162 @@ return view.extend({
 			+ '<path class="flow" d="M14 19h20M14 24h12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="5 4"/>'
 			+ '<circle cx="34" cy="19" r="2.1" fill="currentColor" class="pulse"/>'
 			+ '</svg>';
+	},
+
+	// Animated icon for the live-egress card, transcribed from the design sheet
+	// (64x64 viewBox, the sheet's class names and the sheet's animation classes).
+	//
+	// Three variants, because the card can only show an uplink that is really
+	// carrying traffic: the sheet's WAN card and the sheet's cellular card, plus
+	// the sheet's own routing icon for the case where the default route belongs to
+	// neither uplink.  Painting a WAN icon over a foreign route, or over no route
+	// at all, would be the same defect this page was rebuilt to remove.
+	//
+	// Injected through innerHTML for the reason documented on iconSvg(): E() builds
+	// nodes with document.createElement(), which has no SVG namespace.
+	exitIconSvg: function(kind) {
+		if (kind === 'modem') {
+			return '<svg viewBox="0 0 64 64" aria-label="' + _('蜂窝网络') + '">'
+				+ '<path class="cell-wave" d="M23 25a13 13 0 0 1 18 0" stroke-width="2.3"/>'
+				+ '<path class="cell-wave w2" d="M17 19a22 22 0 0 1 30 0" stroke-width="2"/>'
+				+ '<path class="cell-wave w3" d="M11 13a31 31 0 0 1 42 0" stroke-width="1.8" opacity=".55"/>'
+				+ '<path d="M32 28 25 52h14L32 28Z" fill="currentColor" opacity=".08"/>'
+				+ '<path d="M32 29 25 52m7-23 7 23M28 42h8m-10 6h12M21 56h22" class="wan-port" stroke-width="2.2"/>'
+				+ '<circle class="cell-core" cx="32" cy="25" r="3.2" fill="currentColor"/>'
+				+ '<path class="cell-signal" d="M32 25V9" stroke="currentColor" stroke-width="1.7" opacity=".4"/>'
+				+ '<circle class="cell-packet" cx="32" cy="25" r="2" fill="currentColor"/>'
+				+ '<circle class="cell-packet p2" cx="32" cy="25" r="1.7" fill="currentColor"/>'
+				+ '</svg>';
+		}
+		if (kind === 'route') {
+			return '<svg viewBox="0 0 64 64" aria-label="' + _('其他路由') + '">'
+				+ '<path class="route" d="M13 45C22 45 20 19 32 19s10 26 19 26" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round" stroke-dasharray="5 5"/>'
+				+ '<circle cx="13" cy="45" r="5" fill="currentColor"/>'
+				+ '<circle cx="51" cy="45" r="5" fill="currentColor"/>'
+				+ '<circle class="node" cx="32" cy="19" r="5" fill="currentColor"/>'
+				+ '</svg>';
+		}
+		return '<svg viewBox="0 0 64 64" aria-label="' + _('有线 WAN') + '">'
+			+ '<circle class="wan-ring" cx="32" cy="32" r="19" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".35"/>'
+			+ '<rect x="17" y="14" width="30" height="25" rx="7" fill="currentColor" opacity=".08"/>'
+			+ '<rect class="wan-port" x="20" y="17" width="24" height="20" rx="5" stroke-width="2.3"/>'
+			+ '<path class="wan-port" d="M26 37v10m12-10v10M23 50h18" stroke-width="2.3"/>'
+			+ '<path class="wan-port" d="M25 23h14M25 28h14M25 33h7" stroke-width="1.8" opacity=".32"/>'
+			+ '<circle class="wan-led" cx="39" cy="33" r="2.4" fill="currentColor"/>'
+			+ '<path class="wan-port wan-flow" d="M21 55h22" stroke-width="2"/>'
+			+ '</svg>';
+	},
+
+	// The live egress card: which uplink holds the default route right now, its
+	// real netdev, its real place in the configured policy, and the two family
+	// verdicts when they disagree.
+	//
+	// Every string here is derived from the status output.  The sheet's demo text
+	// ("当前出口：有线 WAN" next to "当前出口：蜂窝网络", both "在线") describes a state
+	// this device cannot be in: one uplink carries the traffic, and if both are up
+	// under two different families that is a split, which the header card reports
+	// as a fault rather than as two tidy green cards.
+	exitCard: function(data) {
+		var active4 = data.active4 || 'none';
+		var active6 = data.active6 || 'none';
+		var split = data.split === '1';
+		var active = active4 !== 'none' ? active4 : active6;
+		var daed = data.daed_exit_state || 'none';
+		var self = this;
+
+		var tone = 'tone-live', idle = false, kind, title, live, badge, iface, role;
+
+		// The policy order, not the current carrier: when the backup is the one
+		// carrying traffic, that is exactly what the reader needs to see.
+		function roleOf(k) {
+			var order = self.modeOrder(data.mode);
+			if (order.indexOf(k) < 0) return _('未纳入策略');
+			if (order[0] === k) return _('首选出口');
+			return (k === active) ? _('备用出口 · 已接管') : _('备用出口');
+		}
+
+		if (split) {
+			// A family split is the invariant this app exists to protect, so it takes
+			// precedence over the "current exit" reading - there are two of them.
+			kind = active4 === 'modem' ? 'modem' : 'wan';
+			tone = 'tone-down';
+			idle = true;
+			title = _('出口分流');
+			live = _('告警');
+			badge = _('IPv4 ') + this.exitLabel(active4);
+			iface = this.exitDevice(data, active4);
+			role = _('IPv6 ') + this.exitLabel(active6);
+		}
+		else if (active === 'wan' || active === 'modem') {
+			var state = this.connectionState(data, active);
+			kind = active;
+			tone = (state.cls === 'up') ? 'tone-live'
+				: (state.cls === 'pending') ? 'tone-pending'
+				: (state.cls === 'idle') ? 'tone-off' : 'tone-down';
+			idle = tone === 'tone-down' || tone === 'tone-off';
+			title = _('当前出口：%s').format(this.exitLabel(active));
+			live = (state.cls === 'up') ? _('在线') : state.label;
+			badge = (active === 'wan') ? 'Ethernet' : '5G / LTE';
+			iface = (active === 'wan' ? data.wan_device : data.modem_device) || _('未指定');
+			role = roleOf(active);
+		}
+		else if (active === 'other') {
+			// A foreign default route (mwan3 / VPN / daed).  It is up and it is
+			// carrying traffic, but it is not ours, so it neither animates green nor
+			// claims a position in this app's policy.
+			kind = 'route';
+			tone = 'tone-pending';
+			title = _('当前出口：其他路由');
+			live = _('外部接管');
+			badge = (daed !== 'none') ? (_('daed 接管') ) : _('外部路由');
+			iface = data.egress4 || this.exitDevice(data, active4);
+			role = _('不在本插件策略内');
+		}
+		else {
+			kind = 'route';
+			tone = 'tone-off';
+			idle = true;
+			title = _('无可用出口');
+			live = _('离线');
+			badge = _('无出口');
+			iface = '—';
+			role = _('策略：') + this.modeLabel(data.mode);
+		}
+
+		var card = E('article', {
+			'class': 'h5net-ecard' + (kind === 'modem' ? ' cell' : '') + ' ' + tone
+				+ (idle ? ' is-idle' : '')
+		});
+		var box = E('div', { 'class': 'svgbox' });
+		box.innerHTML = this.exitIconSvg(kind);
+
+		card.appendChild(box);
+		card.appendChild(E('div', { 'class': 'ec-content' }, [
+			E('div', { 'class': 'ec-topline' }, [
+				E('div', { 'class': 'ec-title' }, title),
+				E('div', { 'class': 'ec-live' }, [
+					E('i', { 'class': 'ec-dot' }),
+					E('span', {}, live)
+				])
+			]),
+			E('div', { 'class': 'ec-meta' }, [
+				E('span', { 'class': 'ec-badge' }, badge),
+				E('span', { 'class': 'ec-sep' }, '·'),
+				E('span', { 'class': 'ec-iface' }, iface),
+				E('span', { 'class': 'ec-sep' }, '·'),
+				E('span', { 'class': 'ec-role' }, role)
+			])
+		]));
+
+		return card;
+	},
+
+	// The netdev behind an exit label, as reported by the backend rather than
+	// guessed from the uci section.
+	exitDevice: function(data, exit) {
+		if (exit === 'wan') return data.wan_device || '—';
+		if (exit === 'modem') return data.modem_device || '—';
+		return data.egress4 || '—';
 	},
 
 	// Maps the graded link state onto the icon tone.  `tone-live` is deliberately
@@ -770,25 +988,10 @@ return view.extend({
 		var active4 = data.active4;
 		var active6 = data.active6;
 		var split = data.split === '1';
-		var same = active4 === active6 && active4 !== 'none';
-		var active = active4 !== 'none' ? active4 : active6;
 		var message = this.statusMessage(data);
-		var badgeText, badgeClass;
-
-		if (split)
-			badgeText = _('IPv4 %s · IPv6 %s').format(this.exitLabel(active4), this.exitLabel(active6));
-		else if (same)
-			badgeText = _('当前出口：%s').format(this.exitLabel(active4));
-		else
-			badgeText = _('IPv4：%s · IPv6：%s').format(this.exitLabel(active4), this.exitLabel(active6));
-
-		if (split || active === 'none')
-			badgeClass = 'h5net-active fail';
-		else if (active === 'other')
-			badgeClass = 'h5net-active warn';
-		else
-			badgeClass = 'h5net-active';
-
+		// The header readout is the exit card, which states the live exit and the
+		// family split in the same place; the old pill badge that only printed a
+		// label has been folded into it.
 		var curWanDev = (this.deviceMap || {}).wan || '';
 		var curModemDev = (this.deviceMap || {}).modem || '';
 		var newWanDev = (this.pendingDeviceMap || {}).wan || curWanDev;
@@ -818,7 +1021,7 @@ return view.extend({
 					E('h2', {}, _('网络出口')),
 					E('p', {}, _('点击连接卡片把该链路设为首选出口，另一条自动作为备用。"仅用此出口"会移除备用链路。'))
 				]),
-				E('div', { 'class': badgeClass }, badgeText)
+				this.exitCard(data)
 			]),
 			E('div', { 'class': message.cls }, message.text),
 			// The readout sits above the controls it describes: the tiles state what
@@ -849,9 +1052,9 @@ return view.extend({
 			data.watcher, data.watch_interval, data.health_check,
 			data.wan_health, data.modem_health, data.daed_exit_state,
 			data.wan_present, data.wan_available, data.wan_pending, data.wan_carrier,
-			data.wan_up, data.wan4_ready, data.wan6_ready, data.wan_device,
+			data.wan_up, data.wan6_up, data.wan4_ready, data.wan6_ready, data.wan_device,
 			data.modem_present, data.modem_available, data.modem_pending, data.modem_carrier,
-			data.modem_up, data.modem4_ready, data.modem6_ready, data.modem_device,
+			data.modem_up, data.modem6_up, data.modem4_ready, data.modem6_ready, data.modem_device,
 			data.wifi_total, data.wifi_up, data.wifi_ssid, data.wifi_clients,
 			this.pendingMode,
 			(this.pendingDeviceMap || {}).wan,

@@ -38,6 +38,18 @@ jobs:
           jq empty root/usr/share/rpcd/acl.d/luci-app-h5000m-netmode.json
       - name: Validate translations
         run: msgfmt --check --check-format -o /dev/null po/zh_Hans/h5000m-netmode.po
+      - name: Audit the animated SVGs and the view/backend field contract
+        # The animations live partly in SVG class attributes inside JS string
+        # literals, so "the icons render" is not something a syntax check can
+        # see; a class with no rule silently renders frozen, and a field the
+        # view reads but status does not print becomes undefined in the UI.
+        run: node tests/svg_audit.js htdocs/luci-static/resources/view/h5000m/netmode.js root/usr/sbin/h5000m-netmode
+      - name: Test the exit card's branches
+        # The card has four branches and the device is in exactly one of them, so
+        # the other three can only be exercised off-device: provoking them on a
+        # router would mean changing the routing policy the test runs over.  The
+        # module is loaded with stubs, its source unmodified.
+        run: node tests/test_exit_card.js htdocs/luci-static/resources/view/h5000m/netmode.js
       - name: Run backend test suite
         # dash here, BusyBox ash on the router: the suite is deliberately POSIX sh
         # so that the exit-policy decisions that are unsafe to provoke on a live
