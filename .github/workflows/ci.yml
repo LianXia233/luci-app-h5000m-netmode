@@ -23,9 +23,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gettext
       - name: Check shell syntax
         run: |
+          sh -n root/usr/sbin/h5000m-netmode
+          sh -n root/usr/sbin/h5000m-netmode-status
           sh -n root/etc/hotplug.d/iface/95-h5000m-netmode
           sh -n root/etc/uci-defaults/90-h5000m-netmode
-          sh -n root/usr/sbin/h5000m-netmode
+          sh -n root/etc/init.d/h5000m-netmode
+          sh -n tests/run_tests.sh
+          for f in tests/mockbin/*; do sh -n "$f"; done
       - name: Check LuCI JavaScript syntax
         run: node --check htdocs/luci-static/resources/view/h5000m/netmode.js
       - name: Validate JSON metadata
@@ -34,3 +38,9 @@ jobs:
           jq empty root/usr/share/rpcd/acl.d/luci-app-h5000m-netmode.json
       - name: Validate translations
         run: msgfmt --check --check-format -o /dev/null po/zh_Hans/h5000m-netmode.po
+      - name: Run backend test suite
+        # dash here, BusyBox ash on the router: the suite is deliberately POSIX sh
+        # so that the exit-policy decisions that are unsafe to provoke on a live
+        # device (policy routing, symbolic device refs, an IPv6 split) are pinned
+        # by assertions instead of by manual testing.
+        run: sh tests/run_tests.sh root/usr/sbin/h5000m-netmode
