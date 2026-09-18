@@ -1,6 +1,6 @@
 # 故障根因与排查手册
 
-本文件记录 v1.5.0 / v1.6.0 修正的缺陷的**根因**、判定依据与排查手法。变更摘要见 [CHANGELOG.md](CHANGELOG.md)，使用说明见 [README.md](README.md)。
+本文件记录 v1.5.0 / v1.6.0 及后续修正的缺陷的**根因**、判定依据与排查手法。变更摘要见 [CHANGELOG.md](CHANGELOG.md)，使用说明见 [README.md](README.md)。
 
 写作原则：每条都以源码为准，给出「现象 → 危害 → 修复 → 为什么另一种看起来更简洁的写法是错的 → 可执行验证命令」。最后一项尤其重要：判断出口类问题永远要测**内核实际会从哪里发包**，而不是配置里写了什么。
 
@@ -155,6 +155,117 @@ ubus call network.interface.2_1v6 status | grep -E 'l3_device|device'
 /usr/sbin/h5000m-netmode status | grep -E '^(active6|modem_device|modem_devices)='
 ```
 
+### 1.4 透明代理的 TUN 隧道被当成第三个出口
+
+**现象**（实测于 H5000M，同时启用 5G 拨号与 daed 透明代理）：
+
+```sh
+/usr/sbin/h5000m-netmode status | grep -E '^(mode|egress4|egress6|active4|active6|split|daed_exit_state)='
+# mode=wan_first
+# egress4=eth2
+# egress6=singtun0
+# active4=modem
+# active6=other
+# split=1
+# daed_exit_state=modem
+```
+
+界面因此持续显示红色「出口分流 · IPv4 走 5G 模组，IPv6 走 其他路由」并引导用户点击「对齐出口」——而两条协议族的流量实际都从 5G 模组出去。
+
+**根因**：`route_owner()` 的判定方式是把传入的**网卡名**与两条上行链路的物理网卡列表比对：
+
+```sh
+	# 修复前
+	if device_matches "$device" $WAN_DEVICES; then echo wan
+	elif device_matches "$device" $MODEM_DEVICES; then echo modem
+	else echo other
+	fi
+```
+
+`singtun0` 是 daed / sing-box 的 TUN 设备（`cat /sys/class/net/singtun0/type` → `65534`，即 `ARPHRD_NONE`），它的名字不可能出现在上行网卡列表里，于是必然落到 `other`。而 `other` 又被 `split` 判定当作「与 `modem` 不同的出口」，分流就这么被算了出来。
+
+| 环节 | 错误结论 |
+| --- | --- |
+| `route_owner("singtun0")` | 与 `eth1` / `eth2` 比对永不相等 → `other` |
+| `ACTIVE6=other` | 判定认为 IPv6 走的是「未知出口」 |
+| `split=1` | 界面报分流并推荐「对齐出口」 |
+| 用户点「对齐出口」 | IPv6 被拉到 IPv4 出口，**故障不存在，却改动了用户的网络配置** |
+
+这一条比 1.3 更隐蔽：1.3 是拿到了错的值（`@2_1` 未展开），本条的输入值本身完全正确（`singtun0` 确实是 IPv6 默认路由所在的设备），错的是**对这个值的解释**。
+
+**修复**：按网卡内核类型识别隧道，并把隧道归属到代理实际使用的上行链路。
+
+```sh
+is_tunnel_device() {
+	local device="$1" type
+	[ -n "$device" ] || return 1
+	[ -r "${SYS_CLASS_NET}/${device}/type" ] || return 1
+	type="$(cat "${SYS_CLASS_NET}/${device}/type" 2>/dev/null || true)"
+	case "$type" in
+		65534|768|769|776|778) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+route_owner() {
+	local device="$1"
+	[ -n "$device" ] || { echo none; return 0; }
+	if device_matches "$device" $WAN_DEVICES; then
+		echo wan
+	elif device_matches "$device" $MODEM_DEVICES; then
+		echo modem
+	elif is_tunnel_device "$device"; then
+		local proxy_exit
+		proxy_exit="$(cat "$DAED_EXIT_STATE_FILE" 2>/dev/null || true)"
+		case "$proxy_exit" in
+			wan) echo wan ;;
+			modem) echo modem ;;
+			*) echo other ;;
+		esac
+	else
+		echo other
+	fi
+}
+```
+
+同时 `print_status()` 的 `split` 判定改为比较**归属**而非网卡名：
+
+```sh
+	split=0
+	if [ -n "$EGRESS4" ] && [ -n "$EGRESS6" ] \
+		&& [ "$ACTIVE4" != "none" ] && [ "$ACTIVE6" != "none" ] \
+		&& [ "$ACTIVE4" != "$ACTIVE6" ]; then
+		split=1
+	fi
+```
+
+> **为什么另一种写法是错的**：按名字硬编码隧道清单（`case "$device" in singtun0|tun0|wg0) ...`）看起来更直接，但它把判定绑在一个**用户可以改的字符串**上——换个代理、改个 tunnel 名，误报就会原样回来。`ARPHRD_NONE` 是内核给 TUN 的类型，与名字无关。同理，用 `ip -o link | grep tun` 之类的方式也不成立：那是又一次名字匹配。
+>
+> **为什么排除 `none`**：「完全没有默认路由」与「两个协议族走了不同上行」是两种不同的故障，后端已为前者准备了独立状态。若把它也归入 `split`，界面会同时给出两条互相矛盾的处置建议。这个排除项由 `test_real_family_split_is_still_reported` 与既有用例共同约束。
+
+**验证**（本次修复的实证，含正负对照）：
+
+```sh
+# 1. 隧道确实按内核类型被识别
+cat /sys/class/net/singtun0/type          # 期望 65534
+# 2. 归属与分流判定
+/usr/sbin/h5000m-netmode status | grep -E '^(egress4|egress6|active4|active6|split)='
+# 修复前：egress6=singtun0 active6=other split=1
+# 修复后：egress6=singtun0 active6=modem split=0
+# 3. 代理的上行记录（隧道归属的依据）
+cat /var/run/h5000m-netmode.daed-exit     # 期望 wan 或 modem
+
+# 4. 回归：测试套件必须全绿，且新用例能抓出旧实现
+sh tests/run_tests.sh                                    # 期望 176 checks, 0 failure(s)
+sh tests/run_tests.sh /tmp/h5000m-netmode-OLD            # 旧后端：期望 4 failures
+#    均为隧道用例：tunnel active6 follows the proxy exit / tunnel is not reported as a split
+#    （正负对照的意义：新用例真的在测这件事，而不是恒过）
+```
+
+**渲染层复核**：`node tests/render_live.js <netmode.js> <实机 status 输出>` 把真实数据灌进 `statusPanel()`，逐区域打印页面文本，确认各区域不再互相矛盾（修复前 banner 为 alert「出口已分流」，修复后为 warn「有线 WAN 不可用，IPv4 与 IPv6 已一并切换至 5G 模组」）。
+
+**边界说明**：隧道无 `daed_exit_state` 记录时仍归 `other`（例如代理刚启动、状态文件尚未写入）。这是保守选择——宁可短暂显示「其他路由」，也不猜一个上行。对应用例 `test_tunnel_without_a_recorded_exit_stays_other` 固化了这一行为。
+
 ---
 
 ## 二、IPv4 与 IPv6 的同出口约束
@@ -170,6 +281,8 @@ ubus call network.interface.2_1v6 status | grep -E 'l3_device|device'
 | 排障困难 | 「网是通的，但某些站点就是打不开」，从单栈视角完全看不出问题 |
 
 **修复**：把 IPv6 出口收敛为**一个决策函数 + 一个写者**。
+
+> **判定语义（v1.6.0 之后修正）**：`split=1` 的含义是「两个协议族走了**不同的上行链路**」，因此比较对象是解析后的**出口归属** `ACTIVE4` / `ACTIVE6`，而不是原始网卡名 `EGRESS4` / `EGRESS6`。用网卡名比较只在「两个出口都是物理网卡」时才等价；一旦中间有 TUN 隧道（透明代理）、策略路由或 VPN，网卡名就不再等于上行链路。详见 1.4——本设备上 `egress4=eth2` 与 `egress6=singtun0` 不同，而两条族实际都从 5G 模组出去。
 
 决策（`select_ipv6_desired`，取值 `wan` / `modem` / `off` / `keep`）：
 
@@ -206,7 +319,8 @@ ubus call network.interface.2_1v6 status | grep -E 'l3_device|device'
 **验证**：
 
 ```sh
-# split 必须为 0；egress4 与 egress6 必须是同一个设备
+# split 必须为 0；active4 与 active6 必须相等（这是「同一上行」的判据）
+# 注意：egress4 与 egress6 是原始网卡名，经透明代理承载时二者可以不同而并非分流
 /usr/sbin/h5000m-netmode status | grep -E '^(egress4|egress6|active4|active6|split|ipv6_desired)='
 # IPv6 归属必须与 IPv4 出口一致
 /usr/sbin/h5000m-netmode status | grep -E '^(ipv6_owner|wan6_defaultroute|wan6_auto|usbv6_defaultroute|usbv6_auto)='
@@ -494,16 +608,30 @@ only 模式改由卡片底部的「仅用此出口」按钮触发（`selectOnly`
 **修复**：分流作为最高优先级的提示，并配一个可操作的出口。
 
 ```js
+		// A split is the one state the user explicitly asked never to happen, so it
+		// outranks every other message.
 		if (data.split === '1') {
 			return {
-				text: _('出口已分流：IPv4 走 %s，IPv6 走 %s。部分应用会因出口不一致而连接失败，建议点击"对齐出口"。')
-					.format(this.exitLabel(active4), this.exitLabel(active6)),
+				text: this.splitSentence(data),
 				cls: 'h5net-note alert'
 			};
 		}
 ```
 
+文案由 `splitSentence()` 单点提供（`modeLabel()` 旁），因为同一句话在 banner 与 `exitVerdict()` 两处都要用：
+
+```js
+	splitSentence: function(data) {
+		return _('出口已分流：IPv4 走 %s，IPv6 走 %s。部分应用会因出口不一致而连接失败，建议点击"对齐出口"。')
+			.format(this.exitLabel(data.active4), this.exitLabel(data.active6));
+	},
+```
+
+> **为什么必须抽成单一来源**：这句话原本在两处各写一份字面量。两份副本不会立刻出错，但只要有人改其中一处——哪怕只是补个标点——界面就会出现「同一状态两种说法」，而这类不一致在代码评审里几乎不可能被发现：两个位置相隔 200 行，且都各自读起来完全正确。
+
 同时徽标在分流时变红，并显示「对齐出口」按钮（调用 `h5000m-netmode reconcile`）——它只做状态对齐，不改动用户配置的策略，因此可以安全地作为一键修复入口。状态条还显示了看门狗与健康探测是否在运行，让「自动接替能力是否在线」可见。
+
+> **按钮的边界**：「对齐出口」会改动用户的网络配置，所以它只应在**确为分流**时出现。1.4 那个缺陷的全部危害正在于此——假的 `split=1` 让一个会写配置的按钮出现在不该出现的场合，点了之后 IPv6 真的被改掉。误报比不报更贵，因为不报只是看不见，误报会引导用户去破坏本来正确的配置。
 
 ---
 
@@ -578,13 +706,17 @@ sh tests/run_tests.sh                                  # 在设备上：测已�
 sh tests/run_tests.sh /tmp/h5net-verify/h5000m-netmode # 测指定路径的后端
 ```
 
-当前状态：**15 组测试、135 项断言、0 失败**（在目标设备的 BusyBox ash 上实测通过）。
+当前状态：**21 组测试、176 项断言、0 失败**（在目标设备的 BusyBox ash 上实测通过）。
 
 | 测试 | 断言的关键性质 |
 | --- | --- |
 | `test_fib_oracle_beats_main_table` | 策略路由下 FIB 判定优于 main 表 |
 | `test_metric_order_is_not_dump_order` | 选路不依赖 dump 顺序 |
 | `test_symbolic_device_reference_is_resolved` | `@2_1` 被展开为真实设备 |
+| `test_proxy_tunnel_is_not_a_family_split` | 代理隧道不产生分流误报 |
+| `test_proxy_tunnel_attributes_to_the_proxy_exit` | 隧道归属到代理实际使用的上行 |
+| `test_real_family_split_is_still_reported` | 真实分流仍被报出（防削弱） |
+| `test_tunnel_without_a_recorded_exit_stays_other` | 无代理出口记录时保守归 `other` |
 | `test_split_egress_is_repaired_towards_ipv4` | 分流被纠正回 IPv4 出口 |
 | `test_failover_moves_ipv6_and_drops_old_family_first` | 切换先拆旧族 |
 | `test_no_ipv4_default_keeps_ipv6_untouched` | 无 IPv4 时不误关 IPv6（`keep`） |
@@ -598,6 +730,24 @@ sh tests/run_tests.sh /tmp/h5net-verify/h5000m-netmode # 测指定路径的后�
 | `test_usage_errors` | 参数校验与退出码 |
 | `test_reconcile_lock_behaviour` | 锁等待与死锁持有者回收 |
 
+### 7.1 新用例必须能被旧实现证伪
+
+隧道相关的 4 个用例（`test_proxy_tunnel_*`、`test_tunnel_without_a_recorded_exit_stays_other`）在写完之后，用**旧版后端**跑了一遍：
+
+```sh
+sh tests/run_tests.sh /tmp/h5000m-netmode-OLD     # 旧实现：4 failures
+sh tests/run_tests.sh                             # 新实现：176 checks, 0 failure(s)
+```
+
+```
+FAIL tunnel active6 follows the proxy exit: expected [modem] got [other]
+FAIL tunnel is not reported as a split: expected [0] got [1]
+FAIL tunnel-wan active6 follows the proxy exit: expected [wan] got [other]
+FAIL tunnel-wan is not reported as a split: expected [0] got [1]
+```
+
+**这一步不是形式**：新增用例最常见的失败形态是「恒过」——夹具搭得恰好让被测代码无需做出任何改动就能通过，于是它只是在增加断言计数。同时 `test_real_family_split_is_still_reported` 在**新旧两版均通过**，证明这次收紧没有把真实告警一并削弱。
+
 ---
 
 ## 八、上线自检清单
@@ -605,7 +755,8 @@ sh tests/run_tests.sh /tmp/h5net-verify/h5000m-netmode # 测指定路径的后�
 按顺序执行，全部满足才认为出口策略工作正常。
 
 ```sh
-# 1. 同出口不变量：split 必须为 0，egress4 与 egress6 必须是同一设备
+# 1. 同出口不变量：split 必须为 0，且 active4 与 active6 必须相等
+#    注意判据是「归属」而不是网卡名——经透明代理承载时 egress4/egress6 会不同
 /usr/sbin/h5000m-netmode status | grep -E '^(egress4|egress6|active4|active6|split)='
 
 # 2. IPv6 归属与 IPv4 出口一致
@@ -635,7 +786,12 @@ logread | grep h5000m-netmode | tail -5
 uci show h5000m_netmode | grep health_check
 cat /var/run/h5000m-netmode.health
 
-# 9. 测试套件
+# 9. 若设备同时跑透明代理：隧道不得被算作第三个出口
+grep -c is_tunnel_device /usr/sbin/h5000m-netmode    # 期望非 0（后端已含该修复）
+cat /var/run/h5000m-netmode.daed-exit                # 隧道归属的依据：wan / modem
+#    期望：active6 与 active4 相等、split=0，即使 egress6 是 singtun0 这类隧道
+
+# 10. 测试套件
 sh tests/run_tests.sh
 ```
 
@@ -647,6 +803,7 @@ uci set network.wan.metric=100 && uci commit network && /etc/init.d/network relo
 sleep 8
 /usr/sbin/h5000m-netmode status | grep -E '^(active4|active6|split)='
 # 期望：active4=modem 且 active6=modem，split=0
+#     （若设备上有透明代理，egress6 可能仍是 singtun0，这是正常的——判据是 active6）
 
 # 还原
 uci set network.wan.metric=10 && uci commit network && /etc/init.d/network reload
@@ -822,3 +979,39 @@ grep -c h5net-head htdocs/luci-static/resources/view/h5000m/netmode.js          
 ```
 
 设备侧量的是几何值而不是「规则存在」：`tools/diag_ecard.py` 在 6 个断点确认两半的字号/字重/图标框尺寸与图标左缘一致（1280px 两半同为 564x75、15px/760、50x50；620px 以下同为 14px/760、46x46）、900px 起改为纵向堆叠、620px 以下附注隐藏；`tools/verify_tiles.py` 另行比对两半的每个字段与后端推导值，并核对图标标记的链路与 `active4` / `active6` 一致。
+
+### 9.10 翻译目录整份失效，而代码看起来完全正确
+
+**现象**：`po/zh_Hans/h5000m-netmode.po` 里躺着 69 条条目，内容完整、格式规整、`msgfmt` 校验通过；而页面上该翻译的地方仍然是原文。
+
+**根因**：这 69 条描述的是**更早一版的界面**——`Exit Mode`、`Exit policy`、`Preferred exit`、`Mobile Network`、`Exit Priority` 等等。当前视图里的 112 条 msgid（含菜单 JSON 的 `title`）在目录中**一条都没有**。也就是说，这份目录对现行页面完全没有作用，它不是「部分落后」，而是「整体错位」。
+
+| 检查 | 结果 | 说明 |
+| --- | --- | --- |
+| `msgfmt --check-format` | 通过 | 格式层毫无问题——这正是它长期没被发现的原因 |
+| 条目数 | 69 | 看起来「有内容」 |
+| 与当前 msgid 的交集 | 0 | 全部失效 |
+
+**危害**：这类缺陷不会报任何错。构建通过、安装通过、目录文件在该在的位置、每条 msgstr 都非空——唯一的暴露方式是**看着页面读**。它比缺文件更隐蔽：缺文件会让人立刻去查，而一份错位的目录会让人以为「翻译这条路已经做过了」。
+
+**修复**：由 `tools/sync_po.py` 从**视图源码与菜单 JSON** 直接生成目录，而不是靠人工维护。同时把「目录是否落后于源码」变成一条 CI 检查：
+
+```sh
+python3 tools/sync_po.py --check   # 落后即 exit 1
+```
+
+> **为什么另一种写法是错的**：靠人工在增删字符串时同步更新 `.po` 是行不通的——它要求每个人在改界面的同时记得改一个从不被编译验证的文件。检查必须能自动判定「源码里有而目录里没有」的 msgid，否则它只是在检查一个手工维护的列表与自己是否一致。
+>
+> **`--check` 要过滤 PO header**：目录开头的 `msgid ""` 是所有 `.po` 的固定头部，收集 msgid 时必须排除，否则它会一直被判为「多余条目」，检查永远失败。
+
+**验证**（正负用例都已跑过）：
+
+```sh
+python3 tools/sync_po.py --check                       # 期望 exit 0
+# 往视图里插入一条新字符串后
+python3 tools/sync_po.py --check                       # 期望 exit 1
+# 还原后
+python3 tools/sync_po.py --check                       # 期望 exit 0
+
+grep -c '^msgid ' po/zh_Hans/h5000m-netmode.po         # 期望 112（不含 header）
+```

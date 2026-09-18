@@ -1,7 +1,7 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: luci-app-h5000m-netmode 1.2.1\n"
-"PO-Revision-Date: 2026-07-15 00:00+0800\n"
+"Project-Id-Version: luci-app-h5000m-netmode\n"
+"PO-Revision-Date: 2026-09-18 00:00+0800\n"
 "Last-Translator: FAN789\n"
 "Language-Team: Chinese (Simplified)\n"
 "Language: zh_CN\n"
@@ -9,206 +9,338 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 
-msgid "Mobile Network"
-msgstr "移动网络"
+msgid "蜂窝网络"
+msgstr "蜂窝网络"
 
-msgid "Exit Priority"
-msgstr "出口优先级"
-
-msgid "Switch the default route priority between wired WAN and the 5G modem."
-msgstr "切换有线 WAN 与 5G 模块的默认出口优先级。"
-
-msgid "Exit Mode"
-msgstr "出口模式"
-
-msgid "Wired WAN first, 5G fallback"
-msgstr "有线 WAN 优先，5G 备用"
-
-msgid "5G modem first, wired WAN fallback"
-msgstr "5G 模块优先，有线 WAN 备用"
-
-msgid "Wired WAN only"
-msgstr "仅有线 WAN"
-
-msgid "5G modem only"
-msgstr "仅 5G 模块"
-
-msgid "Current Status"
-msgstr "当前状态"
-
-msgid "Current Mode"
-msgstr "当前模式"
-
-msgid "IPv4 Default Route"
-msgstr "IPv4 默认出口"
-
-msgid "IPv6 Default Route"
-msgstr "IPv6 默认出口"
-
-msgid "Unknown"
-msgstr "未知"
-
-msgid "None"
-msgstr "无"
-
-msgid "Wired WAN Metric"
-msgstr "有线 WAN metric"
-
-msgid "5G Modem Metric"
-msgstr "5G 模块 metric"
-
-msgid "Wired WAN Default Route"
-msgstr "有线 WAN 默认路由"
-
-msgid "5G Modem Default Route"
-msgstr "5G 模块默认路由"
-
-msgid "Disabled"
-msgstr "已停用"
-
-msgid "Enabled"
-msgstr "开启"
-
-msgid "Exit priority has been applied."
-msgstr "出口优先级已应用。"
-
-msgid "Failed to apply exit priority:"
-msgstr "出口优先级应用失败："
-
-msgid "Network exits"
-msgstr "网络出口"
-
-msgid "Choose how wired WAN and the 5G modem share Internet traffic."
-msgstr "设置有线 WAN 与 5G 模块的使用顺序和备用关系。"
-
-msgid "Wired WAN"
-msgstr "有线 WAN"
-
-msgid "5G modem"
-msgstr "5G 模块"
-
-msgid "Other route"
+msgid "其他路由"
 msgstr "其他路由"
 
-msgid "No available exit"
-msgstr "暂无可用出口"
+msgid "有线 WAN"
+msgstr "有线 WAN"
 
-msgid "Only exit"
-msgstr "唯一出口"
+msgid "网络出口"
+msgstr "网络出口"
 
-msgid "Disabled by policy"
-msgstr "策略已停用"
+msgid "未纳入策略"
+msgstr "未纳入策略"
 
-msgid "Preferred exit"
+msgid "首选出口"
 msgstr "首选出口"
 
-msgid "Fallback exit"
+msgid "备用出口 · 已接管"
+msgstr "备用出口 · 已接管"
+
+msgid "备用出口"
 msgstr "备用出口"
 
-msgid "Not configured"
-msgstr "未配置"
+msgid "出口分流"
+msgstr "出口分流"
 
-msgid "Connected"
-msgstr "已连接"
+msgid "告警"
+msgstr "告警"
 
-msgid "Disconnected"
-msgstr "未连接"
+msgid "IPv4 "
+msgstr "IPv4 "
 
-msgid "IPv4 in use"
-msgstr "IPv4 使用中"
+msgid "IPv6 "
+msgstr "IPv6 "
 
-msgid "IPv4 ready"
-msgstr "IPv4 可用"
-
-msgid "IPv4 unavailable"
-msgstr "IPv4 不可用"
-
-msgid "IPv6 in use"
-msgstr "IPv6 使用中"
-
-msgid "IPv6 ready"
-msgstr "IPv6 可用"
-
-msgid "IPv6 unavailable"
-msgstr "IPv6 不可用"
-
-msgid "No default route is currently available. Check the cable or 5G connection."
-msgstr "当前没有可用的默认出口，请检查网线或 5G 连接。"
-
-msgid "Only %s is enabled by the current policy."
-msgstr "当前策略仅启用了 %s。"
-
-msgid "%s is unavailable, so traffic has switched to %s."
-msgstr "%s 当前不可用，流量已自动切换到 %s。"
-
-msgid "%s is unavailable, so IPv4 has switched to %s. IPv6 remains disabled to avoid splitting traffic across two exits."
-msgstr "%s 当前不可用，IPv4 已自动切换到 %s；为避免双栈分流，备用线路的 IPv6 保持停用。"
-
-msgid "IPv4 is using %s. IPv6 is unavailable on the preferred exit, so fallback IPv6 is disabled to avoid splitting traffic."
-msgstr "IPv4 正在使用 %s；首选线路没有可用 IPv6，因此备用线路 IPv6 已自动停用，避免流量分走两条线路。"
-
-msgid "IPv4 and IPv6 are using the preferred exit. The fallback will take over when needed."
-msgstr "IPv4 与 IPv6 正在使用首选出口；首选出口不可用时，备用出口会自动接管。"
-
-msgid "Traffic is currently using another default route."
-msgstr "流量当前正在使用其他默认路由。"
-
-msgid "Current exit: %s"
+msgid "当前出口：%s"
 msgstr "当前出口：%s"
 
-msgid "IPv4: %s · IPv6: %s"
-msgstr "IPv4：%s · IPv6：%s"
+msgid "在线"
+msgstr "在线"
 
-msgid "Usage policy"
-msgstr "使用策略"
+msgid "未指定"
+msgstr "未指定"
 
-msgid "The preferred exit is used whenever it is available. A fallback exit takes over automatically."
-msgstr "首选出口可用时优先使用；首选出口断开后，备用出口会自动接管。"
+msgid "当前出口：其他路由"
+msgstr "当前出口：其他路由"
 
-msgid "Exit policy"
-msgstr "出口策略"
+msgid "外部接管"
+msgstr "外部接管"
 
-msgid "Using only one exit disables automatic fallback."
-msgstr "选择“仅使用”模式后不会自动切换到另一条线路。"
+msgid "daed 接管"
+msgstr "daed 接管"
 
-msgid "Exit policy applied successfully."
-msgstr "出口策略已成功应用。"
+msgid "外部路由"
+msgstr "外部路由"
 
-msgid "Failed to apply exit policy:"
-msgstr "出口策略应用失败："
+msgid "不在本插件策略内"
+msgstr "不在本插件策略内"
 
-msgid "Unknown error"
-msgstr "未知错误"
+msgid "无可用出口"
+msgstr "无可用出口"
 
-msgid "Not selected"
+msgid "离线"
+msgstr "离线"
+
+msgid "无出口"
+msgstr "无出口"
+
+msgid "策略："
+msgstr "策略："
+
+msgid "分流告警"
+msgstr "分流告警"
+
+msgid "无默认路由"
+msgstr "无默认路由"
+
+msgid "策略被绕过"
+msgstr "策略被绕过"
+
+msgid "单出口运行"
+msgstr "单出口运行"
+
+msgid "无备用链路"
+msgstr "无备用链路"
+
+msgid "主备就绪"
+msgstr "主备就绪"
+
+msgid "点击连接卡片切换首选出口，“仅用此出口”会移除备用链路。"
+msgstr "点击连接卡片切换首选出口，“仅用此出口”会移除备用链路。"
+
+msgid "就绪"
+msgstr "就绪"
+
+msgid "不可用"
+msgstr "不可用"
+
+msgid "正常"
+msgstr "正常"
+
+msgid "异常"
+msgstr "异常"
+
+msgid "未探测"
+msgstr "未探测"
+
+msgid "%s/%s 射频在线"
+msgstr "%s/%s 射频在线"
+
+msgid "未检测到射频"
+msgstr "未检测到射频"
+
+msgid "%s 台客户端"
+msgstr "%s 台客户端"
+
+msgid "无线未启用"
+msgstr "无线未启用"
+
+msgid "5G 模组"
+msgstr "5G 模组"
+
+msgid "流量转发"
+msgstr "流量转发"
+
+msgid "IPv4 与 IPv6 出口不一致"
+msgstr "IPv4 与 IPv6 出口不一致"
+
+msgid "IPv4 与 IPv6 同出口"
+msgstr "IPv4 与 IPv6 同出口"
+
+msgid "自动切换"
+msgstr "自动切换"
+
+msgid "运行中 · 每 %s 秒"
+msgstr "运行中 · 每 %s 秒"
+
+msgid "已停止"
+msgstr "已停止"
+
+msgid "IPv6 / 上行"
+msgstr "IPv6 / 上行"
+
+msgid "已禁用"
+msgstr "已禁用"
+
+msgid "出口 "
+msgstr "出口 "
+
+msgid "策略：IPv6 跟随 IPv4 出口"
+msgstr "策略：IPv6 跟随 IPv4 出口"
+
+msgid "链路检测"
+msgstr "链路检测"
+
+msgid "WAN "
+msgstr "WAN "
+
+msgid "模组 "
+msgstr "模组 "
+
+msgid "未启用"
+msgstr "未启用"
+
+msgid "探测公共 anycast 地址"
+msgstr "探测公共 anycast 地址"
+
+msgid "启用后可提前发现假连接"
+msgstr "启用后可提前发现假连接"
+
+msgid "智能路由"
+msgstr "智能路由"
+
+msgid "外部路由接管"
+msgstr "外部路由接管"
+
+msgid "本插件自主选路"
+msgstr "本插件自主选路"
+
+msgid "daed 出口 "
+msgstr "daed 出口 "
+
+msgid "FIB 查询 · 最低 metric 胜出"
+msgstr "FIB 查询 · 最低 metric 胜出"
+
+msgid "5G 优先"
+msgstr "5G 优先"
+
+msgid "仅有线"
+msgstr "仅有线"
+
+msgid "仅 5G"
+msgstr "仅 5G"
+
+msgid "有线优先"
+msgstr "有线优先"
+
+msgid "出口已分流：IPv4 走 %s，IPv6 走 %s。部分应用会因出口不一致而连接失败，建议点击\"对齐出口\"。"
+msgstr "出口已分流：IPv4 走 %s，IPv6 走 %s。部分应用会因出口不一致而连接失败，建议点击\"对齐出口\"。"
+
+msgid "未选择"
 msgstr "未选择"
 
-msgid "Click the connection cards to set the order. The first is preferred and the second is fallback."
-msgstr "点击线路卡片设置使用顺序；第一条为首选出口，第二条为备用出口。"
+msgid "唯一出口 · 备用已禁用"
+msgstr "唯一出口 · 备用已禁用"
 
-msgid "Apply settings"
+msgid "未配置"
+msgstr "未配置"
+
+msgid "已连接"
+msgstr "已连接"
+
+msgid "协商中"
+msgstr "协商中"
+
+msgid "网线未接"
+msgstr "网线未接"
+
+msgid "已断开"
+msgstr "已断开"
+
+msgid "接口"
+msgstr "接口"
+
+msgid "IPv4 使用中"
+msgstr "IPv4 使用中"
+
+msgid "IPv4 就绪"
+msgstr "IPv4 就绪"
+
+msgid "IPv4 不可用"
+msgstr "IPv4 不可用"
+
+msgid "IPv6 使用中"
+msgstr "IPv6 使用中"
+
+msgid "IPv6 就绪"
+msgstr "IPv6 就绪"
+
+msgid "IPv6 不可用"
+msgstr "IPv6 不可用"
+
+msgid "将该链路设为唯一出口，另一条链路会被移出路由表，故障时不会自动接替"
+msgstr "将该链路设为唯一出口，另一条链路会被移出路由表，故障时不会自动接替"
+
+msgid "已是唯一出口"
+msgstr "已是唯一出口"
+
+msgid "仅用此出口"
+msgstr "仅用此出口"
+
+msgid "当前无默认路由可用。请检查网线或 5G 连接。"
+msgstr "当前无默认路由可用。请检查网线或 5G 连接。"
+
+msgid "当前策略仅启用 %s，另一条链路已从路由中移除，故障时不会自动接替。"
+msgstr "当前策略仅启用 %s，另一条链路已从路由中移除，故障时不会自动接替。"
+
+msgid "%s 不可用，IPv4 已切换至 %s；IPv6 保持禁用，避免流量分散到两个出口。"
+msgstr "%s 不可用，IPv4 已切换至 %s；IPv6 保持禁用，避免流量分散到两个出口。"
+
+msgid "%s 不可用，IPv4 与 IPv6 已一并切换至 %s。"
+msgstr "%s 不可用，IPv4 与 IPv6 已一并切换至 %s。"
+
+msgid "IPv4 正在使用 %s。该出口的 IPv6 不可用，备用 IPv6 已禁用以避免分流。"
+msgstr "IPv4 正在使用 %s。该出口的 IPv6 不可用，备用 IPv6 已禁用以避免分流。"
+
+msgid "IPv4 与 IPv6 正一同使用首选出口 %s，备用出口将在需要时接替。"
+msgstr "IPv4 与 IPv6 正一同使用首选出口 %s，备用出口将在需要时接替。"
+
+msgid "当前流量走其他默认路由（可能由 mwan3、VPN 或 QModem 接管）。"
+msgstr "当前流量走其他默认路由（可能由 mwan3、VPN 或 QModem 接管）。"
+
+msgid "自动看门狗："
+msgstr "自动看门狗："
+
+msgid "运行中"
+msgstr "运行中"
+
+msgid "链路健康探测："
+msgstr "链路健康探测："
+
+msgid "已启用"
+msgstr "已启用"
+
+msgid "IPv6 对齐策略："
+msgstr "IPv6 对齐策略："
+
+msgid "跟随 IPv4 出口"
+msgstr "跟随 IPv4 出口"
+
+msgid "有线 WAN 接口"
+msgstr "有线 WAN 接口"
+
+msgid "5G 模组接口"
+msgstr "5G 模组接口"
+
+msgid "出口策略"
+msgstr "出口策略"
+
+msgid "未知错误"
+msgstr "未知错误"
+
+msgid "设置已应用，正在等待网络重新收敛…"
+msgstr "设置已应用，正在等待网络重新收敛…"
+
+msgid "设置应用失败："
+msgstr "设置应用失败："
+
+msgid "已请求重新对齐 IPv4 与 IPv6 出口。"
+msgstr "已请求重新对齐 IPv4 与 IPv6 出口。"
+
+msgid "对齐失败："
+msgstr "对齐失败："
+
+msgid "对齐出口"
+msgstr "对齐出口"
+
+msgid "应用中…"
+msgstr "应用中…"
+
+msgid "应用设置"
 msgstr "应用设置"
 
-msgid "Applying…"
-msgstr "正在应用…"
+msgid "Mobile Network"
+msgstr "Mobile Network"
 
-msgid "Exit selection applied successfully."
-msgstr "出口选择已成功应用。"
+msgid "Exit Priority"
+msgstr "Exit Priority"
 
-msgid "Failed to apply exit selection:"
-msgstr "出口选择应用失败："
+msgid "Ethernet"
+msgstr "Ethernet"
 
-msgid "ETH fallback interfaces"
-msgstr "ETH 备用接口"
-
-msgid "Select additional wired interfaces that should be treated as WAN instead of 5G modem. This prevents non-modem network sections from being misidentified."
-msgstr "选择应视为 WAN 而非 5G 模块的额外有线接口，避免非模组网段被错误识别。"
-
-msgid "No additional interfaces found."
-msgstr "未发现额外接口。"
-
-msgid "Settings applied successfully."
-msgstr "设置已成功应用。"
-
-msgid "Failed to apply settings:"
-msgstr "设置应用失败："
+msgid "5G / LTE"
+msgstr "5G / LTE"

@@ -808,6 +808,14 @@ return view.extend({
 		return _('有线优先');
 	},
 
+	// The policy sentence for the split case.  Kept beside modeLabel() so the two
+	// descriptions of the same policy cannot drift: exitVerdict() needs the same
+	// wording as the banner, and duplicating the literal in both places is how
+	// they would end up disagreeing.
+	splitSentence: function(data) {
+		return _('出口已分流：IPv4 走 %s，IPv6 走 %s。部分应用会因出口不一致而连接失败，建议点击"对齐出口"。')
+			.format(this.exitLabel(data.active4), this.exitLabel(data.active6));
+	},
 	exitLabel: function(exit) {
 		if (exit === 'wan') return _('有线 WAN');
 		if (exit === 'modem') return _('5G 模组');
@@ -1008,8 +1016,7 @@ return view.extend({
 		// outranks every other message.
 		if (data.split === '1') {
 			return {
-				text: _('出口已分流：IPv4 走 %s，IPv6 走 %s。部分应用会因出口不一致而连接失败，建议点击"对齐出口"。')
-					.format(this.exitLabel(active4), this.exitLabel(active6)),
+				text: this.splitSentence(data),
 				cls: 'h5net-note alert'
 			};
 		}

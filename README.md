@@ -61,7 +61,8 @@
 | 双重触发机制 | Hotplug 感知接口 up/down，procd 看门狗按周期重算，覆盖事件丢失与外部改动默认路由的场景 |
 | 出口判定基于 FIB | 用 `ip route get` 询问内核实际出口，尊重策略路由（mwan3 / qmodem / VPN / daed） |
 | 链路状态分级 | 区分已连接 / 协商中 / 网线未接 / 已断开，网卡载波仅作参考信号 |
-| 分流可观测 | IPv4 与 IPv6 走不同出口时显式告警，并提供一键「对齐出口」 |
+| 代理隧道可识别 | 按网卡内核类型（`ARPHRD_NONE` 等）识别 TUN 隧道，并把它归属到代理实际使用的上行链路，而不是当成第三个出口 |
+| 分流可观测 | IPv4 与 IPv6 走不同**上行链路**时显式告警，并提供一键「对齐出口」；判定按出口归属而非网卡名比较，带透明代理时不会假报 |
 | 运行状态总览 | 页头卡片下方 8 个动态图标各自绑定一项真实后端字段，配色与动画随状态变化；子系统未启用或故障时图标转为灰/红并停止动画 |
 | 页头合并卡片 | 一张卡片同时说明**策略**与**当前出口**：左半报策略结论（主备就绪 / 无备用链路 / 单出口运行…）并配一枚按真实出口绘制动效的动态 SVG，右半报承载链路的真实网卡名与策略位置，故障与分流转为红色并停止动画 |
 | 链路健康探测 | 默认启用（opt-out），探测公共 anycast 地址以识别「接口已 up 却不通」的假连接；结果仅作诊断，不驱动切换 |
@@ -86,9 +87,11 @@ flowchart TD
     D --> E{"默认出口属于谁"}
     E -->|"有线 WAN"| F["认领该链路<br/>维护其状态与默认路由"]
     E -->|"5G 模组"| F
-    E -->|"外部路由<br/>mwan3 / VPN / daed"| G["报「其他路由」<br/>不认领、不染绿"]
+    E -->|"TUN 隧道<br/>透明代理"| M["归属到代理实际出口<br/>daed_exit_state"]
+    M --> F
+    E -->|"外部路由<br/>mwan3 / VPN"| G["报「其他路由」<br/>不认领、不染绿"]
     F --> H["IPv6 出口跟随 IPv4 收敛<br/>单一写者"]
-    H --> I{"IPv4 与 IPv6 同出口？"}
+    H --> I{"IPv4 与 IPv6 归属相同？"}
     I -->|否| J["红色「出口分流」<br/>+ 一键对齐出口"]
     I -->|是| K["正常：同出口"]
     F --> L["默认出口变化<br/>重载 daed"]
@@ -96,8 +99,8 @@ flowchart TD
 
 1. 用户通过 LuCI 卡片选择出口策略，前端**串行**调用后端写入 UCI 配置；
 2. 后端根据策略维护 WAN / 5G 接口状态与默认路由（含 IPv6）；
-3. 后端用 `ip route get` 向内核查询**实际**默认出口，而不是读取 main 表，因此策略路由（mwan3 / qmodem / VPN / daed）环境下的判定依然准确；
-4. IPv6 出口由单一写者收敛：始终跟随现役 IPv4 出口，切换时先拆除旧族默认路由再建立新族；
+3. 后端用 `ip route get` 向内核查询**实际**默认出口，而不是读取 main 表，因此策略路由（mwan3 / qmodem / VPN / daed）环境下的判定依然准确；若出口是 TUN 隧道（透明代理），则按网卡内核类型识别并归属到代理实际使用的上行链路；
+4. IPv6 出口由单一写者收敛：始终跟随现役 IPv4 出口，切换时先拆除旧族默认路由再建立新族；「分流」按两个协议族的**出口归属**比较，而非按网卡名比较，因此在代理承载流量时不会把「IPv4 走 `eth2`、IPv6 走 `singtun0`」误报为分流；
 5. 链路状态变化时，Hotplug 脚本（`95-h5000m-netmode`）委托后端对 section 分类并触发重新计算；
 6. procd 看门狗（`/etc/init.d/h5000m-netmode`）按 `watch_interval` 周期复算，覆盖 Hotplug 看不到的漂移；
 7. 默认出口变化时联动重载 daed，保持代理链路一致；
@@ -176,7 +179,7 @@ opkg remove luci-app-h5000m-netmode
 | --- | --- | --- |
 | 标题 | 网络出口 | 固定（页面标题） |
 | 图标 | 动态 SVG：左边路由器，右上有线插座、右下蜂窝信号格，两支链路各带一条流动虚线 | 只有承载默认路由的那一支虚线流动，并点亮对应的插座 / 信号格；无出口或外部接管时整幅静止（`active4`、`active6`、`split`） |
-| 标题右侧 | 主备就绪 / 无备用链路 / 单出口运行 / 策略被绕过 / 无默认路由 / 分流告警 | 策略顺序与两条链路各自的分级状态、`split`、`active4`、`active6` |
+| 标题右侧 | 主备就绪 / 无备用链路 / 单出口运行 / 策略被绕过 / 无默认路由 / 分流告警 | 策略顺序与两条链路各自的分级状态、`split`、`active4`、`active6`（分流按出口归属比较，代理隧道归属到其上行链路） |
 | 徽标 | 有线优先 / 5G 优先 / 仅有线 / 仅 5G | `mode` |
 | 详情 | 策略顺序，如 `1 有线 WAN · 2 5G 模组` | `mode` |
 | 底部附注 | 点击连接卡片切换首选出口，「仅用此出口」会移除备用链路（620px 以下隐藏） | 固定说明 |
@@ -188,7 +191,7 @@ opkg remove luci-app-h5000m-netmode
 | 标题 | 当前出口：有线 WAN / 5G 模组 / 其他路由；或 出口分流 / 无可用出口 | `active4`（为 `none` 时回退到 `active6`）、`split` |
 | 标题右侧 | 在线 / 协商中 / 已断开 / 网线未接 / 未配置 / 外部接管 / 告警 / 离线，外加一枚呼吸圆点 | `wan_*` 或 `modem_*` 的分级链路状态、`split`、`daed_exit_state` |
 | 徽标 | Ethernet / 5G / LTE / daed 接管 / 外部路由 / 无出口 / `IPv4 <出口>` | 出口类型；分流时改为标出 IPv4 那一侧 |
-| 网卡 | 真实设备名（如 `eth1`） | `wan_device` / `modem_device` / `egress4` |
+| 网卡 | 真实设备名（如 `eth1`）；若该出口经透明代理承载则为隧道名（如 `singtun0`） | `wan_device` / `modem_device` / `egress4` |
 | 角色 | 首选出口 / 备用出口 · 已接管 / 未纳入策略 / 不在本插件策略内 / 策略：`<策略名>` | `mode` 推出的策略顺序与当前承载链路比对 |
 
 角色这一项刻意区分「备用出口」与「备用出口 · 已接管」：策略首选是 A、实际承载是 B，说明已经发生了故障转移，这正是需要被看见的信息，只写「备用」会把这件事藏起来。
@@ -206,7 +209,7 @@ opkg remove luci-app-h5000m-netmode
 | 有线 WAN | `wan_*` 链路状态 + 两个协议族的就绪情况 | 绿色，数据流动画运行 |
 | Wi-Fi | `wifi_up` / `wifi_total` / `wifi_ssid` / `wifi_clients` | 蓝色，信号波动画运行 |
 | 5G 模组 | `modem_*` 链路状态 + 两个协议族的就绪情况 | 绿色，环形动画运行 |
-| 流量转发 | `egress4` / `egress6` / `split` | 橙色，数据包位移动画运行 |
+| 流量转发 | `egress4` / `egress6` / `active4` / `active6` / `split` | 橙色，数据包位移动画运行；同出口判定按归属比较，经代理时显示 `eth2 → singtun0` 并标注「IPv4 与 IPv6 同出口」 |
 | 自动切换 | `watcher` / `watch_interval` / `mode` | 紫色，环形进度动画运行 |
 | IPv6 / 上行 | `active6` / `egress6` / `split` | 青色，上传动画运行 |
 | 链路检测 | `health_check` / `wan_health` / `modem_health` | 红色，扫描动画运行 |
@@ -287,7 +290,7 @@ config settings 'settings'
 
 ```sh
 /usr/sbin/h5000m-netmode status                          # 查看完整状态（排查首选）
-/usr/sbin/h5000m-netmode status | grep -E '^(egress4|egress6|split)='   # 只看同出口不变量
+/usr/sbin/h5000m-netmode status | grep -E '^(active4|active6|split)='   # 只看同出口不变量
 /usr/sbin/h5000m-netmode reconcile                       # 强制对齐 IPv4/IPv6 出口
 /usr/sbin/h5000m-netmode iface-role 2_1                  # 查看某 section 的角色
 /usr/sbin/h5000m-netmode list-devices                    # 列出可用 eth 设备
@@ -327,10 +330,13 @@ uci set h5000m_netmode.settings.watcher=0 && uci commit h5000m_netmode   # 停�
 │   ├── sbin/h5000m-netmode-status # 状态查询
 │   └── share/luci/menu.d/         # LuCI 菜单注册
 ├── tests/
-│   ├── run_tests.sh               # 后端确定性测试（162 项断言，支持按用例名过滤）
+│   ├── run_tests.sh               # 后端确定性测试（176 项断言，支持按用例名过滤）
 │   ├── svg_audit.js               # 前端审计：SVG 平衡 / 关键帧 / 动画绑定 / 选择器作用域 / 字段契约
+│   ├── render_live.js             # 把实机 status 输出灌入真实渲染路径，检查各区域是否互相矛盾
 │   ├── test_exit_card.js          # 页头合并卡片测试（离机，154 项断言：四分支 + 两半结构）
 │   └── mockbin/                   # 纯 shell 依赖替身
+├── tools/
+│   └── sync_po.py                 # 从视图源码与菜单 JSON 生成 .po；--check 用于 CI 防漂移
 ├── docs/preview.png               # 界面预览图（仅用于 README，不进入软件包）
 ├── scripts/build-release.sh       # 发布构建脚本
 ├── Makefile                       # OpenWrt 构建描述
@@ -346,6 +352,7 @@ uci set h5000m_netmode.settings.watcher=0 && uci commit h5000m_netmode   # 停�
 
 | 版本 | 日期 | 主要更新 |
 | --- | --- | --- |
+| [Unreleased](CHANGELOG.md) | — | 修复透明代理隧道被误判为「其他路由」导致的分流误报；`split` 改为按出口归属比较；重建失效的翻译目录并加 CI 同步检查 |
 | [v1.6.0](CHANGELOG.md) | 2026-09-14 | 新增运行状态总览（8 个动态图标绑定真实状态）；页头改为一张合并卡片（左半报策略并配按真实出口绘制动效的动态 SVG，右半报当前出口）；链路健康探测改为默认启用并支持探测节流；新增无线侧运行状态（射频/SSID/客户端数）；新增离机前端测试；修正轮询重绘打断图标动画的问题 |
 | [v1.5.0](CHANGELOG.md) | 2026-09-14 | 出口判定改用 FIB 查询；IPv6 出口收敛为单一写者；新增 procd 看门狗与分级链路状态；修正单击卡片禁用备用链路的误触发；新增确定性测试套件 |
 | [v1.4.0](CHANGELOG.md) | 2026-08-04 | 物理接口手动映射（卡片内嵌下拉框）；新增 `list-devices` / `get-device-map` / `set-device-map` 子命令 |
@@ -361,10 +368,12 @@ uci set h5000m_netmode.settings.watcher=0 && uci commit h5000m_netmode   # 停�
 先跑一遍快速自检；每条的根因、判定逻辑与更完整的排查手法见 [FIXES.md](FIXES.md)。
 
 ```sh
-# 1. IPv4 与 IPv6 是否走同一出口：split 必须为 0
+# 1. IPv4 与 IPv6 是否走同一出口：split 必须为 0，active4 与 active6 必须相等
 /usr/sbin/h5000m-netmode status | grep -E '^(egress4|egress6|active4|active6|split)='
 
-# 2. 内核实际出口（尊重策略路由），应与上面的 egress4/egress6 一致
+# 2. 内核实际出口（尊重策略路由）；与 egress4/egress6 一致即说明判定正确
+#    注意：若经透明代理承载，两条族的默认路由会落在同一个隧道上（如 singtun0），
+#    此时网卡名不同但出口归属相同，split 仍应为 0
 ip -4 route get 1.1.1.1 | head -1
 ip -6 route get 2606:4700:4700::1111 | head -1
 
@@ -381,10 +390,12 @@ logread | grep h5000m-netmode | tail -5
 | 现象 | 优先检查 |
 | --- | --- |
 | 界面显示「已断开」但网线已插好 | 该出口的 `_available` / `_pending`；协商期间显示「协商中」属正常 |
-| 合并卡片变红并显示「出口分流」 | 已检测到分流，点击「对齐出口」，并检查 `ipv6_owner` / `ipv6_desired` |
+| 合并卡片变红并显示「出口分流」 | 先看 `active4` / `active6` 是否真的不同——若二者相同而 `egress4` / `egress6` 是不同网卡名，那是经透明代理承载的正常现象，`split` 应为 0；确为分流时点击「对齐出口」，并检查 `ipv6_owner` / `ipv6_desired` |
+| 带 daed / sing-box 时持续报「分流」 | 确认后端版本已含 `is_tunnel_device()`：`grep -c is_tunnel_device /usr/sbin/h5000m-netmode` 应为非 0；再看 `cat /var/run/h5000m-netmode.daed-exit` 是否为 `wan` / `modem` |
 | 主链路断开后没有自动切换 | `watcher` 是否为 `on`、看门狗进程是否存在，再看 `logread \| grep h5000m-netmode` |
 | 界面状态与命令行输出不一致 | 页面每 5 秒轮询一次；以 `h5000m-netmode status` 的输出为准 |
 | 改了下拉框但 5 秒后自己变回去 | 该版本已修复；确认固件中的前端资源已更新 |
+| 界面仍有英文未翻译 | 确认 `po/zh_Hans/h5000m-netmode.po` 与视图源码同步（`python3 tools/sync_po.py --check`）；该目录在早期版本中整份失效，已重建 |
 
 ---
 
@@ -407,6 +418,15 @@ logread | grep h5000m-netmode | tail -5
 
 **Q：IPv6 流量会走错出口吗？**
 不会。后端自动约束 IPv6 出口跟随现役 IPv4 出口；若因外部操作出现不一致，会在一秒内纠正并在界面红色告警，同时提供「对齐出口」按钮。
+
+**Q：我开了 daed / sing-box 透明代理，页面显示 IPv4 走 `eth2`、IPv6 走 `singtun0`，这算分流吗？**
+不算。`singtun0` 是本地 TUN 隧道而非上行链路，它承载的流量最终仍从代理绑定的那条上行出去。后端按网卡内核类型识别隧道，并把隧道归属到 `daed_exit_state` 记录的上行链路，因此 `active4` 与 `active6` 相同、`split=0`，页面显示「IPv4 与 IPv6 同出口」。只有两个协议族归属到**不同上行链路**时才会报分流。
+
+**Q：为什么「分流」判定不看网卡名？**
+因为网卡名相同只在「两个出口都是物理网卡」时才是同一件事的等价描述。一旦中间有隧道、策略路由或代理，网卡名就不再等于上行链路。判定按解析后的出口归属（`active4` / `active6`）进行，语义与「两个协议族走了不同上行」严格对齐。
+
+**Q：界面出现了没翻译的英文？**
+v1.6.0 及更早的软件包中 `po/zh_Hans/h5000m-netmode.po` 整份描述的是更早一版界面，与当前页面的字符串零重叠，因此翻译全部失效。该目录已重建，并由 CI 的 `python3 tools/sync_po.py --check` 防止再次漂移。
 
 **Q：看门狗每隔几秒就重算一次，会不会导致网络抖动？**
 不会。只有在观测状态偏离期望状态时才会写入。稳定配置下每次复算只做只读查询，不提交 UCI、不重载 netifd，日志也不会新增。若仍希望完全停用，设 `h5000m_netmode.settings.watcher=0` 并重启该服务。

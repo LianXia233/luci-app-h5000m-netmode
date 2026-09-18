@@ -357,6 +357,28 @@ device_matches() {
 	return 1
 }
 
+# Is this netdev a local tunnel rather than an uplink?
+#
+# The device carries a transparent proxy whose own egress is one of the two
+# uplinks (daed / sing-box / a VPN helper).  Such an interface is never the
+# physical exit: `singtun0` holds the default route in the proxy table, but the
+# packets ultimately leave through eth1 or eth2.  Classifying the tunnel name
+# itself with route_owner() compared a TUN against the uplink netdevs, never
+# matched, and produced `active6=other` - which then tripped `split=1` and made
+# the page report a family split on a device whose IPv4 and IPv6 both left via
+# the modem.  Detection is by netdev type (ARPHRD_NONE / ARPHRD_TUNNEL and
+# friends), so it does not depend on a name list that a user can change.
+is_tunnel_device() {
+	local device="$1" type
+	[ -n "$device" ] || return 1
+	[ -r "${SYS_CLASS_NET}/${device}/type" ] || return 1
+	type="$(cat "${SYS_CLASS_NET}/${device}/type" 2>/dev/null || true)"
+	case "$type" in
+		65534|768|769|776|778) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
 route_owner() {
 	local device="$1"
 	[ -n "$device" ] || { echo none; return 0; }
@@ -364,6 +386,19 @@ route_owner() {
 		echo wan
 	elif device_matches "$device" $MODEM_DEVICES; then
 		echo modem
+	elif is_tunnel_device "$device"; then
+		# A tunnel carries whichever uplink the proxy is bound to, which this
+		# app already tracks in DAED_EXIT_STATE_FILE.  Attribute the tunnel to
+		# that uplink instead of inventing a third owner: the physical exit is
+		# what the primary/backup verdict is about, and reporting `other` here
+		# was the false split.
+		local proxy_exit
+		proxy_exit="$(cat "$DAED_EXIT_STATE_FILE" 2>/dev/null || true)"
+		case "$proxy_exit" in
+			wan) echo wan ;;
+			modem) echo modem ;;
+			*) echo other ;;
+		esac
 	else
 		echo other
 	fi
@@ -972,8 +1007,24 @@ print_status() {
 	select_ipv6_desired
 
 	ipv6_owner="$(uci_get h5000m_netmode.settings.ipv6_owner)"
+
+	# A split is "the two families leave through different uplinks", so the two
+	# families are compared by uplink owner - not by interface name.
+	#
+	# Comparing EGRESS4 with EGRESS6 only worked while both exits were physical
+	# netdevs.  With a transparent proxy in the path the IPv6 default route sits
+	# on the TUN (singtun0) while its traffic still leaves through the same
+	# uplink as IPv4, so a name comparison reported a split on a device that had
+	# none - and the page then told the user to press "对齐出口" for a problem
+	# that did not exist.  ACTIVE4/ACTIVE6 already resolve a device to its role,
+	# including the tunnel-to-uplink attribution done in route_owner(), so they
+	# are the correct operands here.  `other` is deliberately not compared
+	# against `none`: no default route at all is reported by the caller as its
+	# own condition, not as a split.
 	split=0
-	if [ -n "$EGRESS4" ] && [ -n "$EGRESS6" ] && [ "$EGRESS4" != "$EGRESS6" ]; then
+	if [ -n "$EGRESS4" ] && [ -n "$EGRESS6" ] \
+		&& [ "$ACTIVE4" != "none" ] && [ "$ACTIVE6" != "none" ] \
+		&& [ "$ACTIVE4" != "$ACTIVE6" ]; then
 		split=1
 	fi
 

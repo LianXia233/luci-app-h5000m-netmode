@@ -172,6 +172,14 @@ netdev() { # <dev> [carrier]
 	fi
 }
 
+# A transparent-proxy tunnel: a netdev that carries traffic but is not an uplink.
+# ARPHRD_NONE (65534) is what a TUN reports, which is how the backend tells a
+# tunnel apart from a NIC (ARPHRD_ETHER = 1) without hard-coding device names.
+tunnel() { # <dev>
+	mkdir -p "$SC/sysfs/$1"
+	printf '%s' 65534 > "$SC/sysfs/$1/type"
+}
+
 # ---------------------------------------------------------------------------
 # running the backend
 # ---------------------------------------------------------------------------
@@ -356,6 +364,80 @@ $MODEM_ROUTE" \
 		"$(route_on_dev 'default via fe80::1 dev eth2 metric 50' '@2_1')"
 	check_eq 'symbolic-dev new value matches the route' '1' \
 		"$(route_on_dev 'default via fe80::1 dev eth2 metric 50' 'eth2')"
+}
+
+# A transparent proxy puts the IPv6 default route on a TUN (singtun0) while the
+# IPv4 default route stays on the physical uplink.  Both families still leave
+# through the same uplink, so this is NOT a split: the tunnel belongs to whatever
+# exit the proxy is bound to, which daed records in the exit-state file.
+#
+# The original code compared the two interface NAMES, so `eth2` vs `singtun0`
+# never matched and every proxy user saw a permanent "exit split" warning with a
+# button telling them to "align" an exit that was already aligned.
+test_proxy_tunnel_is_not_a_family_split() {
+	base_scenario
+	# The proxy exits through the modem.
+	printf 'modem' > "$SC/daed-exit"
+	tunnel singtun0
+	routes "$MODEM_ROUTE" \
+		'default via fe80::c08d:2eff:fec4:3402 dev singtun0 metric 512' \
+		'1.1.1.1 via 10.13.35.1 dev eth2 src 10.13.35.40 uid 0' \
+		'2606:4700:4700::1111 via fe80::c08d:2eff:fec4:3402 dev singtun0 src 2409::1 uid 0'
+
+	run status
+	check_eq 'tunnel rc' '0' "$rc"
+	check_eq 'tunnel egress4' 'eth2' "$(sv egress4)"
+	check_eq 'tunnel egress6' 'singtun0' "$(sv egress6)"
+	check_eq 'tunnel active4' 'modem' "$(sv active4)"
+	check_eq 'tunnel active6 follows the proxy exit' 'modem' "$(sv active6)"
+	check_eq 'tunnel is not reported as a split' '0' "$(sv split)"
+}
+
+# The same proxy bound to the wired WAN must be attributed to the WAN.
+test_proxy_tunnel_attributes_to_the_proxy_exit() {
+	base_scenario
+	printf 'wan' > "$SC/daed-exit"
+	tunnel singtun0
+	routes "$WAN_ROUTE" \
+		'default via fe80::1 dev singtun0 metric 512' \
+		'1.1.1.1 via 192.168.88.1 dev eth1 src 192.168.88.187 uid 0' \
+		'2606:4700:4700::1111 via fe80::1 dev singtun0 src 2409::1 uid 0'
+
+	run status
+	check_eq 'tunnel-wan active4' 'wan' "$(sv active4)"
+	check_eq 'tunnel-wan active6 follows the proxy exit' 'wan' "$(sv active6)"
+	check_eq 'tunnel-wan is not a split' '0' "$(sv split)"
+}
+
+# A real split - one family on each uplink - must still be reported.
+test_real_family_split_is_still_reported() {
+	base_scenario
+	routes "$WAN_ROUTE" \
+		"$MODEM_ROUTE" \
+		'1.1.1.1 via 192.168.88.1 dev eth1 src 192.168.88.187 uid 0' \
+		'2606:4700:4700::1111 via fe80::1 dev eth2 src 2409::1 uid 0'
+
+	run status
+	check_eq 'real-split active4' 'wan' "$(sv active4)"
+	check_eq 'real-split active6' 'modem' "$(sv active6)"
+	check_eq 'real-split is reported' '1' "$(sv split)"
+}
+
+# A tunnel whose proxy exit has not been recorded must not be mis-attributed to an
+# uplink: with nothing to go on, "other" is the honest answer, and it must not be
+# silently claimed as the live exit.
+test_tunnel_without_a_recorded_exit_stays_other() {
+	base_scenario
+	rm -f "$SC/daed-exit"
+	tunnel singtun0
+	routes "$MODEM_ROUTE" \
+		'default via fe80::1 dev singtun0 metric 512' \
+		'1.1.1.1 via 10.13.35.1 dev eth2 src 10.13.35.40 uid 0' \
+		'2606:4700:4700::1111 via fe80::1 dev singtun0 src 2409::1 uid 0'
+
+	run status
+	check_eq 'unknown-tunnel active6' 'other' "$(sv active6)"
+	check_eq 'unknown-tunnel split' '1' "$(sv split)"
 }
 
 # Invariant 2: IPv4 on the wired WAN but IPv6 leaked onto the modem must be
@@ -717,6 +799,10 @@ test_names="
 test_fib_oracle_beats_main_table
 test_metric_order_is_not_dump_order
 test_symbolic_device_reference_is_resolved
+test_proxy_tunnel_is_not_a_family_split
+test_proxy_tunnel_attributes_to_the_proxy_exit
+test_real_family_split_is_still_reported
+test_tunnel_without_a_recorded_exit_stays_other
 test_split_egress_is_repaired_towards_ipv4
 test_failover_moves_ipv6_and_drops_old_family_first
 test_no_ipv4_default_keeps_ipv6_untouched
