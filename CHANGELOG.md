@@ -25,12 +25,22 @@
 ### 变更
 
 - **发布包不再压缩前端 JS**：`luci.mk` 的 `CONFIG_LUCI_JSMIN` 默认为开，发布包里的 `netmode.js`
-  一直是 jsmin 的压缩产物（设备上 45124 字节 / 123 行，而仓库源码 66876 字节 / 1298 行），两者
+  一直是 jsmin 的压缩产物（设备上 45124 字节 / 122 行，而仓库源码 49765 字节 / 1083 行），两者
   md5 天然不等，线上排障无法用 `diff` 直接比对源码，热更与回滚也只能重新打包。现在
   `scripts/build-release.sh` 同时关掉 `CONFIG_LUCI_JSMIN` 与 `LUCI_MINIFY_JS`，并新增构建后断言：
-  解开 apk 取出 `netmode.js` 与仓库源码逐字节比对，不一致即失败。代价是包体积增加约 22 KB
+  在 `luci.mk` 写完、`mkpkg` 收纳之前的 `.pkgdir` 暂存目录里，把 `netmode.js` 与仓库源码逐字节
+  比对，不一致即失败。代价是包体积增加约 22 KB
 - 前端页面重写为 `.h5net-hero` / `.hero-*` 词汇，页头卡片改为左右两个同构半栏（左半报策略、
   右半报当前出口）
+
+### 修复（构建）
+
+- **压缩断言不再解 apk 容器**：断言最初直接 `tar -xzf` 解最终 `.apk`，而 OpenWrt 25.x 起
+  apk-tools 3 的容器已换成 `ADB.pckg`（魔数 `ADBd`）—— 整包是一段 raw deflate，解出来是私有的
+  段索引表，既不是 tar、也没有 gzip magic，`tar` 必然报 `gzip: stdin: not in gzip format` 并以
+  退出码 2 结束。该失败与 JS 压缩开关无关，是**探测方式绑定了打包器格式**：上游一换格式，整个
+  发布流程就整体红掉。现改为在 `.pkgdir` 暂存目录比对，该路径由 `luci.mk` 决定，与容器格式解耦
+  （同级的 `ipkg-all` 收尾会被 `make` 清掉，而 `.pkgdir` 被显式保留，是稳定观察点）
 
 ### 测试
 

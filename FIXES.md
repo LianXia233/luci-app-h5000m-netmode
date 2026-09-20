@@ -19,6 +19,8 @@
 - [九、状态呈现](#九状态呈现)
 - [十、本地化](#十本地化)
 - [十一、打包与权限](#十一打包与权限)
+  - [11.1 init 脚本没有执行位：服务「已启用」却从未启动](#111-init-脚本没有执行位服务已启用却从未启动)
+  - [11.2 别用 tar 解 apk：OpenWrt 25.x 起容器是 ADB.pckg](#112-别用-tar-解-apkopnewrt-25x-起容器是-adbpckg)
 
 ---
 
@@ -1219,3 +1221,91 @@ ps w | grep '[h]5000m-netmode watch'               # 期望有进程
 ```
 
 > **别用 `pgrep -f` 判定这件事**：`pgrep -f 'h5000m-netmode watch'` 会把**执行它的那条命令本身**算进去（命令行里含有同一个字符串）。判定用 `ps w | grep '[h]5000m-netmode watch'`（方括号技巧排除 grep 自身）或 `ubus call service list`。后端 `status` 的 `watcher=` 恰好是用 `pgrep -f` 写的，因此在外层命令行的包装方式与之匹配时会假报 `on`——核对以 `ubus` / `ps` 为准。
+
+### 11.2 别用 tar 解 apk：OpenWrt 25.x 起容器是 ADB.pckg
+
+**现象**（v1.6.3 云编译，`make` 已经成功产出 apk，紧接着构建失败）：
+
+```
+time: package/h5000m-custom/luci-app-h5000m-netmode/compile#0.69#0.38#0.98
+make[1]: Leaving directory '.../openwrt-sdk-mediatek-filogic_gcc-14.4.0_musl.Linux-x86_64'
+
+gzip: stdin: not in gzip format
+tar: Child returned status 1
+tar: Error is not recoverable: exiting now
+##[error]Process completed with exit code 2.
+```
+
+失败发生在断言里，而不是编译里——`time:` 那一行说明包已经打好了。
+
+**根因**：断言想验证「发布包里的 `netmode.js` 没被压缩」，于是 `tar -xzf luci-app-h5000m-netmode-*.apk` 解包。但 OpenWrt 25.x 起 apk-tools 3 的容器格式已换成 **`ADB.pckg`**：文件头魔数是 `ADBd`（不是 gzip 的 `1f 8b`），**整包是一段 raw deflate**（从偏移 4 开始，无 zlib/gzip 头），解出来是 `ADB.pckg` 私有的段索引表，既不是 tar，也没有 tar 目录项。`tar` 读不到 gzip 头，直接报错并按退出码 2 结束。
+
+实测确认（v1.6.2 真实 apk，28188 字节）：
+
+```python
+b = open('luci-app-h5000m-netmode-1.6.2-r1.apk', 'rb').read()
+b[:4]                      # b'ADBd'    —— 不是 tar，也不是 gzip
+b.find(b'\x1f\x8b\x08')    # -1         —— 全文没有 gzip magic
+zlib.decompressobj(-15).decompress(b[4:])[:8]   # b'ADB.pckg'
+```
+
+**危害**：这不是「压缩开关没关」——断言探测方式绑定了打包器内部格式，上游一换格式，整个发布流程就整体红掉，而真正要守的东西（JS 未压缩）其实一直是好的。这类断言的维护成本被低估了：它把发布流程的稳定性押在一个私有容器格式上。
+
+**修复**：不要解 `.apk`。改在 `luci.mk` 写完、`mkpkg` 收纳**之前**的暂存目录里比对：
+
+```
+build_dir/target-*/luci-app-h5000m-netmode/.pkgdir/luci-app-h5000m-netmode/www/luci-static/resources/view/h5000m/netmode.js
+```
+
+`Build/Install` 先把 `htdocs/*` 拷进 `.pkgdir/<pkg>/www/`，紧接着在**同一路径**上展开 `JsMin`（CSS 走 csstidy、JS 走 jsmin）就地覆盖，所以压缩与否在这个目录里已经完全定形——它就是即将被收进包的那份内容，只是还没被压缩存档。
+
+两个选择理由：
+
+1. **同级 `ipkg-all` 会被清掉**，`.pkgdir` 被显式保留。make 收尾时那条清理命令是：
+   `find .../luci-app-h5000m-netmode -mindepth 1 -maxdepth 1 -not '(' -type f -and -name '.*' -and -size 0 ')' -and -not -name '.pkgdir' -and -not -name 'version.date' -print0 | xargs -r -0 rm -rf`
+   只留 `.pkgdir` 与 `version.date`。拿 `ipkg-all` 当观察点会在断言执行时发现它已消失。
+2. **路径由 `luci.mk` 决定，与打包器格式无关**。apk-tools 再怎么改容器，`luci.mk` 的暂存布局都不会跟着变。
+
+```sh
+assert_js_unminified() {
+	local src_js packed rel_js total found_any
+	src_js="${repo_dir}/htdocs/luci-static/resources/view/h5000m/netmode.js"
+	rel_js="www/luci-static/resources/view/h5000m/netmode.js"
+	[ -f "${src_js}" ] || { echo "::error::source ${src_js} is missing"; return 1; }
+
+	total=0; found_any=0
+	for packed in $(find "${sdk_dir}/build_dir" -path "*/luci-app-h5000m-netmode/.pkgdir/*/${rel_js}" 2>/dev/null); do
+		found_any=1; total=$((total + 1))
+		if ! cmp -s "${src_js}" "${packed}"; then
+			echo "::error::staged netmode.js differs from the source - JS minification is back on"
+			echo "  source: $(wc -c < "${src_js}") bytes / $(wc -l < "${src_js}") lines"
+			echo "  staged: $(wc -c < "${packed}") bytes / $(wc -l < "${packed}") lines"
+			return 1
+		fi
+	done
+	[ "${found_any}" -eq 1 ] || {
+		echo "::error::no staged netmode.js under build_dir/*/luci-app-h5000m-netmode/.pkgdir/"
+		return 1; }
+	return 0
+}
+```
+
+**验证**（本地对照，样本取自 v1.6.2 真实 apk）：
+
+| 用例 | 输入 | 期望 | 实测 |
+|---|---|---|---|
+| 未压缩 | 49765 字节 / 1083 行（仓库源码） | 通过 | PASS |
+| 压缩版 | 45124 字节 / 122 行（从 apk 中提取） | 失败并打印两侧字节数 | FAIL，符合 |
+| 布局变更 | 暂存目录不存在 | 失败并提示断言需更新 | FAIL，符合 |
+
+**取压缩版样本的方法**（不需要 tar，也不需要 apk 工具）：
+
+```python
+import zlib
+b = open('luci-app-h5000m-netmode-1.6.2-r1.apk', 'rb').read()
+body = zlib.decompressobj(-15).decompress(b[4:])   # 解 ADB.pckg
+s = body.find(b"'use strict';")                    # js 内容段起点
+open('netmode.min.js', 'wb').write(body[s:s + 45124])
+```
+
+**附：为什么「日志里出现 jsmin」不能证明压缩开着**。`luci-base` 的 hostpkg 构建无论开关如何都会编译并安装 `jsmin` 二进制（`install -m0755 src/jsmin .../staging_dir/hostpkg/bin/jsmin`），因为它是 luci-base 自身构建的一部分。判断压缩是否**实际执行**，要看有没有 `.js.o` 这类临时产物名——那才是 `luci.mk` 的 `JsMin` 宏展开后才有的。本次 v1.6.3 的日志里 `.js.o` 零匹配，`.config` 生效证据是 `luci.mk` 第 244 行 `$(if $(CONFIG_LUCI_JSMIN),$(call JsMin,$(1)$(HTDOCS)/),true)` 走了 `true` 分支。
