@@ -69,41 +69,59 @@ make package/h5000m-custom/luci-app-h5000m-netmode/compile -j"$(nproc)" V=s
 find bin -type f \( -name 'luci-app-h5000m-netmode-*.apk' -o -name 'luci-app-h5000m-netmode_*.ipk' -o -name 'luci-i18n-h5000m-netmode-zh-cn-*.apk' -o -name 'luci-i18n-h5000m-netmode-zh-cn_*.ipk' \) -exec cp -f {} "${output_dir}/" \;
 test "$(find "${output_dir}" -type f \( -name '*.apk' -o -name '*.ipk' \) | wc -l)" -ge 2
 
-# 断言:包内的 netmode.js 与仓库源码逐字节一致,证明 JS 压缩确实关掉了。
+# 断言:将被写进包的 netmode.js 与仓库源码逐字节一致,证明 JS 压缩确实关掉了。
 #
 # "关了开关"和"产物里真的没压缩"是两件事:luci.mk 的开关名、默认值或调用点都
 # 可能随上游变化,而压缩后的文件照样能装、能跑,页面上看不出任何异常——只有把
-# 字节拿出来比对才能发现。压缩版 123 行、未压缩 1084 行,一行 cmp 就能判死。
+# 字节拿出来比对才能发现。压缩版 122 行 / 45124 字节、未压缩 1083 行 / 49765
+# 字节,一行 cmp 就能判死。
+#
+# 比对点选在 build_dir 里的 .pkgdir 暂存目录,而不是去解最终的 .apk:
+#
+#   luci.mk 的 Build/Install 把 htdocs/* 拷进
+#     build_dir/target-*/luci-app-h5000m-netmode/.pkgdir/luci-app-h5000m-netmode/www/
+#   紧接着在同一路径上展开 JsMin,CSS 走 csstidy、JS 走 jsmin,就地覆盖。
+#   所以"压缩是否发生"在这个目录里已经完全定形——它就是被 mkpkg 收进包的
+#   那份内容,只是还没被压缩存档。同级的 ipkg-all 在收尾时会被 make 清掉,
+#   .pkgdir 被显式保留(-not -name '.pkgdir'),是稳定的观察点。
+#
+#   反过来解 .apk 是不稳的:OpenWrt 25.x 起 apk-tools 3 的容器格式换成了
+#   ADB.pckg(魔数 "ADBd"),既不是 tar 也不是 gzip 流,每段独立压缩、偏移由
+#   索引表记录。按格式手工解析会跟着 apk-tools 版本漂移,一个上游改动就让整个
+#   发布流程红掉——那正是这次 v1.6.3 构建失败的根因(旧断言 tar -xzf 一个
+#   非 gzip 文件,报 "gzip: stdin: not in gzip format")。
+#
+#   .pkgdir 是 make 自己的中间产物,路径由 luci.mk 决定,跟打包器格式无关。
 assert_js_unminified() {
-	local apk_file verify_dir inner packed src_js
+	local src_js packed rel_js total found_any
 	src_js="${repo_dir}/htdocs/luci-static/resources/view/h5000m/netmode.js"
-	apk_file="$(find "${output_dir}" -maxdepth 1 -name 'luci-app-h5000m-netmode-*.apk' | head -n 1)"
-	[ -n "${apk_file}" ] || return 0
+	rel_js="www/luci-static/resources/view/h5000m/netmode.js"
+	[ -f "${src_js}" ] || {
+		echo "::error::source ${src_js} is missing"; return 1; }
 
-	verify_dir="$(mktemp -d)"
-	tar -xzf "${apk_file}" -C "${verify_dir}"
-	inner="$(find "${verify_dir}" -maxdepth 1 -name 'data.tar.*' | head -n 1)"
-	[ -n "${inner}" ] || {
-		echo "::error::${apk_file} has no data.tar.* payload; the apk layout changed"
-		return 1
-	}
-	mkdir -p "${verify_dir}/data"
-	case "${inner}" in
-		*.gz)  tar -xzf "${inner}" -C "${verify_dir}/data" ;;
-		*.zst) tar --zstd -xf "${inner}" -C "${verify_dir}/data" ;;
-		*) echo "::error::unknown payload compression: ${inner}"; return 1 ;;
-	esac
-	packed="${verify_dir}/data/www/luci-static/resources/view/h5000m/netmode.js"
-	[ -f "${packed}" ] || {
-		echo "::error::netmode.js missing from the built apk"; return 1; }
+	# 构建时可能同时存在多个 target 目录;逐个查,任一命中即算通过,
+	# 全都没找到才算失败(说明 luci.mk 的暂存布局变了)。
+	total=0
+	found_any=0
+	for packed in $(find "${sdk_dir}/build_dir" -path "*/luci-app-h5000m-netmode/.pkgdir/*/${rel_js}" 2>/dev/null); do
+		found_any=1
+		total=$((total + 1))
+		echo "checking ${packed}"
+		if ! cmp -s "${src_js}" "${packed}"; then
+			echo "::error::staged netmode.js differs from the source - JS minification is back on"
+			echo "  source: $(wc -c < "${src_js}") bytes / $(wc -l < "${src_js}") lines"
+			echo "  staged: $(wc -c < "${packed}") bytes / $(wc -l < "${packed}") lines"
+			return 1
+		fi
+	done
 
-	if ! cmp -s "${src_js}" "${packed}"; then
-		echo "::error::packaged netmode.js differs from the source - JS minification is back on"
-		echo "  source: $(wc -c < "${src_js}") bytes / $(wc -l < "${src_js}") lines"
-		echo "  packed: $(wc -c < "${packed}") bytes / $(wc -l < "${packed}") lines"
+	if [ "${found_any}" -eq 0 ]; then
+		echo "::error::no staged netmode.js found under build_dir/*/luci-app-h5000m-netmode/.pkgdir/"
+		echo "  the luci.mk staging layout changed; this assertion needs updating"
 		return 1
 	fi
-	echo "netmode.js is shipped unminified ($(wc -c < "${packed}") bytes)"
+
+	echo "netmode.js is staged unminified (${total} copy/copies, $(wc -c < "${src_js}") bytes)"
 	return 0
 }
 
