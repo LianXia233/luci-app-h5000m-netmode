@@ -88,10 +88,8 @@ const animClasses = [ ...new Set(scopedRules
 	.filter(Boolean)) ].sort();
 console.log('scoped animation classes (' + animClasses.length + '): ' + animClasses.join(', '));
 
-const expectedKeyframes = [ 'pulse', 'flow', 'wave', 'ring', 'signal', 'travel', 'progress',
-	'upload', 'scan', 'node',
-	// the exit card's own set, from the design sheet
-	'breath', 'led', 'dash', 'ec-ring', 'ec-wave', 'packet' ];
+const expectedKeyframes = [ 'h5-beacon', 'h5-dash', 'h5-dash-rev', 'h5-pulse',
+	'h5-ring', 'h5-ring-rev', 'h5-expand', 'h5-wave', 'h5-bounce-eq', 'h5-flow-dot' ];
 const missingKeyframes = expectedKeyframes.filter(k => keyframes.indexOf(k) < 0);
 report(!missingKeyframes.length, 'all sheet keyframes present',
 	missingKeyframes.length ? 'missing ' + missingKeyframes.join(', ') : '');
@@ -103,10 +101,8 @@ const dangling = referenced.filter(k => keyframes.indexOf(k) < 0);
 report(!dangling.length, 'every animation: target is declared',
 	dangling.length ? 'dangling ' + dangling.join(', ') : '');
 
-const expectedClasses = [ 'pulse', 'flow', 'wave', 'ring', 'signal', 'dash', 'blink', 'wave2',
-	'orbit', 'travel', 'progress', 'upload', 'scan', 'scan2', 'scan3', 'route', 'node',
-	// exit card
-	'wan-flow', 'wan-led', 'wan-ring', 'cell-wave', 'cell-core', 'cell-signal', 'cell-packet' ];
+const expectedClasses = [ 'svg-dash', 'svg-dash-fast', 'svg-flow-dot', 'svg-pulse',
+	'svg-spin', 'svg-spin-rev', 'svg-wave', 'svg-wave2', 'svg-wave3' ];
 const missingClasses = expectedClasses.filter(c => animClasses.indexOf(c) < 0);
 report(!missingClasses.length, 'every declared animation rule exists',
 	missingClasses.length ? 'missing ' + missingClasses.join(', ') : '');
@@ -116,12 +112,9 @@ report(!missingClasses.length, 'every declared animation rule exists',
 // not by accident: `wan-port` only sets fill / stroke / linecap on the card's
 // paths and is expected to be static.
 const NON_ANIMATED = new Set([
-	// the exit card's own static geometry: it sets fill / stroke / linecap only
-	'wan-port',
-	// the egress glyph's static geometry.  None of it carries state: which branch
-	// is live is decided by the card's eg-via-* rule, which switches that branch's
-	// .eg-flow overlay on, so the sockets, the bars and the base paths stay still.
-	'eg-dev', 'eg-link', 'eg-port', 'eg-bar'
+	// 新版没有任何纯展示类:SVG 里出现的每个 class 都绑定了一条动画规则,
+	// 状态差异改由 tone-* / is-* 作用在图标容器上表达(见 styleNode)。
+	// 集合保留为空,是为了让下面的检查在将来引入静态类时仍然有一处可登记。
 ]);
 const usedClasses = [ ...new Set(svgs.flatMap(s =>
 	[ ...s.matchAll(/class="([^"]+)"/g) ].flatMap(m => m[1].split(/\s+/)))) ].sort();
@@ -139,19 +132,25 @@ report(!missingTones.length, 'every base tone has a colour rule',
 report(src.indexOf('.h5net-icon.tone-live') < 0 && src.indexOf('tone-live') > -1,
 	'tone-live intentionally has no rule (card colour is kept)');
 
-for (const st of [ 'st-warn', 'st-bad', 'st-off', 'is-idle' ]) {
-	report(src.indexOf('.h5net-stat-icon.' + st) > -1, 'CSS defines .' + st);
-}
+// 旧版的 st-warn / st-bad / st-off 三态类已被 tone-* 体系取代,不再存在;
+// is-idle 仍然需要一条规则,它负责把一个失效图标的动画停住。
+report(src.indexOf('.h5net .is-idle') > -1, 'CSS defines .is-idle');
+report(src.indexOf('st-warn') < 0 && src.indexOf('st-bad') < 0 && src.indexOf('st-off') < 0,
+	'the retired .st-* state classes are gone',
+	'either keep them absent or restore them with their own assertions');
 
 // The exit card's structure and its state tones.  A missing tone rule means a
 // degraded exit would keep the healthy green, which is the same class of defect
 // the tile tones exist to prevent.
-for (const ec of [ 'h5net-ecard', 'svgbox', 'ec-content', 'ec-topline', 'ec-title',
-	'ec-live', 'ec-dot', 'ec-meta', 'ec-badge', 'ec-iface', 'ec-role' ]) {
+for (const ec of [ 'h5net-hero', 'hero-svgbox', 'hero-info', 'hero-topline', 'hero-title',
+	'hero-badge', 'hero-pulse-dot', 'hero-meta', 'pill', 'iface', 'hero-hint' ]) {
 	report(src.indexOf('.' + ec) > -1, 'CSS defines .' + ec);
 }
+// 旧版的 .h5net-ecard / .ec-* / .svgbox 词汇已被 .h5net-hero / .hero-* 取代。
+report(src.indexOf('.h5net-ecard') < 0 && src.indexOf('.ec-title') < 0 &&
+	src.indexOf('.svgbox') < 0, 'the retired .h5net-ecard / .ec-* vocabulary is gone');
 for (const tn of [ 'tone-pending', 'tone-down', 'tone-off' ]) {
-	report(src.indexOf('.h5net-ecard.' + tn) > -1, 'exit card defines .' + tn);
+	report(src.indexOf('.h5net .hero-svgbox.' + tn) > -1, 'lead card defines .' + tn);
 }
 
 // ---------------------------------------------------------------------------
@@ -160,16 +159,16 @@ for (const tn of [ 'tone-pending', 'tone-down', 'tone-off' ]) {
 // The heading half of the card is not bare text next to a card any more, so the
 // vocabulary both halves are built from has to exist, and the sibling header
 // block it replaced has to be gone.
-for (const cls of [ 'hero-slot', 'hero-div', 'ec-hint' ]) {
+for (const cls of [ 'hero-slot', 'hero-div', 'hero-hint' ]) {
 	report(src.indexOf('.' + cls) > -1, 'CSS defines .' + cls);
 }
 for (const st of [ 'is-up', 'is-pending', 'is-down', 'is-off' ]) {
-	report(src.indexOf('.h5net .h5net-ecard .ec-live.' + st) > -1,
-		'CSS gives .ec-live a ' + st + ' colour');
+	report(src.indexOf('.h5net .hero-badge.' + st) > -1,
+		'CSS gives .hero-badge a ' + st + ' colour');
 }
 report(src.indexOf('h5net-head') < 0, 'the two-sibling header block is gone',
 	'the header must be one card, not a heading beside one');
-report(src.indexOf('.h5net .h5net-ecard.hero{flex-direction:column') > -1,
+report(src.indexOf('.h5net .h5net-hero{grid-template-columns:1fr') > -1,
 	'the lead card stacks instead of squeezing on narrow screens');
 
 // The egress glyph.  Its selection class lives on the card rather than inside the
@@ -177,31 +176,24 @@ report(src.indexOf('.h5net .h5net-ecard.hero{flex-direction:column') > -1,
 // therefore readable here; these checks pin the other half of that contract - that
 // each branch is switched on by its own state class, and that the two are never
 // crossed, since a crossed binding would draw the traffic leaving the wrong way.
-const egressSvg = svgs.filter(s => s.indexOf('eg-led') > -1);
+const egressSvg = svgs.filter(s => s.indexOf('M22 28c12 0 10-14 24-14') > -1);
 report(egressSvg.length === 1, 'exactly one egress glyph', 'found ' + egressSvg.length);
 if (egressSvg.length === 1) {
 	const g = egressSvg[0];
-	report((g.match(/class="eg-flow f-wan"/g) || []).length === 1 &&
-		(g.match(/class="eg-flow f-modem"/g) || []).length === 1,
-		'egress glyph draws one flow overlay per branch');
-	report(g.indexOf('class="eg-port"') > -1, 'egress glyph draws the wired socket');
-	report((g.match(/class="eg-bar"/g) || []).length === 3,
-		'egress glyph draws three cellular bars');
+	report((g.match(/class="svg-dash"/g) || []).length === 2,
+		'egress glyph draws one flow path per direction');
+	report((g.match(/class="svg-pulse"/g) || []).length === 1,
+		'egress glyph marks the local socket');
 	report(g.indexOf('viewBox="0 0 64 64"') > -1, 'egress glyph uses the shared 64x64 box');
 }
-for (const via of [ 'eg-via-wan', 'eg-via-modem', 'eg-via-both' ]) {
-	report(src.indexOf('.h5net .h5net-ecard.' + via + ' ') > -1,
-		'egress glyph binds ' + via);
-}
-report(src.indexOf('.h5net .h5net-ecard.eg-via-wan .f-wan{') > -1 &&
-	src.indexOf('.h5net .h5net-ecard.eg-via-modem .f-modem{') > -1,
-	'each branch animates under its own state class');
-report(src.indexOf('eg-via-wan .f-modem') < 0 && src.indexOf('eg-via-modem .f-wan') < 0,
-	'no crossed branch binding');
-report(src.indexOf('.h5net .h5net-ecard.eg-via-none') < 0,
-	'eg-via-none is left unbound on purpose: nothing carrying means nothing moves');
-report(src.indexOf('.h5net .h5net-ecard.is-idle svg,.h5net .h5net-ecard.is-idle svg *') > -1,
-	'a frozen lead card stops the glyph as well');
+// 新版不再按当前出口切换流动路径:两条方向路径始终同时流动,出口身份由右半张
+// 卡片的文字与 tone 表达。旧的 eg-via-wan / eg-via-modem / eg-via-both 三态绑定
+// 因此整体退役 —— 这里守卫它不要被半途重新引入(要么完整加回并配断言)。
+report(src.indexOf('eg-via-') < 0,
+	'the retired eg-via-* branch selection is gone',
+	'either keep it absent, or restore it together with its own assertions');
+report(src.indexOf('.h5net .is-idle svg *') > -1,
+	'a frozen card stops its icons as well');
 
 // ---------------------------------------------------------------------------
 // CSS scope: a media query adds no specificity

@@ -33,11 +33,11 @@ msgstr "备用出口 · 已接管"
 msgid "备用出口"
 msgstr "备用出口"
 
-msgid "出口分流"
-msgstr "出口分流"
+msgid "出口分流告警"
+msgstr "出口分流告警"
 
-msgid "告警"
-msgstr "告警"
+msgid "分流故障"
+msgstr "分流故障"
 
 msgid "IPv4 "
 msgstr "IPv4 "
@@ -48,11 +48,11 @@ msgstr "IPv6 "
 msgid "当前出口：%s"
 msgstr "当前出口：%s"
 
-msgid "在线"
-msgstr "在线"
+msgid "在线中"
+msgstr "在线中"
 
-msgid "Ethernet"
-msgstr "以太网"
+msgid "有线宽带"
+msgstr "有线宽带"
 
 msgid "5G / LTE"
 msgstr "5G / LTE"
@@ -60,8 +60,8 @@ msgstr "5G / LTE"
 msgid "未指定"
 msgstr "未指定"
 
-msgid "当前出口：其他路由"
-msgstr "当前出口：其他路由"
+msgid "当前出口：第三方路由"
+msgstr "当前出口：第三方路由"
 
 msgid "外部接管"
 msgstr "外部接管"
@@ -72,11 +72,11 @@ msgstr "daed 接管"
 msgid "外部路由"
 msgstr "外部路由"
 
-msgid "不在本插件策略内"
-msgstr "不在本插件策略内"
+msgid "未在本策略管辖内"
+msgstr "未在本策略管辖内"
 
-msgid "无可用出口"
-msgstr "无可用出口"
+msgid "无可用网络出口"
+msgstr "无可用网络出口"
 
 msgid "离线"
 msgstr "离线"
@@ -87,26 +87,29 @@ msgstr "无出口"
 msgid "策略："
 msgstr "策略："
 
-msgid "分流告警"
-msgstr "分流告警"
+msgid "分流异常"
+msgstr "分流异常"
 
-msgid "无默认路由"
-msgstr "无默认路由"
+msgid "无默认网关"
+msgstr "无默认网关"
 
-msgid "策略被绕过"
-msgstr "策略被绕过"
+msgid "策略旁路"
+msgstr "策略旁路"
 
 msgid "单出口运行"
 msgstr "单出口运行"
 
-msgid "无备用链路"
-msgstr "无备用链路"
+msgid "备用链路未就绪"
+msgstr "备用链路未就绪"
 
-msgid "主备就绪"
-msgstr "主备就绪"
+msgid "双路由就绪"
+msgstr "双路由就绪"
 
-msgid "点击连接卡片切换首选出口，“仅用此出口”会移除备用链路。"
-msgstr "点击连接卡片切换首选出口，“仅用此出口”会移除备用链路。"
+msgid "点击下方卡片可快速切换首选出口；“仅用此出口”将移出备选路由。"
+msgstr "点击下方卡片可快速切换首选出口；“仅用此出口”将移出备选路由。"
+
+msgid "多出口调度策略"
+msgstr "多出口调度策略"
 
 msgid "就绪"
 msgstr "就绪"
@@ -123,188 +126,206 @@ msgstr "异常"
 msgid "未探测"
 msgstr "未探测"
 
-msgid "%s/%s 射频在线"
-msgstr "%s/%s 射频在线"
+msgid "有线 WAN 链路"
+msgstr "有线 WAN 链路"
+
+msgid "%s/%s 频段在线"
+msgstr "%s/%s 频段在线"
 
 msgid "未检测到射频"
 msgstr "未检测到射频"
 
-msgid "%s 台客户端"
-msgstr "%s 台客户端"
+msgid "%s 终端"
+msgstr "%s 终端"
 
-msgid "无线未启用"
-msgstr "无线未启用"
+msgid "无线未开启"
+msgstr "无线未开启"
 
-msgid "5G 模组"
-msgstr "5G 模组"
+msgid "5G 移动模组"
+msgstr "5G 移动模组"
 
-msgid "流量转发"
-msgstr "流量转发"
+msgid "全双栈流量转发"
+msgstr "全双栈流量转发"
 
-msgid "IPv4 与 IPv6 出口不一致"
-msgstr "IPv4 与 IPv6 出口不一致"
+msgid "⚠️ IPv4/v6 出口不一致"
+msgstr "⚠️ IPv4/v6 出口不一致"
 
-msgid "IPv4 与 IPv6 同出口"
-msgstr "IPv4 与 IPv6 同出口"
+msgid "双栈出口已严格对齐"
+msgstr "双栈出口已严格对齐"
 
-msgid "自动切换"
-msgstr "自动切换"
+msgid "自动链路看门狗"
+msgstr "自动链路看门狗"
 
-msgid "运行中 · 每 %s 秒"
-msgstr "运行中 · 每 %s 秒"
+msgid "守护中 · %ss 巡检"
+msgstr "守护中 · %ss 巡检"
 
-msgid "已停止"
-msgstr "已停止"
+msgid "已挂起"
+msgstr "已挂起"
 
-msgid "IPv6 / 上行"
-msgstr "IPv6 / 上行"
+msgid "主选："
+msgstr "主选："
 
-msgid "已禁用"
-msgstr "已禁用"
+msgid "IPv6 承载状态"
+msgstr "IPv6 承载状态"
 
-msgid "出口 "
-msgstr "出口 "
+msgid "未激活"
+msgstr "未激活"
 
-msgid "策略：IPv6 跟随 IPv4 出口"
-msgstr "策略：IPv6 跟随 IPv4 出口"
+msgid "出接口: "
+msgstr "出接口: "
 
-msgid "链路检测"
-msgstr "链路检测"
+msgid "策略: 强绑定 IPv4 物理出口"
+msgstr "策略: 强绑定 IPv4 物理出口"
 
-msgid "WAN "
-msgstr "WAN "
-
-msgid "模组 "
-msgstr "模组 "
+msgid "链路主动健康探测"
+msgstr "链路主动健康探测"
 
 msgid "未启用"
 msgstr "未启用"
 
-msgid "探测公共 anycast 地址"
-msgstr "探测公共 anycast 地址"
+msgid "Anycast 端到端活体心跳"
+msgstr "Anycast 端到端活体心跳"
 
-msgid "启用后可提前发现假连接"
-msgstr "启用后可提前发现假连接"
+msgid "开启后即时探测防假死"
+msgstr "开启后即时探测防假死"
 
-msgid "智能路由"
-msgstr "智能路由"
+msgid "智能核心路由"
+msgstr "智能核心路由"
 
-msgid "外部路由接管"
-msgstr "外部路由接管"
+msgid "无默认路由"
+msgstr "无默认路由"
 
-msgid "本插件自主选路"
-msgstr "本插件自主选路"
+msgid "自主纳管"
+msgstr "自主纳管"
 
-msgid "daed 出口 "
-msgstr "daed 出口 "
+msgid "daed 出口: "
+msgstr "daed 出口: "
 
-msgid "FIB 查询 · 最低 metric 胜出"
-msgstr "FIB 查询 · 最低 metric 胜出"
+msgid "FIB 动态路由度量选路"
+msgstr "FIB 动态路由度量选路"
 
-msgid "5G 优先"
-msgstr "5G 优先"
+msgid "5G 模组优先"
+msgstr "5G 模组优先"
 
-msgid "仅有线"
-msgstr "仅有线"
+msgid "仅用有线 WAN"
+msgstr "仅用有线 WAN"
 
-msgid "仅 5G"
-msgstr "仅 5G"
+msgid "仅用 5G 模组"
+msgstr "仅用 5G 模组"
 
-msgid "有线优先"
-msgstr "有线优先"
+msgid "有线 WAN 优先"
+msgstr "有线 WAN 优先"
 
-msgid "出口已分流：IPv4 走 %s，IPv6 走 %s。部分应用会因出口不一致而连接失败，建议点击\"对齐出口\"。"
-msgstr "出口已分流：IPv4 走 %s，IPv6 走 %s。部分应用会因出口不一致而连接失败，建议点击\"对齐出口\"。"
+msgid "⚠️ 出口分流异常：当前 IPv4 走 %s，IPv6 走 %s。流量分离会导致部分应用鉴权或连接中断，建议立即点击“对齐出口”。"
+msgstr "⚠️ 出口分流异常：当前 IPv4 走 %s，IPv6 走 %s。流量分离会导致部分应用鉴权或连接中断，建议立即点击“对齐出口”。"
 
-msgid "未选择"
-msgstr "未选择"
+msgid "5G 模组"
+msgstr "5G 模组"
 
-msgid "唯一出口 · 备用已禁用"
-msgstr "唯一出口 · 备用已禁用"
+msgid "无可用出口"
+msgstr "无可用出口"
 
-msgid "未配置"
-msgstr "未配置"
+msgid "独占出口 (无故障容灾)"
+msgstr "独占出口 (无故障容灾)"
 
-msgid "已连接"
-msgstr "已连接"
+msgid "首选主路由"
+msgstr "首选主路由"
 
-msgid "协商中"
-msgstr "协商中"
+msgid "热备用路由"
+msgstr "热备用路由"
 
-msgid "网线未接"
-msgstr "网线未接"
+msgid "硬件未配置"
+msgstr "硬件未配置"
 
-msgid "已断开"
-msgstr "已断开"
+msgid "已接通运行"
+msgstr "已接通运行"
 
-msgid "接口"
-msgstr "接口"
+msgid "网络握手中"
+msgstr "网络握手中"
 
-msgid "IPv4 使用中"
-msgstr "IPv4 使用中"
+msgid "物理网线断开"
+msgstr "物理网线断开"
 
-msgid "IPv4 就绪"
-msgstr "IPv4 就绪"
+msgid "链路离线"
+msgstr "链路离线"
 
-msgid "IPv4 不可用"
-msgstr "IPv4 不可用"
+msgid "绑定物理接口"
+msgstr "绑定物理接口"
 
-msgid "IPv6 使用中"
-msgstr "IPv6 使用中"
+msgid "5G 移动蜂窝模组"
+msgstr "5G 移动蜂窝模组"
 
-msgid "IPv6 就绪"
-msgstr "IPv6 就绪"
+msgid "有线以太网 WAN"
+msgstr "有线以太网 WAN"
 
-msgid "IPv6 不可用"
-msgstr "IPv6 不可用"
+msgid "● IPv4 正在通信"
+msgstr "● IPv4 正在通信"
 
-msgid "将该链路设为唯一出口，另一条链路会被移出路由表，故障时不会自动接替"
-msgstr "将该链路设为唯一出口，另一条链路会被移出路由表，故障时不会自动接替"
+msgid "○ IPv4 就绪"
+msgstr "○ IPv4 就绪"
 
-msgid "已是唯一出口"
-msgstr "已是唯一出口"
+msgid "✕ IPv4 不可用"
+msgstr "✕ IPv4 不可用"
 
-msgid "仅用此出口"
-msgstr "仅用此出口"
+msgid "● IPv6 正在通信"
+msgstr "● IPv6 正在通信"
 
-msgid "当前无默认路由可用。请检查网线或 5G 连接。"
-msgstr "当前无默认路由可用。请检查网线或 5G 连接。"
+msgid "○ IPv6 就绪"
+msgstr "○ IPv6 就绪"
 
-msgid "当前策略仅启用 %s，另一条链路已从路由中移除，故障时不会自动接替。"
-msgstr "当前策略仅启用 %s，另一条链路已从路由中移除，故障时不会自动接替。"
+msgid "✕ IPv6 不可用"
+msgstr "✕ IPv6 不可用"
 
-msgid "%s 不可用，IPv4 已切换至 %s；IPv6 保持禁用，避免流量分散到两个出口。"
-msgstr "%s 不可用，IPv4 已切换至 %s；IPv6 保持禁用，避免流量分散到两个出口。"
+msgid "将该链路设为唯一出口，另一条链路将被完全隔离，无自动故障切换保护"
+msgstr "将该链路设为唯一出口，另一条链路将被完全隔离，无自动故障切换保护"
 
-msgid "%s 不可用，IPv4 与 IPv6 已一并切换至 %s。"
-msgstr "%s 不可用，IPv4 与 IPv6 已一并切换至 %s。"
+msgid "当前为独占出口"
+msgstr "当前为独占出口"
 
-msgid "IPv4 正在使用 %s。该出口的 IPv6 不可用，备用 IPv6 已禁用以避免分流。"
-msgstr "IPv4 正在使用 %s。该出口的 IPv6 不可用，备用 IPv6 已禁用以避免分流。"
+msgid "仅用此出口 (移除备用)"
+msgstr "仅用此出口 (移除备用)"
 
-msgid "IPv4 与 IPv6 正一同使用首选出口 %s，备用出口将在需要时接替。"
-msgstr "IPv4 与 IPv6 正一同使用首选出口 %s，备用出口将在需要时接替。"
+msgid "⚠️ 未发现任何可用的默认出口网关，请检查物理网线或 SIM 卡射频注网状态。"
+msgstr "⚠️ 未发现任何可用的默认出口网关，请检查物理网线或 SIM 卡射频注网状态。"
 
-msgid "当前流量走其他默认路由（可能由 mwan3、VPN 或 QModem 接管）。"
-msgstr "当前流量走其他默认路由（可能由 mwan3、VPN 或 QModem 接管）。"
+msgid "ℹ️ 当前处于单链路独占模式（%s）。容灾备选路由已停用，链路中断将直接离线。"
+msgstr "ℹ️ 当前处于单链路独占模式（%s）。容灾备选路由已停用，链路中断将直接离线。"
 
-msgid "自动看门狗："
-msgstr "自动看门狗："
+msgid "⚡ 首选 %s 异常，IPv4 已平滑降级至备用 %s；IPv6 临时下线以阻止出口分流。"
+msgstr "⚡ 首选 %s 异常，IPv4 已平滑降级至备用 %s；IPv6 临时下线以阻止出口分流。"
+
+msgid "⚡ 首选 %s 离线，IPv4/IPv6 双栈已完整接管至备用出口 %s。"
+msgstr "⚡ 首选 %s 离线，IPv4/IPv6 双栈已完整接管至备用出口 %s。"
+
+msgid "IPv4 正经由首选 %s 传输。该出口暂无 IPv6 连通性，备用出口 IPv6 被策略性封锁以确保同路。"
+msgstr "IPv4 正经由首选 %s 传输。该出口暂无 IPv6 连通性，备用出口 IPv6 被策略性封锁以确保同路。"
+
+msgid "✔ 双栈网络畅通：IPv4 与 IPv6 均稳定经由首选出口 %s 发送，热备链路就绪。"
+msgstr "✔ 双栈网络畅通：IPv4 与 IPv6 均稳定经由首选出口 %s 发送，热备链路就绪。"
+
+msgid "当前数据流量由外部系统路由（例如 mwan3、VPN 或 daed）接管调度。"
+msgstr "当前数据流量由外部系统路由（例如 mwan3、VPN 或 daed）接管调度。"
+
+msgid "守护看门狗："
+msgstr "守护看门狗："
 
 msgid "运行中"
 msgstr "运行中"
 
-msgid "链路健康探测："
-msgstr "链路健康探测："
+msgid "实时健康探测："
+msgstr "实时健康探测："
 
-msgid "已启用"
-msgstr "已启用"
+msgid "已就绪"
+msgstr "已就绪"
 
-msgid "IPv6 对齐策略："
-msgstr "IPv6 对齐策略："
+msgid "未开启"
+msgstr "未开启"
 
-msgid "跟随 IPv4 出口"
-msgstr "跟随 IPv4 出口"
+msgid "双栈对称原则："
+msgstr "双栈对称原则："
+
+msgid "强制 IPv6 伴随 IPv4"
+msgstr "强制 IPv6 伴随 IPv4"
 
 msgid "有线 WAN 接口"
 msgstr "有线 WAN 接口"
@@ -318,26 +339,26 @@ msgstr "出口策略"
 msgid "未知错误"
 msgstr "未知错误"
 
-msgid "设置已应用，正在等待网络重新收敛…"
-msgstr "设置已应用，正在等待网络重新收敛…"
+msgid "设置已下发生效，正在重新收敛路由拓扑…"
+msgstr "设置已下发生效，正在重新收敛路由拓扑…"
 
-msgid "设置应用失败："
-msgstr "设置应用失败："
+msgid "配置应用失败："
+msgstr "配置应用失败："
 
-msgid "已请求重新对齐 IPv4 与 IPv6 出口。"
-msgstr "已请求重新对齐 IPv4 与 IPv6 出口。"
+msgid "已发送重对齐信令，IPv6 正在对齐 IPv4 出口。"
+msgstr "已发送重对齐信令，IPv6 正在对齐 IPv4 出口。"
 
 msgid "对齐失败："
 msgstr "对齐失败："
 
-msgid "对齐出口"
-msgstr "对齐出口"
+msgid "⚡ 一键对齐双栈出口"
+msgstr "⚡ 一键对齐双栈出口"
 
-msgid "应用中…"
-msgstr "应用中…"
+msgid "策略部署中…"
+msgstr "策略部署中…"
 
-msgid "应用设置"
-msgstr "应用设置"
+msgid "保存并应用策略"
+msgstr "保存并应用策略"
 
 msgid "Mobile Network"
 msgstr "移动网络"
