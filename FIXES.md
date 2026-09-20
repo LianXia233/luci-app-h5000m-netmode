@@ -17,6 +17,7 @@
 - [七、确定性测试](#七确定性测试)
 - [八、上线自检清单](#八上线自检清单)
 - [九、状态呈现](#九状态呈现)
+- [十、本地化](#十本地化)
 
 ---
 
@@ -793,6 +794,10 @@ cat /var/run/h5000m-netmode.daed-exit                # 隧道归属的依据：w
 
 # 10. 测试套件
 sh tests/run_tests.sh
+
+# 11. 本地化：目录必须真的能被 po2lmo 存活，且菜单标题有译文
+python3 tools/check_catalog.py                          # 期望 exit 0 且 surviving > 0
+ls -l /usr/lib/lua/luci/i18n/h5000m-netmode.zh-cn.lmo    # 期望存在（不是几字节的空目录）
 ```
 
 **故障切换演练**（会短暂影响网络，请在确认可接受中断时执行）：
@@ -1015,3 +1020,140 @@ python3 tools/sync_po.py --check                       # 期望 exit 0
 
 grep -c '^msgid ' po/zh_Hans/h5000m-netmode.po         # 期望 112（不含 header）
 ```
+
+> **这次修复本身引入了 10.1**：目录从「错位但含真实译文」变成「与源码同步但全是恒等条目」，`po2lmo` 于是把整份目录丢弃、连 `.lmo` 文件一起删掉。同步检查看不出这件事——它只比较 msgid 列表，而列表确实同步。详见 [十、本地化](#十本地化)。
+
+---
+
+## 十、本地化
+
+### 10.1 页面标题显示英文：语言包被编译器自己删掉了
+
+**现象**（v1.6.0 实机，界面语言为中文）：页面其余部分全是中文，唯独标题——浏览器标签页与页头——是英文。而下面每一条都「正常」：
+
+```sh
+$ curl -s -b /tmp/cj http://127.0.0.1/cgi-bin/luci/admin/modem/h5000m_netmode \
+    | grep -o '<title>[^<]*</title>'
+<title>Exit Priority - OWRT</title>
+
+$ apk info -L luci-i18n-h5000m-netmode-zh-cn
+luci-i18n-h5000m-netmode-zh-cn-0.260919.81576 contains:
+etc/uci-defaults/luci-i18n-h5000m-netmode-zh-cn          # 只有这个，没有 .lmo
+lib/apk/packages/luci-i18n-h5000m-netmode-zh-cn.list
+
+$ ls /usr/lib/lua/luci/i18n/ | grep netmode              # 空：目录根本不在设备上
+$ msgfmt --check --check-format po/zh_Hans/h5000m-netmode.po   # 通过
+$ python3 tools/sync_po.py --check                       # 通过
+```
+
+**标题文案的位置**：`root/usr/share/luci/menu.d/luci-app-h5000m-netmode.json` 的 `title` 字段。它写的是**英文 msgid**，LuCI 用 `.lmo` 语言包解析后显示——服务端 `dispatcher.uc` 从 `/usr/lib/lua/luci/i18n` 装载目录并把 `_()` 注入模板，客户端 `cbi.js` 的 `_()` 查同样由服务端下发的 `window.TR`。所以标题能不能显示中文，只取决于**目录里有没有这条 msgid 的非恒等译文**，与 `title` 字段写什么无关。
+
+**根因**：`po/zh_Hans/h5000m-netmode.po` 的 112 条条目**全部**是 `msgstr == msgid`。`po2lmo` 的 `print_msg()` 只保留 `key_id != val_id` 的条目：
+
+```c
+key_id = sfh_hash(key, len, len);
+val_id = sfh_hash(msg->val[i], len, len);
+
+if (key_id != val_id) {        /* 恒等条目：msgid 与 msgstr 同哈希，直接丢弃 */
+        ... 写入值区 ...
+}
+```
+
+而 `main()` 在没有任何条目存活时，会**删掉自己刚写的输出**并返回 0：
+
+```c
+print_index(array, n_entries, out);
+
+if (offset > 0) {
+        print_uint32(offset, out);
+        fsync(fileno(out));
+        fclose(out);
+}
+else {
+        fclose(out);
+        unlink(argv[2]);       /* 零条目：静默删除，exit 0 */
+}
+```
+
+112 条全恒等 → `offset == 0` → 编译产物被自己删掉 → 语言包只剩 `uci-defaults` → 任何 `_()` 都返回 msgid → 标题是英文。**编译器不报错、构建成功、包安装成功。**
+
+这不是「目录写错了」，而是**编译器按设计丢掉了整份目录**：`msgid == msgstr` 的语义就是「无需翻译」。
+
+**危害**：界面只在存在英文文案的地方露馅。本插件的视图源码写的是中文，所以页面看起来完全正常；真正暴露的只有两个英文来源——菜单 JSON 的 `title`（本故障）和未包装 `_()` 的 JS 字面量（见 10.3）。**目录文件、条目数、`msgfmt`、同步检查全都看不出问题。**
+
+**修复**：给需要翻译的 msgid 真实译文（`tools/sync_po.py` 的 `TRANSLATIONS` 表），并新增构建期门禁 `tools/check_catalog.py`——按 `po2lmo` 的规则复算存活条目数，零存活即失败，同时要求每个菜单标题都有非恒等译文。CI 与 `scripts/build-release.sh`（下载 SDK 之前）都会跑，另带 `--self-test` 正负对照。
+
+**为什么 v1.4.0 是好的而 v1.6.0 坏了**：v1.4.0 的目录是人工维护的 69 条错位条目（见 9.10），其中恰好含 `Exit Priority` 的真实译文——发布包里可见 `出口优先级已应用`、`出口优先级应用失败` 等中文串。9.10 的重建把这份「错位但真实」的目录换成了「同步但恒等」的目录：条目数对了、同步检查绿了、译文全没了。**修好了一个问题，引入了另一个问题，而新问题比旧问题更难看见——旧的那个至少还有译文。**
+
+| 发布包 | i18n 包体积 | 包内中文 | 页面标题 |
+| --- | --- | --- | --- |
+| v1.4.0 | 2526 B | 有（`出口优先级已应用` / `出口优先级应用失败` …） | 中文 |
+| v1.6.0 | 980 B | 无（只有 uci-defaults 里的「简体中文」） | **英文** |
+| v1.6.1 | 目录 3 条存活条目 | 出口优先级 / 移动网络 / 以太网 | 中文 |
+
+**为什么「加一条 `Plural-Forms` 表头」是错的修法**：`po2lmo` 会为 `Plural-Forms:` 写一条 `key_id = 0` 的条目，于是 `offset > 0`、文件不再被删——**但没有任何消息被翻译**，标题依旧是英文。它消掉了「文件在不在」这个症状，留下真正的问题，还会让任何「文件存在即通过」的检查跟着变绿。所以本项目的检查不看文件是否存在，只看**有多少条真实条目能存活**。
+
+**验证**：
+
+```sh
+# 1. 目录里有多少条能在编译后存活（0 即产物会被编译器删除）
+python3 tools/check_catalog.py                 # 期望 exit 0，surviving > 0
+python3 tools/check_catalog.py --self-test     # 正负对照：恒等目录必须被拒、修好的必须通过
+
+# 2. 设备上目录是否真的在
+ls -l /usr/lib/lua/luci/i18n/h5000m-netmode.zh-cn.lmo
+
+# 3. 服务端渲染的标题（无需浏览器）
+curl -s -b /tmp/cj http://127.0.0.1/cgi-bin/luci/admin/modem/h5000m_netmode \
+    | grep -o '<title>[^<]*</title>'
+
+# 4. 浏览器里直接问翻译函数（页面控制台）
+_('Exit Priority')     # 期望「出口优先级」；修复前返回 'Exit Priority'
+_('Fan Control')       # 对照：别的插件的菜单标题，返回「风扇控制」，证明链路本身是通的
+```
+
+> **换掉语言包后必须清缓存**：`rm -f /tmp/luci-indexcache*; rm -rf /tmp/luci-modulecache`，否则菜单树仍用旧缓存。
+
+### 10.2 菜单标题的另一半真相：自己的 title 可能根本没上屏
+
+`admin/modem` 这个父节点被两个插件同时声明：
+
+| 文件 | title | order |
+| --- | --- | --- |
+| `luci-app-h5000m-netmode.json` | `Mobile Network` | 25 |
+| `luci-app-mt5700.json` | `移动网络` | 55 |
+
+`dispatcher.uc` 按 `glob('/usr/share/luci/menu.d/*.json')` 的顺序合并，后出现的节点覆盖先出现的同名属性。实测页面 HTML 里 `Mobile Network` 出现 **0 次**——本插件声明的父标题压根没上屏。
+
+**结论**：仍然要给 `Mobile Network` 译文（覆盖关系取决于装了哪些插件、以及文件遍历顺序，不该依赖），但**排查标题问题时必须先确认那条 title 真的在用**，否则会在一个永远不会显示的字符串上白费功夫。
+
+### 10.3 不经过 `_()` 的字面量永远不会被翻译
+
+出口卡片的链路类型胶囊原本是裸字面量：
+
+```js
+badge = (active === 'wan') ? 'Ethernet' : '5G / LTE';
+```
+
+`tools/sync_po.py` 早期把 `Ethernet`、`5G / LTE` 硬塞进目录，看起来「这两个串也是 msgid」——实际上目录永远取不到它们：没有 `_()` 就没有查表动作。要翻译就必须先包起来：
+
+```js
+badge = (active === 'wan') ? _('Ethernet') : _('5G / LTE');
+```
+
+> **判据**：视图里凡会渲染到界面上的字符串字面量，都必须出现在 `_()` 里；否则它在任何语言下都是原文。目录里为它写译文是无效劳动。
+
+### 10.4 实机验证本地化：本机有透明代理时怎么读真实渲染
+
+开发机装了透明代理（`HTTP_PROXY`）时，curl / urllib 直连 LAN 会被拦（`403` 或 `getaddrinfo failed`），但 SSH 通道是通的。做法是把页面端口通过已有 SSH 连接转发出来，再让无头浏览器（需 `--no-proxy-server`）访问：
+
+```python
+# 127.0.0.1:8099 -> 192.168.88.1:80，走已有的 paramiko transport
+transport.request_port_forward('127.0.0.1', 8099)
+
+page.goto('http://127.0.0.1:8099/cgi-bin/luci/admin/modem/h5000m_netmode')
+page.title()                            # '出口优先级 - OWRT'
+page.evaluate("_('Exit Priority')")     # '出口优先级'
+```
+
+**为什么值得用真浏览器**：服务端模板的 `_()` 与客户端 `cbi.js` 的 `_()`（查 `window.TR`）走的是同一份目录、却是两条独立代码路径。只看 HTML 只能覆盖服务端那条；标题恰好是服务端渲染的，但视图正文里的 `_()` 只有浏览器能验。

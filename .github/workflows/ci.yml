@@ -38,6 +38,16 @@ jobs:
           jq empty root/usr/share/rpcd/acl.d/luci-app-h5000m-netmode.json
       - name: Validate translations
         run: msgfmt --check --check-format -o /dev/null po/zh_Hans/h5000m-netmode.po
+      - name: Gate the catalogue on what po2lmo does with it
+        # msgfmt validates syntax and the next step validates freshness; neither
+        # notices a catalogue that po2lmo deletes outright.  v1.6.0 shipped exactly
+        # that: 112 entries, every msgstr equal to its msgid, zero entries surviving
+        # the compiler, no .lmo in the package, and an English page title in a
+        # Chinese UI while every check stayed green.  The self-test runs first so
+        # that a check which cannot fail is caught here, not in production.
+        run: |
+          python3 tools/check_catalog.py --self-test
+          python3 tools/check_catalog.py
       - name: Keep the translation catalogue in sync with the source
         # The committed catalogue once described an entire earlier revision of the
         # page, so every entry in it was inert: the view's msgids had no catalogue

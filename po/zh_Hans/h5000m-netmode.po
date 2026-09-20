@@ -1,7 +1,7 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: luci-app-h5000m-netmode\n"
-"PO-Revision-Date: 2026-09-18 00:00+0800\n"
+"PO-Revision-Date: 2026-09-20 00:00+0800\n"
 "Last-Translator: FAN789\n"
 "Language-Team: Chinese (Simplified)\n"
 "Language: zh_CN\n"
@@ -50,6 +50,12 @@ msgstr "当前出口：%s"
 
 msgid "在线"
 msgstr "在线"
+
+msgid "Ethernet"
+msgstr "以太网"
+
+msgid "5G / LTE"
+msgstr "5G / LTE"
 
 msgid "未指定"
 msgstr "未指定"
@@ -334,13 +340,7 @@ msgid "应用设置"
 msgstr "应用设置"
 
 msgid "Mobile Network"
-msgstr "Mobile Network"
+msgstr "移动网络"
 
 msgid "Exit Priority"
-msgstr "Exit Priority"
-
-msgid "Ethernet"
-msgstr "Ethernet"
-
-msgid "5G / LTE"
-msgstr "5G / LTE"
+msgstr "出口优先级"

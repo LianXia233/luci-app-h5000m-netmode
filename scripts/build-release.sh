@@ -8,6 +8,15 @@ base_url="https://downloads.openwrt.org/snapshots/targets/mediatek/filogic"
 
 mkdir -p "${work_dir}" "${output_dir}"
 find "${output_dir}" -mindepth 1 -maxdepth 1 -delete
+
+# Gate before anything is downloaded.  po2lmo deletes its own output when no entry
+# survives it (every msgstr equal to its msgid), so the i18n package is built
+# successfully, installs successfully, and translates nothing: the plugin keeps
+# rendering English strings in a Chinese UI.  v1.6.0 shipped exactly that - the
+# released luci-i18n-h5000m-netmode-zh-cn apk contained no .lmo at all.  Failing
+# here costs a second; failing after the SDK build costs five minutes and a release.
+( cd "${repo_dir}" && python3 tools/check_catalog.py --self-test && python3 tools/check_catalog.py )
+
 cd "${work_dir}"
 curl -fsSLO "${base_url}/sha256sums"
 archive="$(awk '/openwrt-sdk-.*Linux-x86_64\.tar\.zst$/ { print $2; exit }' sha256sums | sed 's/^\*//')"

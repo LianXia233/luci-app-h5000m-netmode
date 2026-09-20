@@ -438,7 +438,10 @@ return view.extend({
 			liveCls = (state.cls === 'up') ? 'is-up'
 				: (state.cls === 'pending') ? 'is-pending'
 				: (state.cls === 'idle') ? 'is-off' : 'is-down';
-			badge = (active === 'wan') ? 'Ethernet' : '5G / LTE';
+			// Both labels go through _(): the badge is user visible text, so a
+			// bare literal could never be translated no matter what the
+			// catalogue says.  "5G / LTE" is intentionally locale invariant.
+			badge = (active === 'wan') ? _('Ethernet') : _('5G / LTE');
 			iface = (active === 'wan' ? data.wan_device : data.modem_device) || _('未指定');
 			role = roleOf(active);
 		}
