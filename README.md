@@ -10,7 +10,7 @@
 
 面向 Hiveton H5000M 的 OpenWrt 出口优先级管理器。通过卡片式 LuCI 界面，一键决定**有线 WAN** 与 **5G 模组**两条链路的启用范围与优先顺序，后端服务自动维护接口状态与默认路由。
 
-- 当前 Release 版本：`v1.6.0`
+- 当前 Release 版本：`v1.6.3`
 - 版本格式：`主版本.次版本.修订版本-r打包修订`（GitHub Release 使用语义化标签，OpenWrt 安装包追加打包修订号）
 
 ---
@@ -27,7 +27,7 @@
 
 | 区块 | 位置 | 说明 |
 | --- | --- | --- |
-| **页头合并卡片** | 顶部 | 一张卡片左右两半：左半报**策略**（主备就绪 / 无备用链路 / 单出口运行…）并配一枚按真实出口绘制动效的动态 SVG；右半报**当前出口**的真实网卡名与其在策略中的位置 |
+| **页头合并卡片** | 顶部 | 一张卡片左右两半：左半报**策略**（双路由就绪 / 备用链路未就绪 / 单出口运行 / 分流异常…）并配一枚双向流动的出口示意图；右半报**当前出口**的真实网卡名、协议族与其在策略中的位置 |
 | **提示条** | 卡片下方 | 只在需要动作时出现：分流告警、无默认路由、单出口策略的提醒 |
 | **运行状态总览** | 提示条下方 | 8 个动态图标各自绑定一项真实后端字段，静止即表示该路径此刻没有活动 |
 | **出口卡片** | 页底 | 两张可编辑卡片：单击设为首选、「仅用此出口」、手动映射物理接口、应用设置 |
@@ -352,6 +352,7 @@ uci set h5000m_netmode.settings.watcher=0 && uci commit h5000m_netmode   # 停�
 
 | 版本 | 日期 | 主要更新 |
 | --- | --- | --- |
+| [v1.6.3](CHANGELOG.md) | 2026-09-20 | 修复 `reconcile` 路径从不维护隧道归因状态文件，导致经透明代理承载时隧道出口恒被判为 `other`、永久误报「分流」且「一键对齐」空转；发布包不再压缩前端 JS（构建后逐字节比对包内源码） |
 | [v1.6.2](CHANGELOG.md) | 2026-09-20 | 修复 init 脚本缺少执行位导致看门狗服务从未启动（`/etc/rc.d` 有链接、`uci` 开关为开、包为 installed，而进程不存在）；CI 新增脚本执行位断言 |
 | [v1.6.1](CHANGELOG.md) | 2026-09-20 | 修复中文环境下页面标题显示英文——语言包被编译器整份丢弃（构建期新增 `tools/check_catalog.py` 存活检查，CI 与发布流程都会跑） |
 | [v1.6.0](CHANGELOG.md) | 2026-09-19 | 新增运行状态总览（8 个动态图标绑定真实状态）；页头改为一张合并卡片（左半报策略并配按真实出口绘制动效的动态 SVG，右半报当前出口）；链路健康探测改为默认启用并支持探测节流；新增无线侧运行状态（射频/SSID/客户端数）；修复透明代理隧道被误判为「其他路由」导致的假分流；重建失效的翻译目录并加 CI 同步检查 |
@@ -373,10 +374,14 @@ uci set h5000m_netmode.settings.watcher=0 && uci commit h5000m_netmode   # 停�
 /usr/sbin/h5000m-netmode status | grep -E '^(egress4|egress6|active4|active6|split)='
 
 # 2. 内核实际出口（尊重策略路由）；与 egress4/egress6 一致即说明判定正确
-#    注意：若经透明代理承载，两条族的默认路由会落在同一个隧道上（如 singtun0），
-#    此时网卡名不同但出口归属相同，split 仍应为 0
+#    注意一：IPv6 必须带上源地址。不带源的 `ip -6 route get` 会被策略路由抢答——
+#    装了透明代理时它会落进代理自己的路由表（如 singtun0），从而把「代理承载」
+#    误读成「出口分流」；带源地址的查询才反映设备真实使用的物理出口。
+#    注意二：若确实经透明代理承载，两条族的默认路由会落在同一个隧道上（如
+#    singtun0），此时网卡名不同但出口归属相同，split 仍应为 0
+V6SRC=$(ip -6 addr show dev br-lan | grep -m1 'scope global' | awk '{print $2}' | cut -d/ -f1)
 ip -4 route get 1.1.1.1 | head -1
-ip -6 route get 2606:4700:4700::1111 | head -1
+ip -6 route get 2606:4700:4700::1111 from "$V6SRC" | head -1
 
 # 3. 各出口的协议族就绪情况
 /usr/sbin/h5000m-netmode status | grep -E '_ready='
@@ -392,7 +397,7 @@ logread | grep h5000m-netmode | tail -5
 | --- | --- |
 | 界面显示「已断开」但网线已插好 | 该出口的 `_available` / `_pending`；协商期间显示「协商中」属正常 |
 | 合并卡片变红并显示「出口分流」 | 先看 `active4` / `active6` 是否真的不同——若二者相同而 `egress4` / `egress6` 是不同网卡名，那是经透明代理承载的正常现象，`split` 应为 0；确为分流时点击「对齐出口」，并检查 `ipv6_owner` / `ipv6_desired` |
-| 带 daed / sing-box 时持续报「分流」 | 确认后端版本已含 `is_tunnel_device()`：`grep -c is_tunnel_device /usr/sbin/h5000m-netmode` 应为非 0；再看 `cat /var/run/h5000m-netmode.daed-exit` 是否为 `wan` / `modem` |
+| 带 daed / sing-box 时持续报「分流」 | 若后端早于 v1.6.3，这是**误报**：`reconcile` 路径从不执行 `reload_daed_on_exit_change`，隧道归因所需的 `/var/run/h5000m-netmode.daed-exit` 因而从未被创建，`route_owner()` 读不到记录便恒返回 `other`。先确认该文件存在且内容为 `wan` / `modem`（缺失时跑一次 `/usr/sbin/h5000m-netmode reconcile` 应能创建它，v1.6.3 起看门狗每个周期都会维护）；再确认后端含 `is_tunnel_device()`：`grep -c is_tunnel_device /usr/sbin/h5000m-netmode` 应为非 0；最后用**带源地址**的查询核对物理出口（见上方自检第 2 条），显示 `dev ethX` 才是真实出口 |
 | 主链路断开后没有自动切换 | 先确认 init 脚本有执行位：`ls -l /etc/init.d/h5000m-netmode` 应为 `-rwxr-xr-x`（v1.6.2 之前仓库里记的是 `0644`，procd 无法执行它，服务「已启用」却从未启动，且不报错）；再确认 `ubus call service list` 里有该服务、`ps w \| grep '[h]5000m-netmode watch'` 有进程、`status` 的 `watcher=on`，最后看 `logread \| grep h5000m-netmode` |
 | 界面状态与命令行输出不一致 | 页面每 5 秒轮询一次；以 `h5000m-netmode status` 的输出为准 |
 | 改了下拉框但 5 秒后自己变回去 | 该版本已修复；确认固件中的前端资源已更新 |

@@ -2,6 +2,48 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.6.3] — 2026-09-20
+
+本次修正一处**误报**：装了透明代理但没装 daed 的设备会永久显示「出口分流」，而「一键对齐双栈出口」
+点了也毫无反应 —— 因为它要修的分流并不存在，真正出错的是判定本身。
+
+### 修复
+
+- **修复「一键对齐双栈出口」空转、隧道出口恒被误判为 `other`**：`run_watch` 每 10 秒执行一次
+  `reconcile`，按钮走的也是同一条路径；但动作分发里的 `reconcile` 分支**提前 `exit 0`**，永远执行
+  不到脚本尾部的 `reload_daed_on_exit_change`，而后者是**唯一**会创建
+  `/var/run/h5000m-netmode.daed-exit` 的地方。于是该文件在「只跑 sing-box、没装 daed」的设备上从未
+  被创建，`route_owner()` 对隧道设备的归因读不到记录，恒返回 `other`；`ACTIVE4=modem` 与
+  `ACTIVE6=other` 不等，`split` 便永久为 1。现在把 `reload_daed_on_exit_change` 一并挂到
+  `reconcile` 路径上（`run_reconcile()` 尾部）
+- 该缺陷与 v1.6.2 同属一类：**逻辑本身正确，但调用路径不存在**，因而从不运行、不报错、也不留日志。
+  实测该设备上带源地址的 `ip -6 route get` 显示 IPv6 物理出口本就是 `eth2`，与 IPv4 同路 —— 告警
+  纯属误报，用户看到的「一键对齐无效」其实是后端判定无事可做
+- 修复后 `active6=modem`、`split=0`、`daed_exit_state=modem`，页面提示由「出口分流异常」变为正常的
+  降级说明，对齐按钮按设计自动隐去
+
+### 变更
+
+- **发布包不再压缩前端 JS**：`luci.mk` 的 `CONFIG_LUCI_JSMIN` 默认为开，发布包里的 `netmode.js`
+  一直是 jsmin 的压缩产物（设备上 45124 字节 / 123 行，而仓库源码 66876 字节 / 1298 行），两者
+  md5 天然不等，线上排障无法用 `diff` 直接比对源码，热更与回滚也只能重新打包。现在
+  `scripts/build-release.sh` 同时关掉 `CONFIG_LUCI_JSMIN` 与 `LUCI_MINIFY_JS`，并新增构建后断言：
+  解开 apk 取出 `netmode.js` 与仓库源码逐字节比对，不一致即失败。代价是包体积增加约 22 KB
+- 前端页面重写为 `.h5net-hero` / `.hero-*` 词汇，页头卡片改为左右两个同构半栏（左半报策略、
+  右半报当前出口）
+
+### 测试
+
+- `tests/svg_audit.js` 与 `tests/test_exit_card.js` 同步到新的类名体系与状态文案；两条测试各留一条
+  守卫，防止已退役的 `eg-via-*` 三态出口动效被半途重新引入
+- 后端套件 176 项、前端卡片 149 项、SVG 审计全部通过
+
+### 注意
+
+- 本次前端重写**移除了页头出口图标的 `eg-via-wan` / `eg-via-modem` / `eg-via-both` 三态动效**：
+  旧版只有承载流量的那条方向路径在流动，新版两条始终同时流动，出口身份改由右半卡片的文字与
+  配色表达。如需恢复该可视化能力，需连同测试断言一起加回
+
 ## [v1.6.2] — 2026-09-20
 
 本次修正一处**静默失效**：看门狗服务在任何设备上都从未启动过，因为它的 init 脚本在仓库里没有执行位。
