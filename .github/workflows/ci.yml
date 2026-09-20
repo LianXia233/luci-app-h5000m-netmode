@@ -30,6 +30,25 @@ jobs:
           sh -n root/etc/init.d/h5000m-netmode
           sh -n tests/run_tests.sh
           for f in tests/mockbin/*; do sh -n "$f"; done
+      - name: Assert shipped scripts are executable
+        # An init script without the exec bit is the quietest possible failure:
+        # rc.d still links it, procd cannot execve it, the service never starts,
+        # and nothing logs an error.  v1.6.1 and earlier shipped
+        # root/etc/init.d/h5000m-netmode as 0644, so the watchdog that the docs
+        # and FIXES describe as covering hotplug's blind spots never ran at all.
+        # Neither `sh -n` nor `sh tests/run_tests.sh` can see this - they invoke
+        # the interpreter explicitly and bypass the mode - so it needs its own
+        # assertion.  tests/mockbin/* are intentionally left out: the suite
+        # chmods its own stubs.
+        run: |
+          bad="$(git ls-files -s | awk '$1 == "100644" { print $4 }' \
+                 | grep -E '^(root/(etc/(init\.d|hotplug\.d|uci-defaults|rc\.d)/|usr/(sbin|bin)/)|scripts/|tests/.*\.sh$)' || true)"
+          if [ -n "$bad" ]; then
+            echo "::error::these files are shipped to the device and must be executable:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "all shipped scripts are executable"
       - name: Check LuCI JavaScript syntax
         run: node --check htdocs/luci-static/resources/view/h5000m/netmode.js
       - name: Validate JSON metadata

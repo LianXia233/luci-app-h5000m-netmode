@@ -18,6 +18,7 @@
 - [八、上线自检清单](#八上线自检清单)
 - [九、状态呈现](#九状态呈现)
 - [十、本地化](#十本地化)
+- [十一、打包与权限](#十一打包与权限)
 
 ---
 
@@ -798,6 +799,12 @@ sh tests/run_tests.sh
 # 11. 本地化：目录必须真的能被 po2lmo 存活，且菜单标题有译文
 python3 tools/check_catalog.py                          # 期望 exit 0 且 surviving > 0
 ls -l /usr/lib/lua/luci/i18n/h5000m-netmode.zh-cn.lmo    # 期望存在（不是几字节的空目录）
+
+# 12. 服务真的被 procd 接管（不是「包已安装、开关已打开」）
+ls -l /etc/init.d/h5000m-netmode                         # 期望 -rwxr-xr-x
+ubus call service list | grep -c h5000m-netmode          # 期望 1
+ps w | grep '[h]5000m-netmode watch'                     # 期望有进程
+/usr/sbin/h5000m-netmode status | grep '^watcher='       # 期望 watcher=on
 ```
 
 **故障切换演练**（会短暂影响网络，请在确认可接受中断时执行）：
@@ -1157,3 +1164,58 @@ page.evaluate("_('Exit Priority')")     # '出口优先级'
 ```
 
 **为什么值得用真浏览器**：服务端模板的 `_()` 与客户端 `cbi.js` 的 `_()`（查 `window.TR`）走的是同一份目录、却是两条独立代码路径。只看 HTML 只能覆盖服务端那条；标题恰好是服务端渲染的，但视图正文里的 `_()` 只有浏览器能验。
+
+---
+
+## 十一、打包与权限
+
+### 11.1 init 脚本没有执行位：服务「已启用」却从未启动
+
+**现象**（v1.6.1 实机，看门狗按配置本应运行）：
+
+```sh
+$ uci show h5000m_netmode | grep watcher
+h5000m_netmode.settings.watcher='1'          # 配置是启用的
+
+$ /usr/sbin/h5000m-netmode status | grep '^watcher='
+watcher=off                                  # 却没有任何 watch 进程
+
+$ ps w | grep '[h]5000m-netmode'             # 无输出
+$ ubus call service list | grep -c h5000m-netmode
+0                                            # procd 根本不认识这个服务
+
+$ /etc/init.d/h5000m-netmode status; echo $?
+126                                          # Permission denied
+
+$ ls -l /etc/init.d/h5000m-netmode
+-rw-r--r--    1 root     root     1058 /etc/init.d/h5000m-netmode
+```
+
+**根因**：该文件在 git 里记录为 `100644`（`git ls-files -s` 可见），包按这个模式装到设备，而 `/etc/rc.d/S95h5000m-netmode` 链接又确实存在（镜像构建阶段 `enable` 已记录）。启动时 procd 拿到一个不可执行的文件，`execve` 返回 `EACCES`：服务不启动，**且不会留下任何日志**。于是 `/etc/rc.d` 有链接、`uci` 里开关是开的、包管理器里包是 installed——四件事全都正常，只有服务不在跑。
+
+**危害**：README 与第三章、第八章反复依赖的能力——「看门狗覆盖 hotplug 看不见的部分：锁竞争丢掉的事件、被别的管理器改掉的默认路由、接口仍 proto-up 而路由消失」——在实际固件上**完全不存在**。设备只剩 hotplug 一条路径，一旦丢事件就不会被纠正。而唯一能看出这件事的自检项是 `watcher=` 那一行，恰好没人核对过。
+
+**为什么 CI 抓不到**：CI 用 `sh -n <脚本>` 检查语法、用 `sh tests/run_tests.sh` 跑套件——**显式调用解释器会绕过执行位**，两种方式都能正常跑完，所以「运行它」的任何检查都看不见这个缺陷。它只能由「文件模式」这条断言发现。同理 `tests/run_tests.sh` 也一直是 `100644`，只因 CI 恰好用 `sh` 调用它才从未暴露。
+
+**修复**：`git update-index --chmod=+x`，并新增 CI 断言：
+
+```sh
+# ci.yml
+git ls-files -s | awk '$1 == "100644" { print $4 }' \
+  | grep -E '^(root/(etc/(init\.d|hotplug\.d|uci-defaults|rc\.d)/|usr/(sbin|bin)/)|scripts/|tests/.*\.sh$)'
+# 期望无输出
+```
+
+**验证**（设备）：
+
+```sh
+ls -l /etc/init.d/h5000m-netmode                   # 期望 -rwxr-xr-x
+/etc/init.d/h5000m-netmode enabled
+/etc/init.d/h5000m-netmode start
+ubus call service list | grep -c h5000m-netmode    # 期望 1（procd 已接管）
+ps w | grep '[h]5000m-netmode watch'               # 期望有进程
+/usr/sbin/h5000m-netmode status | grep '^watcher='
+# 期望 watcher=on
+```
+
+> **别用 `pgrep -f` 判定这件事**：`pgrep -f 'h5000m-netmode watch'` 会把**执行它的那条命令本身**算进去（命令行里含有同一个字符串）。判定用 `ps w | grep '[h]5000m-netmode watch'`（方括号技巧排除 grep 自身）或 `ubus call service list`。后端 `status` 的 `watcher=` 恰好是用 `pgrep -f` 写的，因此在外层命令行的包装方式与之匹配时会假报 `on`——核对以 `ubus` / `ps` 为准。

@@ -352,6 +352,7 @@ uci set h5000m_netmode.settings.watcher=0 && uci commit h5000m_netmode   # 停�
 
 | 版本 | 日期 | 主要更新 |
 | --- | --- | --- |
+| [v1.6.2](CHANGELOG.md) | 2026-09-20 | 修复 init 脚本缺少执行位导致看门狗服务从未启动（`/etc/rc.d` 有链接、`uci` 开关为开、包为 installed，而进程不存在）；CI 新增脚本执行位断言 |
 | [v1.6.1](CHANGELOG.md) | 2026-09-20 | 修复中文环境下页面标题显示英文——语言包被编译器整份丢弃（构建期新增 `tools/check_catalog.py` 存活检查，CI 与发布流程都会跑） |
 | [v1.6.0](CHANGELOG.md) | 2026-09-19 | 新增运行状态总览（8 个动态图标绑定真实状态）；页头改为一张合并卡片（左半报策略并配按真实出口绘制动效的动态 SVG，右半报当前出口）；链路健康探测改为默认启用并支持探测节流；新增无线侧运行状态（射频/SSID/客户端数）；修复透明代理隧道被误判为「其他路由」导致的假分流；重建失效的翻译目录并加 CI 同步检查 |
 | [v1.5.0](CHANGELOG.md) | 2026-09-14 | 出口判定改用 FIB 查询；IPv6 出口收敛为单一写者；新增 procd 看门狗与分级链路状态；修正单击卡片禁用备用链路的误触发；新增确定性测试套件 |
@@ -392,7 +393,7 @@ logread | grep h5000m-netmode | tail -5
 | 界面显示「已断开」但网线已插好 | 该出口的 `_available` / `_pending`；协商期间显示「协商中」属正常 |
 | 合并卡片变红并显示「出口分流」 | 先看 `active4` / `active6` 是否真的不同——若二者相同而 `egress4` / `egress6` 是不同网卡名，那是经透明代理承载的正常现象，`split` 应为 0；确为分流时点击「对齐出口」，并检查 `ipv6_owner` / `ipv6_desired` |
 | 带 daed / sing-box 时持续报「分流」 | 确认后端版本已含 `is_tunnel_device()`：`grep -c is_tunnel_device /usr/sbin/h5000m-netmode` 应为非 0；再看 `cat /var/run/h5000m-netmode.daed-exit` 是否为 `wan` / `modem` |
-| 主链路断开后没有自动切换 | `watcher` 是否为 `on`、看门狗进程是否存在，再看 `logread \| grep h5000m-netmode` |
+| 主链路断开后没有自动切换 | 先确认 init 脚本有执行位：`ls -l /etc/init.d/h5000m-netmode` 应为 `-rwxr-xr-x`（v1.6.2 之前仓库里记的是 `0644`，procd 无法执行它，服务「已启用」却从未启动，且不报错）；再确认 `ubus call service list` 里有该服务、`ps w \| grep '[h]5000m-netmode watch'` 有进程、`status` 的 `watcher=on`，最后看 `logread \| grep h5000m-netmode` |
 | 界面状态与命令行输出不一致 | 页面每 5 秒轮询一次；以 `h5000m-netmode status` 的输出为准 |
 | 改了下拉框但 5 秒后自己变回去 | 该版本已修复；确认固件中的前端资源已更新 |
 | 界面仍有英文（页面标题、菜单项） | 先确认语言包真的带目录：`ls -l /usr/lib/lua/luci/i18n/h5000m-netmode.zh-cn.lmo` 必须存在。文件缺失说明该包由「每条 `msgstr` 都等于 `msgid`」的目录构建——po2lmo 会丢弃所有恒等条目，并在结果为零条目时删掉自己的输出，于是语言包装得上、却一个 `.lmo` 都没有（v1.6.0 即如此；v1.6.1 起构建前由 `python3 tools/check_catalog.py` 拦住）。文件存在则检查该 `title` 是否有非恒等译文 |

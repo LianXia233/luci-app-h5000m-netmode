@@ -2,6 +2,15 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.6.2] — 2026-09-20
+
+本次修正一处**静默失效**：看门狗服务在任何设备上都从未启动过，因为它的 init 脚本在仓库里没有执行位。
+
+### 修复
+
+- **修复 `/etc/init.d/h5000m-netmode` 缺少执行位导致看门狗从未启动**：该文件在 git 里记录为 `100644`，而 `/etc/rc.d/S95h5000m-netmode` 链接确实存在。procd 启动时 `execve` 失败，服务不启动，**且不产生任何日志**。实测设备上 `uci` 里 `watcher='1'`（配置已启用），但 `ps w | grep '[h]5000m-netmode'` 无进程、`ubus call service list` 里没有该服务、`/etc/init.d/h5000m-netmode status` 返回 `126`（Permission denied）、`h5000m-netmode status` 自报 `watcher=off`——README 与 FIXES 中反复依赖的「看门狗覆盖 hotplug 盲区」在实机上根本不存在。现把 init 脚本（以及同样被记成 `100644` 的 `tests/run_tests.sh`）改为 `100755`
+- CI 新增「应可执行的脚本必须带执行位」断言。这类缺陷**无法**由任何「运行它」的检查发现：`sh -n` 与 `sh tests/run_tests.sh` 都是显式调用解释器，会绕过执行位；只能单独断言文件模式
+
 ## [v1.6.1] — 2026-09-20
 
 本次修正一处**实机可见的本地化故障**：插件在中文环境下页面标题显示为英文。语言包装机正常、包管理器无告警、`msgfmt` 与既有 CI 检查全绿——故障因此长期隐身。
