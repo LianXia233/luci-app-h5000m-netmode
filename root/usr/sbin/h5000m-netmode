@@ -892,6 +892,13 @@ run_reconcile() {
 	if health_check_enabled; then
 		refresh_health
 	fi
+
+	# 隧道出口的归因依赖 DAED_EXIT_STATE_FILE,而 reconcile 是看门狗与
+	# 「一键对齐双栈出口」唯一会走的路径。维护动作原先只挂在 apply/set 的
+	# 尾部,reconcile 走不到那里,于是该状态文件从未被创建,隧道出口恒被
+	# 判为 other,报出并不存在的 IPv4/IPv6 分流。
+	reload_daed_on_exit_change || true
+
 	return 0
 }
 
