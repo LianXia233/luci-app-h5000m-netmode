@@ -38,7 +38,6 @@ TAG="h5000m-netmode"
 # this exact file against mocked uci/ubus/ip instead of a patched copy.  The
 # defaults are the production values; nothing sets these variables on a router.
 LOCK_DIR="${H5000M_LOCK_DIR:-/var/lock/h5000m-netmode.lock}"
-DAED_EXIT_STATE_FILE="${H5000M_DAED_STATE:-/var/run/h5000m-netmode.daed-exit}"
 HEALTH_STATE_FILE="${H5000M_HEALTH_STATE:-/var/run/h5000m-netmode.health}"
 SYS_CLASS_NET="${H5000M_SYSFS_NET:-/sys/class/net}"
 SELF="${H5000M_SELF:-/usr/sbin/h5000m-netmode}"
@@ -379,23 +378,19 @@ is_tunnel_device() {
 }
 
 route_owner() {
-	local device="$1"
+	local device="$1" fallback="${2:-}"
 	[ -n "$device" ] || { echo none; return 0; }
 	if device_matches "$device" $WAN_DEVICES; then
 		echo wan
 	elif device_matches "$device" $MODEM_DEVICES; then
 		echo modem
 	elif is_tunnel_device "$device"; then
-		# A tunnel carries whichever uplink the proxy is bound to, which this
-		# app already tracks in DAED_EXIT_STATE_FILE.  Attribute the tunnel to
-		# that uplink instead of inventing a third owner: the physical exit is
-		# what the primary/backup verdict is about, and reporting `other` here
-		# was the false split.
-		local proxy_exit
-		proxy_exit="$(cat "$DAED_EXIT_STATE_FILE" 2>/dev/null || true)"
-		case "$proxy_exit" in
-			wan) echo wan ;;
-			modem) echo modem ;;
+		# Virtual TUN devices are not exits this app should manage.  Attribute
+		# them to the already resolved physical IPv4 owner from the same state
+		# snapshot, so HomeProxy/sing-box/daed tunnels do not become a fake third
+		# uplink and do not trigger physical-interface changes.
+		case "$fallback" in
+			wan|modem) echo "$fallback" ;;
 			*) echo other ;;
 		esac
 	else
@@ -529,7 +524,7 @@ read_live_state() {
 	DEFAULT4="$(best_default_route 4)"
 	DEFAULT6="$(best_default_route 6)"
 	ACTIVE4="$(route_owner "$EGRESS4")"
-	ACTIVE6="$(route_owner "$EGRESS6")"
+	ACTIVE6="$(route_owner "$EGRESS6" "$ACTIVE4")"
 
 	STATE_READY=1
 	return 0
@@ -813,59 +808,6 @@ ipv6_diverged() {
 }
 
 # ---------------------------------------------------------------------------
-# daed reload
-# ---------------------------------------------------------------------------
-
-store_daed_exit_state() {
-	local owner="$1" temporary
-
-	temporary="${DAED_EXIT_STATE_FILE}.new.$$"
-	umask 077
-	printf '%s\n' "$owner" > "$temporary" || return 1
-	mv -f "$temporary" "$DAED_EXIT_STATE_FILE"
-}
-
-reload_daed_on_exit_change() {
-	local current previous pid
-
-	read_live_state
-	current="$ACTIVE4"
-	case "$current" in
-		wan|modem) ;;
-		*) return 0 ;;
-	esac
-
-	previous="$(cat "$DAED_EXIT_STATE_FILE" 2>/dev/null || true)"
-	case "$previous" in
-		wan|modem) ;;
-		*)
-			store_daed_exit_state "$current"
-			log_note "recorded initial daed IPv4 exit=$current"
-			return 0
-			;;
-	esac
-	[ "$previous" != "$current" ] || return 0
-
-	# daed exposes hot reload only through its authenticated GraphQL API. Signals
-	# and the generic OpenWrt reload action do not apply its selected profile, so
-	# use the procd-managed restart path without coupling this service to daed
-	# credentials. If daed is stopped, its next start will detect the live route.
-	pid="$(pgrep -f '^/usr/bin/daed run([[:space:]]|$)' 2>/dev/null | head -n 1)"
-	if [ -z "$pid" ]; then
-		store_daed_exit_state "$current"
-		log_note "daed IPv4 exit changed ${previous}->${current}; daemon is not running"
-		return 0
-	fi
-	if [ ! -x /etc/init.d/daed ] || ! /etc/init.d/daed restart >/dev/null 2>&1; then
-		log_note "failed to restart daed after IPv4 exit changed ${previous}->${current}"
-		return 1
-	fi
-	store_daed_exit_state "$current" || return 1
-	log_note "restarted daed after IPv4 exit changed ${previous}->${current}"
-	return 0
-}
-
-# ---------------------------------------------------------------------------
 # reconcile
 # ---------------------------------------------------------------------------
 
@@ -901,12 +843,6 @@ run_reconcile() {
 	if health_check_enabled; then
 		refresh_health
 	fi
-
-	# 隧道出口的归因依赖 DAED_EXIT_STATE_FILE,而 reconcile 是看门狗与
-	# 「一键对齐双栈出口」唯一会走的路径。维护动作原先只挂在 apply/set 的
-	# 尾部,reconcile 走不到那里,于是该状态文件从未被创建,隧道出口恒被
-	# 判为 other,报出并不存在的 IPv4/IPv6 分流。
-	reload_daed_on_exit_change || true
 
 	return 0
 }
@@ -1094,7 +1030,7 @@ print_status() {
 	echo "default4=$DEFAULT4"
 	echo "default6=$DEFAULT6"
 
-	echo "daed_exit_state=$(cat "$DAED_EXIT_STATE_FILE" 2>/dev/null || echo none)"
+	echo "daed_exit_state=none"
 	echo "watcher=$watcher"
 	echo "watch_interval=$(watch_interval)"
 	if health_check_enabled; then
@@ -1360,10 +1296,6 @@ fi
 
 if [ "$action" = "apply" ] || [ "$action" = "set" ]; then
 	log_note "applied exit policy mode=$mode"
-fi
-
-if ! reload_daed_on_exit_change; then
-	exit 1
 fi
 
 exit 0

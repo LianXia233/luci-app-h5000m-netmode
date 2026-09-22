@@ -2,6 +2,15 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.6.5] — 2026-09-22
+
+### 修复
+
+- **重构透明代理 TUN 归属，只管理物理接口**：后端不再围绕 daed 状态文件维护代理出口，也不重载代理服务；
+  HomeProxy、sing-box、daed 等创建的虚拟 TUN 只按本轮已判定的 IPv4 物理出口归属，避免把 TUN 当成第三个出口，
+  同时确保切换网络 / 对齐出口只操作 WAN 与 5G 模组这些物理接口。兼容字段 `daed_exit_state` 保留并固定输出
+  `none`。
+
 ## [v1.6.4] — 2026-09-22
 
 ### 修复

@@ -188,7 +188,6 @@ run() {
 	H5_SCEN="$SC" \
 	H5_MOCKBIN="$mockbin" \
 	H5000M_LOCK_DIR="$SC/lock" \
-	H5000M_DAED_STATE="$SC/daed-exit" \
 	H5000M_HEALTH_STATE="$SC/health" \
 	H5000M_SYSFS_NET="$SC/sysfs" \
 	H5000M_SELF="$script" \
@@ -367,17 +366,15 @@ $MODEM_ROUTE" \
 }
 
 # A transparent proxy puts the IPv6 default route on a TUN (singtun0) while the
-# IPv4 default route stays on the physical uplink.  Both families still leave
-# through the same uplink, so this is NOT a split: the tunnel belongs to whatever
-# exit the proxy is bound to, which daed records in the exit-state file.
+# IPv4 default route stays on the physical uplink.  This app only manages the
+# physical WAN/modem exits, so the virtual TUN inherits the IPv4 physical owner
+# from the same state snapshot instead of becoming a fake third exit.
 #
 # The original code compared the two interface NAMES, so `eth2` vs `singtun0`
 # never matched and every proxy user saw a permanent "exit split" warning with a
 # button telling them to "align" an exit that was already aligned.
 test_proxy_tunnel_is_not_a_family_split() {
 	base_scenario
-	# The proxy exits through the modem.
-	printf 'modem' > "$SC/daed-exit"
 	tunnel singtun0
 	routes "$MODEM_ROUTE" \
 		'default via fe80::c08d:2eff:fec4:3402 dev singtun0 metric 512' \
@@ -389,14 +386,14 @@ test_proxy_tunnel_is_not_a_family_split() {
 	check_eq 'tunnel egress4' 'eth2' "$(sv egress4)"
 	check_eq 'tunnel egress6' 'singtun0' "$(sv egress6)"
 	check_eq 'tunnel active4' 'modem' "$(sv active4)"
-	check_eq 'tunnel active6 follows the proxy exit' 'modem' "$(sv active6)"
+	check_eq 'tunnel active6 follows physical IPv4' 'modem' "$(sv active6)"
 	check_eq 'tunnel is not reported as a split' '0' "$(sv split)"
+	check_eq 'tunnel keeps daed state inert' 'none' "$(sv daed_exit_state)"
 }
 
 # The same proxy bound to the wired WAN must be attributed to the WAN.
 test_proxy_tunnel_attributes_to_the_proxy_exit() {
 	base_scenario
-	printf 'wan' > "$SC/daed-exit"
 	tunnel singtun0
 	routes "$WAN_ROUTE" \
 		'default via fe80::1 dev singtun0 metric 512' \
@@ -405,7 +402,7 @@ test_proxy_tunnel_attributes_to_the_proxy_exit() {
 
 	run status
 	check_eq 'tunnel-wan active4' 'wan' "$(sv active4)"
-	check_eq 'tunnel-wan active6 follows the proxy exit' 'wan' "$(sv active6)"
+	check_eq 'tunnel-wan active6 follows physical IPv4' 'wan' "$(sv active6)"
 	check_eq 'tunnel-wan is not a split' '0' "$(sv split)"
 }
 
@@ -423,12 +420,10 @@ test_real_family_split_is_still_reported() {
 	check_eq 'real-split is reported' '1' "$(sv split)"
 }
 
-# A tunnel whose proxy exit has not been recorded must not be mis-attributed to an
-# uplink: with nothing to go on, "other" is the honest answer, and it must not be
-# silently claimed as the live exit.
-test_tunnel_without_a_recorded_exit_stays_other() {
+# HomeProxy/sing-box do not need a daed-style exit record: the virtual TUN is not
+# managed, and its physical owner follows IPv4.
+test_tunnel_without_proxy_state_follows_ipv4_physical_exit() {
 	base_scenario
-	rm -f "$SC/daed-exit"
 	tunnel singtun0
 	routes "$MODEM_ROUTE" \
 		'default via fe80::1 dev singtun0 metric 512' \
@@ -436,8 +431,9 @@ test_tunnel_without_a_recorded_exit_stays_other() {
 		'2606:4700:4700::1111 via fe80::1 dev singtun0 src 2409::1 uid 0'
 
 	run status
-	check_eq 'unknown-tunnel active6' 'other' "$(sv active6)"
-	check_eq 'unknown-tunnel split' '1' "$(sv split)"
+	check_eq 'homeproxy-tunnel active4' 'modem' "$(sv active4)"
+	check_eq 'homeproxy-tunnel active6 follows physical IPv4' 'modem' "$(sv active6)"
+	check_eq 'homeproxy-tunnel split' '0' "$(sv split)"
 }
 
 # Invariant 2: IPv4 on the wired WAN but IPv6 leaked onto the modem must be
@@ -800,7 +796,7 @@ test_symbolic_device_reference_is_resolved
 test_proxy_tunnel_is_not_a_family_split
 test_proxy_tunnel_attributes_to_the_proxy_exit
 test_real_family_split_is_still_reported
-test_tunnel_without_a_recorded_exit_stays_other
+test_tunnel_without_proxy_state_follows_ipv4_physical_exit
 test_split_egress_is_repaired_towards_ipv4
 test_failover_moves_ipv6_without_shutting_standby_down
 test_no_ipv4_default_keeps_ipv6_untouched
