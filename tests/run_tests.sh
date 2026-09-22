@@ -277,7 +277,7 @@ base_scenario() {
 	uci_set network.2_1v6.device '@2_1'
 	uci_set network.2_1v6.modem_config 2_1
 	uci_set network.2_1v6.defaultroute 0
-	uci_set network.2_1v6.auto 0
+	uci_set network.2_1v6.auto 1
 	uci_set network.wan6.defaultroute 1
 	uci_set network.wan6.auto 1
 
@@ -459,17 +459,18 @@ $MODEM_ROUTE" \
 	run reconcile
 	check_eq 'split-rc' '0' "$rc"
 	check_eq 'split 2_1v6.defaultroute' '0' "$(uci_of network.2_1v6.defaultroute)"
-	check_eq 'split 2_1v6.auto' '0' "$(uci_of network.2_1v6.auto)"
+	check_eq 'split 2_1v6.auto stays enabled' '1' "$(uci_of network.2_1v6.auto)"
 	check_eq 'split wan6.defaultroute' '1' "$(uci_of network.wan6.defaultroute)"
 	check_eq 'split wan6.auto' '1' "$(uci_of network.wan6.auto)"
 	check_eq 'split ipv6_owner' 'wan' "$(uci_of h5000m_netmode.settings.ipv6_owner)"
-	check_contains 'split tears the modem IPv6 down' '^ifdown 2_1v6$' "$SC/iface-actions.log"
+	check_contains 'split removes the modem IPv6 default route' '^ip -6 route del default via fe80::1 dev eth2 metric 50$' "$SC/route-actions.log"
+	check_absent 'split keeps the modem IPv6 interface up' '^ifdown 2_1v6$' "$SC/iface-actions.log"
 	check_absent 'split leaves wan6 alone' '^ifdown wan6$' "$SC/iface-actions.log"
 }
 
-# After a failover IPv6 must follow IPv4, and the stale family must be removed
-# before the new owner is raised so the two are never live at once.
-test_failover_moves_ipv6_and_drops_old_family_first() {
+# After a failover IPv6 must follow IPv4 without forcing the standby IPv6
+# interface down.
+test_failover_moves_ipv6_without_shutting_standby_down() {
 	base_scenario
 	uci_set h5000m_netmode.settings.mode modem_first
 	routes "$MODEM_ROUTE" \
@@ -480,17 +481,14 @@ test_failover_moves_ipv6_and_drops_old_family_first() {
 	run reconcile
 	check_eq 'failover rc' '0' "$rc"
 	check_eq 'failover wan6.defaultroute' '0' "$(uci_of network.wan6.defaultroute)"
-	check_eq 'failover wan6.auto' '0' "$(uci_of network.wan6.auto)"
+	check_eq 'failover wan6.auto stays enabled' '1' "$(uci_of network.wan6.auto)"
 	check_eq 'failover 2_1v6.defaultroute' '1' "$(uci_of network.2_1v6.defaultroute)"
 	check_eq 'failover 2_1v6.auto' '1' "$(uci_of network.2_1v6.auto)"
 	check_eq 'failover ipv6_owner' 'modem' "$(uci_of h5000m_netmode.settings.ipv6_owner)"
 
-	check_contains 'failover tears wan6 down' '^ifdown wan6$' "$SC/iface-actions.log"
+	check_contains 'failover removes the wan IPv6 default route' '^ip -6 route del default via fe80::942b:33ff:fecd:8306 dev eth1 metric 512$' "$SC/route-actions.log"
+	check_absent 'failover keeps wan6 up' '^ifdown wan6$' "$SC/iface-actions.log"
 	check_contains 'failover raises the modem IPv6' '^ifup 2_1v6$' "$SC/iface-actions.log"
-	if [ -n "$(action_index 'ifdown wan6')" ] && [ -n "$(action_index 'ifup 2_1v6')" ]; then
-		check_ok 'failover removes the old family before raising the new one' \
-			"$([ "$(action_index 'ifdown wan6')" -lt "$(action_index 'ifup 2_1v6')" ] && echo 0 || echo 1)"
-	fi
 }
 
 # With no IPv4 default there is nothing to stay consistent with, so IPv6 must be
@@ -532,8 +530,8 @@ test_missing_modem_ipv6_disables_ipv6() {
 	check_eq 'no-modem6 desired' 'off' "$(sv ipv6_desired)"
 	check_eq 'no-modem6 ipv6_owner' 'off' "$(uci_of h5000m_netmode.settings.ipv6_owner)"
 	check_eq 'no-modem6 wan6.defaultroute' '0' "$(uci_of network.wan6.defaultroute)"
-	check_eq 'no-modem6 wan6.auto' '0' "$(uci_of network.wan6.auto)"
-	check_contains 'no-modem6 tears wan6 down' '^ifdown wan6$' "$SC/iface-actions.log"
+	check_eq 'no-modem6 wan6.auto stays enabled' '1' "$(uci_of network.wan6.auto)"
+	check_absent 'no-modem6 keeps wan6 up' '^ifdown wan6$' "$SC/iface-actions.log"
 }
 
 # A consistent state must produce no writes and no interface churn, and a second
@@ -804,7 +802,7 @@ test_proxy_tunnel_attributes_to_the_proxy_exit
 test_real_family_split_is_still_reported
 test_tunnel_without_a_recorded_exit_stays_other
 test_split_egress_is_repaired_towards_ipv4
-test_failover_moves_ipv6_and_drops_old_family_first
+test_failover_moves_ipv6_without_shutting_standby_down
 test_no_ipv4_default_keeps_ipv6_untouched
 test_missing_modem_ipv6_disables_ipv6
 test_stable_state_produces_no_churn

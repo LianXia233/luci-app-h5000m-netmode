@@ -18,12 +18,11 @@
 #      and therefore honours policy rules; that is the oracle used here, with a
 #      deterministic lowest-metric fallback for when it cannot resolve.
 #
-#   2. IPv4 and IPv6 must leave through the same interface at all times.
-#      A single writer (apply_ipv6_desired) owns the IPv6 default-route/auto
-#      state and always tears the stale family down *before* raising the new
-#      owner, so the two families are never live on different exits.  IPv6 is
-#      never pointed at an exit that has no IPv6 interface: in that case managed
-#      IPv6 is switched off rather than leaked out of the wrong uplink.
+#   2. IPv4 and IPv6 defaults must leave through the same interface.
+#      A single writer (apply_ipv6_desired) owns the IPv6 default-route state.
+#      It moves the managed default route without forcing the standby IPv6
+#      interface down, so the backup exit keeps its IPv6 addresses warm while
+#      staying out of the live default-route decision.
 #
 #   3. One invocation evaluates one immutable state snapshot.
 #      The previous implementation re-read the whole state up to three times per
@@ -629,7 +628,7 @@ cached_health() {
 }
 
 # ---------------------------------------------------------------------------
-# IPv6 alignment - the single writer of the IPv6 default-route state
+# IPv6 alignment - the single writer of the managed IPv6 default-route state
 # ---------------------------------------------------------------------------
 
 # Decide where the IPv6 default route may live.
@@ -637,9 +636,9 @@ cached_health() {
 #   IPV6_DESIRED = wan | modem | off | keep
 #
 # `keep` means "there is no IPv4 egress to stay consistent with, so do not touch
-# IPv6".  Every state that would place IPv6 on an exit other than the live IPv4
-# exit resolves to `off`, which disables both managed IPv6 default routes rather
-# than letting IPv6 leak out of the wrong uplink.
+# IPv6".  Every state that would place the managed IPv6 default on an exit other
+# than the live IPv4 exit resolves to `off`, which removes managed IPv6 default
+# routes rather than letting IPv6 leak out of the wrong uplink.
 select_ipv6_desired() {
 	case "$ACTIVE4" in
 		wan|modem)
@@ -706,6 +705,27 @@ set_network_option_if_changed() {
 	return 0
 }
 
+drop_ipv6_default_routes() {
+	local dev route
+
+	for dev in $1; do
+		[ -n "$dev" ] || continue
+		ip -6 route show default dev "$dev" 2>/dev/null | while IFS= read -r route; do
+			[ -n "$route" ] || continue
+			# Intentionally split the route line back into ip-route arguments.
+			# shellcheck disable=SC2086
+			ip -6 route del $route >/dev/null 2>&1 || true
+		done
+	done
+}
+
+enable_managed_ipv6_autostart() {
+	set_network_option_if_changed wan6 auto 1 || return 1
+	if [ -n "$MODEM6_PRIMARY" ]; then
+		set_network_option_if_changed "$MODEM6_PRIMARY" auto 1 || return 1
+	fi
+}
+
 apply_ipv6_desired() {
 	local previous
 
@@ -717,27 +737,24 @@ apply_ipv6_desired() {
 			;;
 		wan)
 			NETWORK_CHANGED=0
+			enable_managed_ipv6_autostart || return 1
 			set_network_option_if_changed wan6 defaultroute 1 || return 1
-			set_network_option_if_changed wan6 auto 1 || return 1
 			if [ -n "$MODEM6_PRIMARY" ]; then
 				set_network_option_if_changed "$MODEM6_PRIMARY" defaultroute 0 || return 1
-				set_network_option_if_changed "$MODEM6_PRIMARY" auto 0 || return 1
 			fi
 			;;
 		modem)
 			NETWORK_CHANGED=0
+			enable_managed_ipv6_autostart || return 1
 			set_network_option_if_changed wan6 defaultroute 0 || return 1
-			set_network_option_if_changed wan6 auto 0 || return 1
 			set_network_option_if_changed "$MODEM6_PRIMARY" defaultroute 1 || return 1
-			set_network_option_if_changed "$MODEM6_PRIMARY" auto 1 || return 1
 			;;
 		off)
 			NETWORK_CHANGED=0
+			enable_managed_ipv6_autostart || return 1
 			set_network_option_if_changed wan6 defaultroute 0 || return 1
-			set_network_option_if_changed wan6 auto 0 || return 1
 			if [ -n "$MODEM6_PRIMARY" ]; then
 				set_network_option_if_changed "$MODEM6_PRIMARY" defaultroute 0 || return 1
-				set_network_option_if_changed "$MODEM6_PRIMARY" auto 0 || return 1
 			fi
 			;;
 	esac
@@ -752,34 +769,26 @@ apply_ipv6_desired() {
 		log_note "IPv6 exit ${previous:-none}->${IPV6_DESIRED} (active4=${ACTIVE4} active6=${ACTIVE6} mode=${mode})"
 	fi
 
-	# Enforce the live side.  The stale family is always taken down *before* the
-	# new owner is raised, so the two families are never live on different exits
-	# at the same time.  `auto` is written to match, because the kernel only
-	# honours it at boot: within a session netifd needs the explicit ifup/ifdown.
-	# The old code wrote auto=1 from the policy while requesting an ifdown here,
-	# which made netifd resurrect the interface forever.
+	# Enforce the live side without shutting down the standby IPv6 interface.
+	# Removing the standby's default route is enough to keep it out of the live
+	# exit decision; forcing ifdown/auto=0 also drops its addresses and makes a
+	# later failover colder than it needs to be.
 	case "$IPV6_DESIRED" in
 		wan)
-			if [ -n "$MODEM6_PRIMARY" ] && [ "$MODEM6_UP" = "1" ]; then
-				ifdown "$MODEM6_PRIMARY" >/dev/null 2>&1 || true
-			fi
+			drop_ipv6_default_routes "$MODEM6_DEVS"
 			if [ "$WAN_UP" = "1" ] && [ "$WAN6_UP" != "1" ] && [ "$WAN6_PRESENT" = "1" ]; then
 				ifup wan6 >/dev/null 2>&1 || true
 			fi
 			;;
 		modem)
-			if [ "$WAN6_UP" = "1" ]; then
-				ifdown wan6 >/dev/null 2>&1 || true
-			fi
+			drop_ipv6_default_routes "$WAN6_DEVS"
 			if [ "$MODEM_UP" = "1" ] && [ "$MODEM6_UP" != "1" ] && [ -n "$MODEM6_PRIMARY" ]; then
 				ifup "$MODEM6_PRIMARY" >/dev/null 2>&1 || true
 			fi
 			;;
 		off)
-			[ "$WAN6_UP" != "1" ] || ifdown wan6 >/dev/null 2>&1 || true
-			if [ -n "$MODEM6_PRIMARY" ] && [ "$MODEM6_UP" = "1" ]; then
-				ifdown "$MODEM6_PRIMARY" >/dev/null 2>&1 || true
-			fi
+			drop_ipv6_default_routes "$WAN6_DEVS"
+			drop_ipv6_default_routes "$MODEM6_DEVS"
 			;;
 	esac
 

@@ -22,12 +22,27 @@ set -- $rest
 case "${1:-} ${2:-}" in
 	"route show") file="$scen/routes/default$fam" ;;
 	"route get") file="$scen/routes/get$fam" ;;
+	"route del")
+		printf 'ip -%s route del' "$fam" >> "$scen/route-actions.log"
+		shift 2
+		for a in "$@"; do
+			printf ' %s' "$a" >> "$scen/route-actions.log"
+		done
+		printf '\n' >> "$scen/route-actions.log"
+		exit 0
+		;;
 	"link show") file="$scen/links" ;;
 	*) exit 1 ;;
 esac
 
 [ -f "$file" ] || exit 1
 while IFS= read -r line || [ -n "$line" ]; do
+	if [ "${1:-}" = "route" ] && [ "${2:-}" = "show" ] && [ "${4:-}" = "dev" ] && [ -n "${5:-}" ]; then
+		case "$line" in
+			*" dev ${5} "*|*" dev ${5}") ;;
+			*) continue ;;
+		esac
+	fi
 	printf '%s\n' "$line"
 done < "$file"
 exit 0
