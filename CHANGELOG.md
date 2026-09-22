@@ -2,6 +2,14 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.6.4] — 2026-09-22
+
+### 修复
+
+- **切换网络 / 一键对齐双栈出口时不再强制关闭备用出口 IPv6**：受管 IPv6 接口现在默认保持
+  `auto=1`，重启后 `wan6` 与模组 IPv6 都可自动拉起；出口对齐只移动 `defaultroute`，并即时删除
+  备用设备上的 IPv6 default route，避免备用 IPv6 接口被 `ifdown` 造成地址、会话和热备状态丢失。
+
 ## [v1.6.3] — 2026-09-20
 
 本次修正一处**误报**：装了透明代理但没装 daed 的设备会永久显示「出口分流」，而「一键对齐双栈出口」
