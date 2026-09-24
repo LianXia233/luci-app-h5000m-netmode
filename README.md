@@ -10,7 +10,7 @@
 
 面向 Hiveton H5000M 的 OpenWrt 出口优先级管理器。通过卡片式 LuCI 界面，一键决定**有线 WAN** 与 **5G 模组**两条链路的启用范围与优先顺序，后端服务自动维护接口状态与默认路由。
 
-- 当前 Release 版本：`v1.6.5`
+- 当前 Release 版本：`v1.7.0`
 - 版本格式：`主版本.次版本.修订版本-r打包修订`（GitHub Release 使用语义化标签，OpenWrt 安装包追加打包修订号）
 
 ---
@@ -90,22 +90,49 @@ flowchart TD
     E -->|"TUN 隧道<br/>透明代理"| M["忽略虚拟接口<br/>归属到物理 IPv4 出口"]
     M --> F
     E -->|"外部路由<br/>mwan3 / VPN"| G["报「其他路由」<br/>不认领、不染绿"]
-    F --> H["IPv6 出口跟随 IPv4 收敛<br/>单一写者"]
-    H --> I{"IPv4 与 IPv6 归属相同？"}
+    F --> H["切换 = 移动默认路由优先级<br/>目标→metric 10，旧出口→metric 50"]
+    H --> P{"目标出口<br/>IPv4 + IPv6 都通过？"}
+    P -->|否| Q["不做任何改变<br/>回到原出口（回滚）"]
+    P -->|是| K["提交：两族同时切换<br/>旧出口保留热备路由"]
+    F --> I{"IPv4 与 IPv6 归属相同？"}
     I -->|否| J["红色「出口分流」<br/>+ 一键对齐出口"]
-    I -->|是| K["正常：同出口"]
-    F --> L["默认出口变化<br/>仅维护物理接口"]
+    I -->|是| K
 ```
 
-1. 用户通过 LuCI 卡片选择出口策略，前端**串行**调用后端写入 UCI 配置；
-2. 后端根据策略维护 WAN / 5G 接口状态与默认路由（含 IPv6）；
+1. 用户通过 LuCI 卡片选择出口策略，前端调用 `set <mode>`；后端只创建后台任务并**立即返回**，真正的切换由工作进程完成，LuCI 通过只读 `status` 轮询进度（切换中把轮询收紧到 1 秒），HTTP/ubus 调用永远不会被切换阻塞；
+2. 切换不是重建接口，而是**移动默认路由的优先级**：目标出口被 `ip route replace` 原子地提升到活动槽位（metric 10），旧出口降到热备槽位（metric 50），IPv4 与 IPv6 在同一个出口组里同步移动；
 3. 后端用 `ip route get` 向内核查询**实际**默认出口，而不是读取 main 表，因此策略路由（mwan3 / qmodem / VPN / daed）环境下的判定依然准确；若出口是 TUN 隧道（透明代理），则按网卡内核类型识别并归属到代理实际使用的上行链路；
-4. IPv6 出口由单一写者收敛：始终跟随现役 IPv4 出口，切换时先拆除旧族默认路由再建立新族；「分流」按两个协议族的**出口归属**比较，而非按网卡名比较，因此在代理承载流量时不会把「IPv4 走 `eth2`、IPv6 走 `singtun0`」误报为分流；
+4. IPv4 与 IPv6 被建模为两个「出口组」（WAN 组 = `wan` + `wan6`，5G 组 = `modem` + `modem6`），切换以**组**为单位：两个族的默认路由槽位一起交换，任何一步都不会出现「IPv4 在新出口、IPv6 在旧出口」的中间态；「分流」按两个协议族的**出口归属**比较，而非按网卡名比较，因此在代理承载流量时不会把「IPv4 走 `eth2`、IPv6 走 `singtun0`」误报为分流；
 5. 链路状态变化时，Hotplug 脚本（`95-h5000m-netmode`）委托后端对 section 分类并触发重新计算；
 6. procd 看门狗（`/etc/init.d/h5000m-netmode`）按 `watch_interval` 周期复算，覆盖 Hotplug 看不到的漂移；
 7. 默认出口变化时只维护物理 WAN / 5G 模组接口；HomeProxy、sing-box、daed 等透明代理的 TUN 不作为出口被管理；
-8. 检测到 IPv4 与 IPv6 出口不一致时自动纠正，并在界面上显式告警；
-9. 链路健康探测默认启用（`health_check`，显式设为 `0` 关闭），对公共 anycast 地址探测并缓存结论，出口卡片上方的状态总览直接读取这些实测值而非推断值。
+8. 检测到 IPv4 与 IPv6 出口不一致时自动纠正（优先对齐到策略首选出口），并在界面上显式告警；若两个族都可用但其中一个**没有出口**，则如实上报而不去删除另一个族的默认路由；
+9. 链路健康探测默认启用（`health_check`，显式设为 `0` 关闭），对公共 anycast 地址探测并缓存结论，出口卡片上方的状态总览直接读取这些实测值而非推断值；健康结论用于**判定出口是否降级**（连续 `probe_fail_streak` 轮失败才动作），并在备用出口完整可达时把两个族整体切过去。
+
+### 出口切换流程与状态机
+
+```mermaid
+flowchart LR
+    A["IDLE"] --> B["PREPARING_TARGET<br/>只补齐目标所需的 UCI/接口"] --> C["WAIT_IPV4<br/>目标地址+默认路由"] --> D["WAIT_IPV6<br/>目标地址+默认路由"]
+    D --> E["VERIFY_IPV4<br/>2/3 探测"] --> F["VERIFY_IPV6<br/>2/3 探测"] --> G["SWITCHING<br/>两族 replace 到活动槽位"]
+    G --> H["VERIFY_TARGET<br/>复核优先级 + 静置后复测"] --> I["COMMITTED"]
+    G -.失败.-> J["ROLLBACK<br/>恢复原出口"] --> K["FAILED"]
+    C -.超时.-> J
+    D -.超时.-> J
+    E -.不通.-> J
+    F -.不通.-> J
+    H -.校验不过.-> J
+```
+
+保证与边界：
+
+1. **旧出口始终可用**：直到目标出口的 IPv4 与 IPv6 都通过验证、并且默认路由已经原子替换成功之前，旧出口的默认路由不会被删除或降级为不可用；切换过程中不存在「两个出口同时不可用」的窗口。
+2. **提交前不动路由**：等待或探测阶段失败时不会对活动槽位做任何写操作，只把计划恢复回去 —— 失败路径不制造抖动。
+3. **失败必回滚**：提交阶段的任何失败（含 IPv6 提交失败）都会把两个族恢复到切换前的出口；回滚永不产生黑洞路由，旧出口若已不可用则保留仍在工作的出口。
+4. **全部等待有上限**：等 IPv4（`switch_wait_ipv4`）、等 IPv6（`switch_wait_ipv6`）、每次探测（`probe_timeout` × `probe_attempts`）、以及整次切换（`switch_budget`）都有硬上限，超时即按上面的顺序退出并保留可用出口。
+5. **切换串行化**：所有写操作共用一把锁；切换进行中 `reconcile` 会让路，重复点击返回 rc 3 并把请求排队给正在运行的 worker（最后一次点击生效），不会出现两个 worker 同时改路由。
+6. **Hotplug 合并去抖**：`notify` 把突发事件合并成一次复算（`hotplug_debounce`），任何一次复算都不会与正在进行的切换交错。
+7. **不会来回抖**：出口降级需要连续多轮探测失败，回切需要连续多轮确认，自动切换/对齐之间还有冷却时间；DNS 结果只上报，不参与任何切换判定。
 
 根因级分析、判定逻辑与排查手法见 [FIXES.md](FIXES.md)。
 
@@ -254,7 +281,24 @@ opkg remove luci-app-h5000m-netmode
 | `h5000m_netmode.settings.watch_interval` | 整数（秒） | 看门狗复算周期（默认 `10`） |
 | `h5000m_netmode.settings.health_check` | `0` / `1` | 是否启用链路健康探测（默认 `1`，opt-out：显式设为 `0` / `off` / `false` / `no` 才关闭；仅作诊断，不驱动切换） |
 | `h5000m_netmode.settings.health_probe_interval` | 整数（秒） | 两次健康探测的最小间隔（默认 `60`；设为 `0` 表示不节流，每次复算都探测） |
-| `h5000m_netmode.settings.ipv6_owner` | `wan` / `modem` / `off` / `keep` | IPv6 出口归属，由后端自动维护，通常无需手工设置 |
+| `h5000m_netmode.settings.ipv6_owner` | `wan` / `modem` / `split` / `none` | 当前承载 IPv6 的出口（审计字段），由后端自动维护，通常无需手工设置 |
+| `h5000m_netmode.settings.strict_dual_stack` | `0` / `1` | **强双栈出口门禁（默认 1）**：目标出口必须 IPv4 + IPv6 都就绪且探测通过才允许提升；设为 `0` 才允许把「没有 IPv6 成员的出口」当作可用出口（此时活动出口缺失的族会被隔离，避免分流） |
+| `h5000m_netmode.settings.switch_wait_ipv4` | 整数（秒，≥1） | 切换时等待目标出口 IPv4 结构就绪的上限（默认 `15`） |
+| `h5000m_netmode.settings.switch_wait_ipv6` | 整数（秒，≥1） | 切换时等待目标出口 IPv6 结构就绪的上限（默认 `20`） |
+| `h5000m_netmode.settings.switch_budget` | 整数（秒，≥5） | 单次切换的总预算（默认 `60`）；预算耗尽即回滚，不会无限等待 |
+| `h5000m_netmode.settings.switch_settle` | 整数（秒，≥0） | 提交后复核前的静置窗口（默认 `1`），用于等 netifd 可能的重新宣告 |
+| `h5000m_netmode.settings.switch_settle_warm` | 整数（秒，≥0） | 目标出口本来就完整在线时的静置窗口（默认 `0`，即「快速切换」：两次原子 replace 后立即复核） |
+| `h5000m_netmode.settings.probe_attempts` | 整数（≥1） | 一次连通性判定最多探测几次（默认 `3`） |
+| `h5000m_netmode.settings.probe_ok` | 整数（≥1） | 判定「可达」需要的成功次数（默认 `2`，即 2/3；不会超过总尝试次数） |
+| `h5000m_netmode.settings.probe_timeout` | 整数（秒，≥1） | 单次 ping 的超时（默认 `2`） |
+| `h5000m_netmode.settings.probe_fail_streak` | 整数（≥1） | 连续多少轮探测失败才判定出口降级并切换（默认 `3`） |
+| `h5000m_netmode.settings.switch_cooldown` | 整数（秒，≥0） | 两次自动切换/对齐之间的最小间隔（默认 `20`），用于抑制环路 |
+| `h5000m_netmode.settings.align_confirm` | 整数（≥1） | 回切首选出口前需要的连续确认轮数（默认 `2`） |
+| `h5000m_netmode.settings.hotplug_debounce` | 整数（秒，≥0） | Hotplug 事件合并窗口（默认 `2`），突发事件只触发一次复算 |
+| `h5000m_netmode.settings.reconcile_wait` | 整数（秒） | `reconcile` 等待写锁的上限（默认 `5`） |
+| `h5000m_netmode.settings.gw_required` | `0` / `1` | 是否要求目标出口的 IPv4 网关可达（默认 `0`：蜂窝网关常常不回 ICMP） |
+| `h5000m_netmode.settings.dns_check` | `0` / `1` | 是否在健康轮次里顺带探测 DNS（默认 `0`）。DNS 只作为状态上报，**永远不参与切换判定** |
+| `h5000m_netmode.settings.probe_targets` / `probe_targets6` | 地址列表 | 自定义连通性探测目标（默认 `223.5.5.5 1.1.1.1` / `2400:3200::1 2606:4700:4700::1111`） |
 
 配置示例：
 
@@ -267,6 +311,19 @@ config settings 'settings'
 	option watch_interval '10'
 	option health_check '1'
 	option health_probe_interval '60'
+
+	# 强双栈出口门禁（默认即开）；只有明确接受单栈出口时才设为 0
+	option strict_dual_stack '1'
+
+	# 切换时间预算：等待就绪、探测次数、失败门限、环路抑制
+	option switch_wait_ipv4 '15'
+	option switch_wait_ipv6 '20'
+	option switch_budget '60'
+	option probe_attempts '3'
+	option probe_ok '2'
+	option probe_fail_streak '3'
+	option switch_cooldown '20'
+	option hotplug_debounce '2'
 ```
 
 ---
@@ -277,8 +334,12 @@ config settings 'settings'
 | --- | --- |
 | `status` | 输出当前状态的完整键值对（只读，不写日志） |
 | `apply` / 无参数 | 应用当前策略并重新对齐 IPv6 出口 |
-| `set {wan_first\|modem_first\|wan_only\|modem_only}` | 设置出口策略并使其生效 |
-| `reconcile` | 只做状态对齐（IPv4/IPv6 同出口），不改动所选策略 |
+| `set {wan_first\|modem_first\|wan_only\|modem_only} [--wait]` | 切换出口策略：**立即返回**（后台任务），加 `--wait` 才前台执行 |
+| `align [--wait]` | 一键对齐双栈出口（修复 IPv4/IPv6 分流），默认同样立即返回 |
+| `notify <section> [action]` | Hotplug 事件入口：合并去抖后触发一次 `reconcile` |
+| `reconcile` | 串行化的状态对齐（IPv4/IPv6 同出口、热备路由、孤儿路由回收），不改动所选策略 |
+| `eth-candidates` | 列出可作为有线兜底的候选 section |
+| `eth-fallback get\|set <sections>` | 查看 / 设置有线兜底 section 列表 |
 | `watch` | 以固定周期循环执行 `reconcile`（由 procd 服务托管） |
 | `iface-role <section>` | 输出该 section 的角色：`wan` / `modem` / `other`（供 Hotplug 分类使用） |
 | `health` | 立即执行一次链路健康探测并输出结果 |
@@ -352,6 +413,7 @@ uci set h5000m_netmode.settings.watcher=0 && uci commit h5000m_netmode   # 停�
 
 | 版本 | 日期 | 主要更新 |
 | --- | --- | --- |
+| [v1.7.0](CHANGELOG.md) | 2026-09-24 | 切换改为**移动默认路由优先级**（不再 ifdown/ifup，不再重建接口），IPv4/IPv6 以「出口组」为单位同步切换；强双栈门禁默认开启（单栈目标直接拒绝而不是关闭 IPv6）；切换变成后台任务 + 状态机（页面立即反馈、只读轮询进度、失败自动回滚、全部等待有上限）；修复切换预算因八进制解析而随机失效（约 10% 的切换误判目标不可达）、手动接口映射被覆盖失效、提交前失败也做路由搬家、单族无出口被误报分流等问题 |
 | [v1.6.5](CHANGELOG.md) | 2026-09-22 | 重构透明代理 TUN 归属：后端只管理物理 WAN / 5G 模组接口，HomeProxy、sing-box、daed 的虚拟 TUN 不作为第三出口，也不触发代理重载；兼容字段 `daed_exit_state` 固定输出 `none` |
 | [v1.6.4](CHANGELOG.md) | 2026-09-22 | 切换网络或一键对齐双栈出口时，不再强制关闭备用出口的 IPv6 接口；受管 IPv6 接口保持 `auto=1` 默认开机，只通过 `defaultroute` 和即时删除备用默认路由来控制当前 IPv6 默认出口 |
 | [v1.6.3](CHANGELOG.md) | 2026-09-20 | 修复 `reconcile` 路径从不维护隧道归因状态文件，导致经透明代理承载时隧道出口恒被判为 `other`、永久误报「分流」且「一键对齐」空转；发布包不再压缩前端 JS（构建后在 `.pkgdir` 暂存目录逐字节比对源码） |

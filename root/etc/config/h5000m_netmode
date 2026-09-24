@@ -4,3 +4,26 @@ config settings 'settings'
 	option watch_interval '10'
 	option health_check '1'
 	option health_probe_interval '60'
+
+	# 强双栈出口门禁：目标出口必须 IPv4 + IPv6 都就绪且探测通过才允许提升。
+	# 只有明确接受单栈出口时才设为 0。详见 README「UCI 配置项」。
+	option strict_dual_stack '1'
+
+	# 切换时间预算：所有等待都有上限，超时即按状态机顺序退出并保留可用出口。
+	option switch_wait_ipv4 '15'
+	option switch_wait_ipv6 '20'
+	option switch_budget '60'
+	option switch_settle '1'
+	option switch_settle_warm '0'
+
+	# 连通性判定与抑制环路：2/3 探测为「可达」，连续 3 轮失败才判出口降级。
+	option probe_attempts '3'
+	option probe_ok '2'
+	option probe_timeout '2'
+	option probe_fail_streak '3'
+	option switch_cooldown '20'
+	option align_confirm '2'
+
+	# Hotplug 事件合并窗口与 reconcile 抢锁等待上限。
+	option hotplug_debounce '2'
+	option reconcile_wait '5'

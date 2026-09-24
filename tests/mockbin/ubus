@@ -5,7 +5,17 @@
 #   $H5_SCEN/iwinfo/<device>.json -> `ubus call iwinfo assoclist '{"device":...}'`
 scen="${H5_SCEN:?H5_SCEN not set}"
 
+# `ubus -t <seconds> call ...` is the bounded-connection form the backend uses so
+# a wedged daemon cannot hang a switch.
+while [ "${1:-}" = "-t" ]; do
+	shift 2
+done
+
 case "${1:-}" in
+	list)
+		printf 'network.interface.wan\nnetwork.interface.wan6\n'
+		exit 0
+		;;
 	call)
 		case "${2:-}" in
 			network.interface.*)

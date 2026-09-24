@@ -327,20 +327,143 @@ msgstr "双栈对称原则："
 msgid "强制 IPv6 伴随 IPv4"
 msgstr "强制 IPv6 伴随 IPv4"
 
+msgid "准备目标出口"
+msgstr "准备目标出口"
+
+msgid "等待 IPv4 就绪"
+msgstr "等待 IPv4 就绪"
+
+msgid "等待 IPv6 就绪"
+msgstr "等待 IPv6 就绪"
+
+msgid "验证 IPv4 连通性"
+msgstr "验证 IPv4 连通性"
+
+msgid "验证 IPv6 连通性"
+msgstr "验证 IPv6 连通性"
+
+msgid "切换默认路由"
+msgstr "切换默认路由"
+
+msgid "复核新出口"
+msgstr "复核新出口"
+
+msgid "切换完成"
+msgstr "切换完成"
+
+msgid "回滚"
+msgstr "回滚"
+
+msgid "切换失败"
+msgstr "切换失败"
+
+msgid "空闲"
+msgstr "空闲"
+
+msgid "目标出口："
+msgstr "目标出口："
+
+msgid "状态："
+msgstr "状态："
+
+msgid "耗时："
+msgstr "耗时："
+
+msgid "失败原因："
+msgstr "失败原因："
+
+msgid "当前出口："
+msgstr "当前出口："
+
+msgid "正在切换出口，页面保持可用…"
+msgstr "正在切换出口，页面保持可用…"
+
+msgid "上次切换未完成，已恢复到原出口"
+msgstr "上次切换未完成，已恢复到原出口"
+
+msgid "出口切换完成"
+msgstr "出口切换完成"
+
+msgid "知道了"
+msgstr "知道了"
+
+msgid "目标出口的 IPv4 未在限时内就绪"
+msgstr "目标出口的 IPv4 未在限时内就绪"
+
+msgid "目标出口的 IPv6 未在限时内就绪"
+msgstr "目标出口的 IPv6 未在限时内就绪"
+
+msgid "目标出口没有 IPv4 接口"
+msgstr "目标出口没有 IPv4 接口"
+
+msgid "目标出口没有 IPv6 接口（双栈出口要求，拒绝切换）"
+msgstr "目标出口没有 IPv6 接口（双栈出口要求，拒绝切换）"
+
+msgid "目标出口的 IPv4 探测不通"
+msgstr "目标出口的 IPv4 探测不通"
+
+msgid "目标出口的 IPv6 探测不通"
+msgstr "目标出口的 IPv6 探测不通"
+
+msgid "目标出口的 IPv4 网关不可达"
+msgstr "目标出口的 IPv4 网关不可达"
+
+msgid "IPv4 默认路由切换失败"
+msgstr "IPv4 默认路由切换失败"
+
+msgid "IPv6 默认路由切换失败"
+msgstr "IPv6 默认路由切换失败"
+
+msgid "切换后出口优先级校验失败"
+msgstr "切换后出口优先级校验失败"
+
+msgid "静置后出口优先级校验失败"
+msgstr "静置后出口优先级校验失败"
+
+msgid "静置后目标出口不可达"
+msgstr "静置后目标出口不可达"
+
+msgid "策略写入失败"
+msgstr "策略写入失败"
+
+msgid "目标出口准备失败"
+msgstr "目标出口准备失败"
+
+msgid "未记录"
+msgstr "未记录"
+
+msgid "切换任务仍在后台执行，页面将继续自动刷新结果。"
+msgstr "切换任务仍在后台执行，页面将继续自动刷新结果。"
+
+msgid "切换失败："
+msgstr "切换失败："
+
+msgid "，已保持/恢复到可用出口。"
+msgstr "，已保持/恢复到可用出口。"
+
+msgid "切换完成：IPv4 与 IPv6 均已经由 %s 出口。"
+msgstr "切换完成：IPv4 与 IPv6 均已经由 %s 出口。"
+
 msgid "有线 WAN 接口"
 msgstr "有线 WAN 接口"
 
 msgid "5G 模组接口"
 msgstr "5G 模组接口"
 
-msgid "出口策略"
-msgstr "出口策略"
-
 msgid "未知错误"
 msgstr "未知错误"
 
-msgid "设置已下发生效，正在重新收敛路由拓扑…"
-msgstr "设置已下发生效，正在重新收敛路由拓扑…"
+msgid "接口映射已保存。"
+msgstr "接口映射已保存。"
+
+msgid "出口策略下发失败"
+msgstr "出口策略下发失败"
+
+msgid "已有切换任务在执行，本次请求已排队，稍后自动执行。"
+msgstr "已有切换任务在执行，本次请求已排队，稍后自动执行。"
+
+msgid "切换任务已启动，正在后台切换出口…"
+msgstr "切换任务已启动，正在后台切换出口…"
 
 msgid "配置应用失败："
 msgstr "配置应用失败："
@@ -353,6 +476,9 @@ msgstr "对齐失败："
 
 msgid "⚡ 一键对齐双栈出口"
 msgstr "⚡ 一键对齐双栈出口"
+
+msgid "切换执行中…"
+msgstr "切换执行中…"
 
 msgid "策略部署中…"
 msgstr "策略部署中…"

@@ -1,60 +1,123 @@
 #!/bin/sh
-# Mock of OpenWrt's jsonfilter, supporting the `-e '@.dotted.path'` form.
+# Mock of OpenWrt's jsonfilter, covering the `-e '<path>'` forms this app uses.
 #
-# Pure shell on purpose: the test suite is meant to run on the router too, where
-# there is no python, and a process per parsed field would dominate the runtime.
-# A missing key prints an empty line, which bool_value() maps to 0 - the same
-# observable behaviour as the real jsonfilter for the fields this app reads.
+# Pure shell + one awk pass on purpose: the test suite is meant to run on the
+# router too, where there is no python.  A missing key prints an empty line, which
+# bool_value() maps to 0 - the same observable behaviour as the real jsonfilter
+# for the fields this app reads.
+#
+# Supported shapes:
+#   @.field                     first match of a key      (@.up, @.l3_device)
+#   @.*.field / @.a[*].b        every match, one per line (@.*.up, ...ssid)
+#   @["list"][*]                every element of an array (@["dns-server"][*])
+#   @["list"][0].leaf           the leaf of the first element
+#                               (@["ipv4-address"][0].address)
 raw=""
 while IFS= read -r line || [ -n "$line" ]; do
 	raw="$raw$line"
 done
 
-emit_value() {
-	value="$1"
-	# trim surrounding whitespace
-	value="${value#"${value%%[![:space:]]*}"}"
-	value="${value%"${value##*[![:space:]]}"}"
-	# strip one layer of JSON quotes
-	case "$value" in
-		\"*\") value="${value#\"}"; value="${value%\"}" ;;
-	esac
-	printf '%s\n' "$value"
-}
-
+expr=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		-e)
 			expr="${2:-}"
 			shift 2 2>/dev/null || shift
-			field="${expr#@.}"
-			[ "$field" = "$expr" ] && field="$expr"
-			case "$field" in
-				*\**)
-					# A wildcard path (`@.*.up`, `@.*.interfaces[*].config.ssid`).
-					# The real jsonfilter expands it into one line per match, which
-					# is the behaviour the app depends on to count radios.  This
-					# mock matches on the leaf key only - every key the app reads
-					# through a wildcard (up, ssid, ifname, mac) is unique per
-					# object in the fixtures - and prints every match it finds.
-					key="${field##*.}"
-					matches="$(printf '%s' "$raw" | \
-						grep -o "\"$key\"[[:space:]]*:[[:space:]]*[^,}]*" | \
-						sed 's/^[^:]*:[[:space:]]*//')"
-					[ -n "$matches" ] || exit 0
-					printf '%s\n' "$matches" | while IFS= read -r line; do
-						emit_value "$line"
-					done
-					;;
-				*)
-					emit_value "$(printf '%s' "$raw" | \
-						sed -n "s/.*\"$field\"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p")"
-					;;
-			esac
 			;;
 		*)
 			shift
 			;;
 	esac
 done
+[ -n "$expr" ] || exit 0
+
+# Normalise @["key"] and @.key into a dotted path, keeping the array markers so an
+# indexed path and a wildcard path can be told apart.
+path="$(printf '%s' "$expr" | sed 's/@\["/@./g; s/"\]//g; s/@\.//')"
+
+mode=first
+case "$path" in
+	*\**) mode=all ;;
+esac
+
+awk -v raw="$raw" -v path="$path" -v mode="$mode" '
+	function unquote(v,   p) {
+		sub(/^[ \t]*/, "", v)
+		if (substr(v, 1, 1) == "\"") {
+			# A JSON string: take what is between the quotes, so the rest of the
+			# line cannot leak into the value.
+			sub(/^"/, "", v)
+			p = index(v, "\"")
+			if (p > 0)
+				v = substr(v, 1, p - 1)
+			return v
+		}
+		sub(/[,}].*$/, "", v)
+		sub(/[ \t]*$/, "", v)
+		return v
+	}
+
+	# Print one value: an array is expanded into one line per element, a quoted
+	# string loses its quotes, anything else is cut at the next comma/brace.
+	function emit(v,   i, n, elems, e) {
+		sub(/^[ \t]*/, "", v)
+		if (substr(v, 1, 1) == "[") {
+			sub(/^\[/, "", v)
+			sub(/\].*$/, "", v)
+			n = split(v, elems, ",")
+			for (i = 1; i <= n; i++) {
+				e = unquote(elems[i])
+				if (length(e)) {
+					print e
+					if (mode == "first")
+						exit
+				}
+			}
+			return
+		}
+		print unquote(v)
+	}
+
+	function find_in(haystack, key,   line, p, rest, needle) {
+		line = haystack
+		needle = "\"" key "\""
+		while ((p = index(line, needle)) > 0) {
+			rest = substr(line, p + length(needle))
+			if (rest ~ /^[ \t]*:/) {
+				sub(/^[ \t]*:[ \t]*/, "", rest)
+				emit(rest)
+				if (mode == "first")
+					return
+			}
+			line = substr(line, p + length(needle))
+		}
+	}
+
+	BEGIN {
+		nseg = split(path, seg, ".")
+
+		# @["list"][0].leaf - scope the search to the first element of an array.
+		if (path ~ /\[[0-9]+\]\./) {
+			arraykey = seg[1]
+			sub(/\[.*$/, "", arraykey)
+			leaf = seg[nseg]
+			line = raw
+			p = index(line, "\"" arraykey "\"")
+			if (p == 0)
+				exit
+			rest = substr(line, p + length(arraykey) + 2)
+			sub(/^[ \t]*:[ \t]*/, "", rest)
+			sub(/^\[[ \t]*/, "", rest)
+			sub(/^\{[ \t]*/, "", rest)
+			sub(/\}.*$/, "", rest)
+			find_in(rest, leaf)
+			exit
+		}
+
+		key = seg[nseg]
+		sub(/\[.*$/, "", key)
+		find_in(raw, key)
+		exit
+	}
+' </dev/null
 exit 0

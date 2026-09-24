@@ -71,7 +71,7 @@ function findAllByClass(node, cls, out) {
 	for (const c of node.children) findAllByClass(c, cls, out);
 	return out;
 }
-function classesOf(node) { return (node.attr['class'] || '').split(/\s+/).filter(Boolean); }
+function classesOf(node) { return ((node && node.attr['class']) || '').split(/\s+/).filter(Boolean); }
 
 // Parse the captured status output exactly the way the page does.
 const raw = fs.readFileSync(statusFile, 'utf8');

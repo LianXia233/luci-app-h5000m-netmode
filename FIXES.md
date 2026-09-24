@@ -19,6 +19,11 @@
 - [九、状态呈现](#九状态呈现)
 - [十、本地化](#十本地化)
 - [十一、打包与权限](#十一打包与权限)
+- [十二、切换过程与时间预算](#十二切换过程与时间预算)
+  - [12.1 时钟的八进制陷阱：十分之一的切换被判「目标不可达」](#121-时钟的八进制陷阱十分之一的切换被判目标不可达)
+  - [12.2 提交前失败也会「回滚」：正常出口被无谓搬家](#122-提交前失败也会回滚正常出口被无谓搬家)
+  - [12.3 手动接口映射被逐 section 读取覆盖](#123-手动接口映射被逐-section-读取覆盖)
+  - [12.4 只有一个族有默认路由，不等于「出口分流」](#124-只有一个族有默认路由不等于出口分流)
   - [11.1 init 脚本没有执行位：服务「已启用」却从未启动](#111-init-脚本没有执行位服务已启用却从未启动)
   - [11.2 别用 tar 解 apk：OpenWrt 25.x 起容器是 ADB.pckg](#112-别用-tar-解-apkopnewrt-25x-起容器是-adbpckg)
 
@@ -1309,3 +1314,141 @@ open('netmode.min.js', 'wb').write(body[s:s + 45124])
 ```
 
 **附：为什么「日志里出现 jsmin」不能证明压缩开着**。`luci-base` 的 hostpkg 构建无论开关如何都会编译并安装 `jsmin` 二进制（`install -m0755 src/jsmin .../staging_dir/hostpkg/bin/jsmin`），因为它是 luci-base 自身构建的一部分。判断压缩是否**实际执行**，要看有没有 `.js.o` 这类临时产物名——那才是 `luci.mk` 的 `JsMin` 宏展开后才有的。本次 v1.6.3 的日志里 `.js.o` 零匹配，`.config` 生效证据是 `luci.mk` 第 244 行 `$(if $(CONFIG_LUCI_JSMIN),$(call JsMin,$(1)$(HTDOCS)/),true)` 走了 `true` 分支。
+
+---
+
+## 十二、切换过程与时间预算
+
+### 12.1 时钟的八进制陷阱：十分之一的切换被判「目标不可达」
+
+**现象**（v1.7.0 开发期，测试套件约每十次运行就有一次随机失败）：切换 5G 时状态机走到 `VERIFY_TARGET`
+就回滚，原因 `ipv4_unreachable` / `ipv6_unreachable` 交替出现，而**同一个出口的手工探测与随后的健康探测
+都是通的**；日志里唯一的线索是探测尝试次数：
+
+```
+logger h5000m-netmode ipv6 probe on modem failed: devices=eth2 attempts=1/3 ok=1 need=2
+```
+
+`attempts=1/3` 说明探测循环在第一次尝试后就退出了，而门限需要 2 次成功。
+
+**根因**：`now_cs` 从 `/proc/uptime` 取秒与百分位（该值是**单调**时钟，墙钟被 NTP 或 `date -s` 调整时
+不会影响预算）：
+
+```sh
+frac="${frac}00"                       # 百分位补齐到两位
+printf '%s\n' "$((whole * 100 + ${frac%${frac#??}}))"
+```
+
+`${frac%${frac#??}}` 得到的是一个**两位字符串**。当它形如 `08` 时，shell 的算术求值把它当成**八进制**
+字面量，而 `8` 不是合法八进制数字：dash 直接报 `arithmetic expression: expecting EOF`，整个 `$(( ))`
+的求值为空，`now_cs` 输出空行。
+
+于是调用方 `SWITCH_DEADLINE_CS=$(( $(now_cs) + $(switch_budget) * 100 ))` 变成
+`$((  + 3000 ))`——shell 把前导 `+` 当一元正号，预算变成 **3000 厘秒 = uptime 30 秒**，
+而真实 uptime 是几十万厘秒：预算**开局即过期**。探测循环里那行
+`[ "$(budget_left_cs)" -gt 0 ] || break` 于是在第一次成功尝试后立刻跳出，
+`ok=1 < need=2`，探测返回 0，健康的目标被判不可达并回滚。
+
+百分位以 `0` 开头的情况占 10%（`00`–`09`），这正是随机复现的频率。
+
+**危害**：用户看到的是「切换 5G 失败」，最容易的结论是 5G 不稳、模组有问题。实际上模组完全正常，
+失败来自本地的时间算术。这类缺陷在实机上极难复现——它需要 uptime 的百分位恰好落在十分之一里，
+而且现象（回滚 + `*_unreachable`）指向的完全是另一个方向。
+
+**修复**：按**十进制**剥离前导零（`10#` 前缀是 bash/ksh 扩展，BusyBox ash 与 dash 不保证支持）：
+
+```sh
+frac="${frac}00"
+digits="${frac%${frac#??}}"
+while [ "${digits#0}" != "$digits" ]; do digits="${digits#0}"; done
+[ -n "$digits" ] || digits=0
+printf '%s\n' "$((whole * 100 + digits))"
+```
+
+并让预算的消费者**容错**：读不到时钟时 `budget_start` 取消预算（宁可没有预算，也不要一个假的，
+单次等待本身仍有各自的超时），`budget_left_cs` / `bounded_sleep` 遇到空值按「无上限」处理而不是算术报错。
+
+**验证**：
+
+```sh
+# 时钟本身可按毫厘秒逐个核对（这是为它专门加的测试接缝）
+printf '1234.08 42.00' > /tmp/uptime
+H5000M_UPTIME_FILE=/tmp/uptime /usr/sbin/h5000m-netmode now-cs
+# 期望 123408（修复前是空行）
+
+# 端到端回归：把时钟钉在会触发八进制的那一位上，切换仍必须提交
+sh tests/run_tests.sh /usr/sbin/h5000m-netmode clock
+sh tests/run_tests.sh /usr/sbin/h5000m-netmode switch_survives
+```
+
+### 12.2 提交前失败也会「回滚」：正常出口被无谓搬家
+
+**现象**（v1.7.0 开发期，目标出口 IPv4 未就绪）：切换正确地超时失败了，但活动出口的默认路由
+在 `route-actions.log` 里被搬了两轮。
+
+**根因**：失败路径无条件执行「把旧出口放回活动槽位、把目标压到热备槽位」。当失败发生在**提交之前**
+（目标未就绪、探测不通、没有 IPv6 接口）时，活动槽位从头到尾就没被动过，这次「回滚」只是把
+一根本来正确的默认路由删掉再写一遍——包括把目标出口的下一跳塞进热备槽位。
+
+**危害**：每次失败的切换都对**正在承载流量**的出口做两次 route replace。窗口极短（`replace` 是原子的），
+但这是没有必要的写操作，并且会污染日志、改变热备路由的内容。在只有一条链路正常的设备上，
+一次失败的切换就等于一次无谓的路由抖动。
+
+**修复**：`switch_run` 记录 `plan_written` / `committed4` / `committed6`，失败时只回滚**真正改动过**的
+部分：计划写过才恢复计划、某个族提交过才回滚该族；两个族都没提交过就不做任何路由操作，也不做
+失败后的收敛（此时两族本来就一致）。
+
+**验证**：
+
+```sh
+sh tests/run_tests.sh /usr/sbin/h5000m-netmode broken_target   # 提交前失败：活动槽位零操作
+sh tests/run_tests.sh /usr/sbin/h5000m-netmode half_committed  # 提交后失败：必须回滚
+```
+
+### 12.3 手动接口映射被逐 section 读取覆盖
+
+**现象**（「绑定物理接口」下拉框保存后不生效）：把 5G 模组手动指到 `eth1` 保存成功，
+但 `status` 里 `modem_device_source=manual` 而 `modem_devices=eth2`——映射"保存了"，判定却仍在用旧接口。
+
+**根因**：`discover_groups` 先把手工映射写进 `WAN4_DEVS` / `MODEM4_DEVS` 等字段，随后
+`read_live_state` 又按 UCI section 调用 `read_role_state`，把**同名字段整体重写**成 section 里的设备。
+手工映射只影响 `*_device_source` 与显示用的 `*_device`，对就绪判定、探测设备、路由归属比较全部失效。
+
+**危害**：非标准命名（或需要把模组指到另一个网卡）的设备上，用户以为已经改好映射，实际每个判定都在用
+自动发现的结果；更糟的是自检项 `modem_device_source` 显示 `manual`，看起来"已生效"。
+
+**修复**：新增 `apply_manual_devices()`，在读取 section 状态**之后**应用手工映射（并重算
+`*_DEVICES` / `*_DEVICE`）。顺序反过来就会重新踩这个坑。
+
+**验证**：
+
+```sh
+uci set h5000m_netmode.settings.modem_device=eth1 && uci commit h5000m_netmode
+/usr/sbin/h5000m-netmode status | grep -E '^(modem_device|modem_devices|modem_device_source)='
+# 期望 modem_device=eth1、modem_devices 含 eth1、modem_device_source=manual
+sh tests/run_tests.sh /usr/sbin/h5000m-netmode manual_mapping
+```
+
+### 12.4 只有一个族有默认路由，不等于「出口分流」
+
+**现象**：WAN 的 IPv4 没有默认路由（线路协商中），IPv6 仍在 `wan6` 上正常。`status` 报
+`ipv6_owner=split`，日志写「IPv4/IPv6 split … no complete dual-stack exit is available」。
+
+**根因**：分流判定只比较两个族的归属字符串，`none` 与 `wan` 不相等就被当成"分流"。这不是分流：
+IPv4 根本没有默认路由，谈不上"走另一个出口"。同时 `write_ipv6_owner("split")` 把这个结论写进了
+审计字段。
+
+**危害**：误导排查方向（提示"两个族走了不同出口"，而实际是"一个族没有出口"），并让审计字段长期停在
+`split`。更危险的是它诱导出错误的修复方式——用删除/压制另一个族的默认路由去"对齐"，
+这正是本项目明确禁止的做法。
+
+**修复**：`reconcile_align` 先把空归属规范化为 `none` 并单独判断：只有一个族有默认路由时如实上报
+（`ipv6_owner` 记录真正承载的那个出口），不动作、不删除、不搬路由；`maintain_warm_routes`
+也只在某个族**已有活动槽位**时才维护它的热备路由，避免"热备路由因此成为唯一路由"而制造真正的分流。
+
+**验证**：
+
+```sh
+sh tests/run_tests.sh /usr/sbin/h5000m-netmode no_ipv4_default   # 零路由操作、IPv6 毫发无损
+sh tests/run_tests.sh /usr/sbin/h5000m-netmode stable_state      # 稳定态零扰动
+```
