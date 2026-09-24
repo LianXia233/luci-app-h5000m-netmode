@@ -1,7 +1,7 @@
 #!/bin/sh
 #
-# Trigger a re-evaluation of the exit policy when a participating interface comes
-# up or goes down.
+# Trigger a re-evaluation of the exit policy when a participating interface
+# changes.
 #
 # Classification is delegated to the backend rather than re-implemented here.
 # The previous version required either the qmodem `modem_config` marker or
@@ -9,9 +9,16 @@
 # neither (a plain static interface on a cellular netdev, a renamed manager
 # section) produced no reconcile at all and a failover went unnoticed until some
 # unrelated event happened to fire.
+#
+# The event is handed to the backend's `notify` worker instead of being acted on
+# here.  That worker coalesces a burst of events into one evaluation and delays
+# it by `hotplug_debounce` seconds, because a modem re-registering fires several
+# ifup/ifdown/ifupdate events in a row and evaluating each one of them separately
+# is what produced the duplicate switches and route flapping this design removes.
+# The worker also refuses to touch the exit while a switch is in progress.
 
 case "$ACTION" in
-	ifup|ifdown) ;;
+	ifup|ifdown|ifupdate|ifcreate) ;;
 	*) exit 0 ;;
 esac
 
@@ -23,12 +30,10 @@ case "$role" in
 	*) exit 0 ;;
 esac
 
-# Let netifd finish adding or removing the routes before deciding which IPv6
-# client may be active.  reconcile is idempotent and locked, and it waits for a
-# run that is already in progress instead of dropping this event.
+# Detached and silent: the hotplug helper must not hold netifd waiting on a
+# debounce window, and its output must not keep an rpcd pipe open.
 (
-	sleep 1
-	/usr/sbin/h5000m-netmode reconcile >/dev/null 2>&1
+	/usr/sbin/h5000m-netmode notify "$INTERFACE" "$ACTION" >/dev/null 2>&1
 ) &
 
 exit 0

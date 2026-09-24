@@ -9,6 +9,13 @@
 # deviates from the required state, so a steady configuration costs two short
 # command runs per interval and nothing else.
 #
+# The watchdog never follows a preference change by itself: it repairs a family
+# split, fails over to a complete standby when the live exit has lost a required
+# family for `probe_fail_streak` consecutive rounds, fails back once the
+# preferred exit has been confirmed healthy `align_confirm` times, and restores
+# a lost warm standby route.  A user-requested switch runs in its own worker
+# (see `set`), and reconcile defers to that worker while it runs.
+#
 # Disable with: uci set h5000m_netmode.settings.watcher=0 && uci commit
 
 START=95

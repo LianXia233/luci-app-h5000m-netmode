@@ -1,5 +1,76 @@
 #!/bin/sh
-# Mock of `ping`: the suite never wants to send real traffic, and the health probe
-# is diagnostic-only, so "reachable" is the harmless default.
+# Mock of `ping`: the suite never wants to send real traffic.  Reachability is
+# successful by default, and a scenario can make specific probes fail by writing
+# rules into $H5_SCEN/ping-fail, one rule per line, each rule a space separated
+# list of `dev=<dev>` / `fam=<4|6>` / `target=<address>` requirements.  A probe
+# fails when a rule matches every one of its terms:
+#
+#     fam=6                 # no IPv6 anywhere
+#     dev=eth2              # the 5G uplink does not pass traffic
+#     dev=eth2 fam=6        # only its IPv6 is broken
+#
+# The backend calls it the way the real ping is called: `ping -c 1 -W <t> -I <dev>
+# <target>` (plus `-6` for IPv6).
+scen="${H5_SCEN:?H5_SCEN not set}"
+
+fam="4"
+dev=""
+target=""
+skip=0
+for a in "$@"; do
+	if [ "$skip" = "1" ]; then
+		skip=0
+		continue
+	fi
+	case "$a" in
+		-6) fam="6" ;;
+		-4) fam="4" ;;
+		-c|-W|-w|-i|-s|-t|-p) skip=1 ;;
+		-I) skip=1 ;;
+		-*) ;;
+		*) target="$a" ;;
+	esac
+done
+# `-I` takes the device: re-scan with that knowledge.
+prev=""
+for a in "$@"; do
+	case "$prev" in
+		-I) dev="$a" ;;
+	esac
+	prev="$a"
+done
+
+if [ -f "$scen/ping-fail" ]; then
+	while IFS= read -r rule || [ -n "$rule" ]; do
+		case "$rule" in
+			''|'#'*) continue ;;
+		esac
+		match=1
+		for term in $rule; do
+			case "$term" in
+				dev=*) [ "$dev" = "${term#dev=}" ] || match=0 ;;
+				fam=*) [ "$fam" = "${term#fam=}" ] || match=0 ;;
+				target=*) [ "$target" = "${term#target=}" ] || match=0 ;;
+				*) match=0 ;;
+			esac
+			[ "$match" = "1" ] || break
+		done
+		if [ "$match" = "1" ]; then
+			exit 1
+		fi
+	done < "$scen/ping-fail"
+fi
+
+# A scenario can slow the probe down ($H5_SCEN/ping-delay, seconds).  No test
+# depends on wall-clock timing for correctness, but the async/cancellation cases
+# need a switch that is demonstrably still in flight.
+if [ -r "$scen/ping-delay" ]; then
+	delay="$(cat "$scen/ping-delay" 2>/dev/null || echo 0)"
+	case "$delay" in
+		''|*[!0-9]*) delay=0 ;;
+	esac
+	[ "$delay" -gt 0 ] && sleep "$delay"
+fi
+
 printf 'PING: 1 packets transmitted, 1 packets received\n'
 exit 0

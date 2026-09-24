@@ -1,36 +1,54 @@
 #!/bin/sh
 #
-# h5000m-netmode - wired WAN / 5G modem exit priority manager for Hiveton H5000M
+# h5000m-netmode - wired WAN / 5G modem exit manager for Hiveton H5000M
 #
-# Three invariants drive the design of this script.  Each one exists because it
-# was violated in the field.
+# ---------------------------------------------------------------------------
+# What this program manages
+# ---------------------------------------------------------------------------
 #
-#   1. The live exit must be read from the kernel forwarding table, never from
-#      the first line of `ip route show default`.
-#      That command only dumps the *main* table.  As soon as a policy rule
-#      redirects traffic into another table (mwan3, qmodem, VPN helpers) the
-#      first main-table line and the route the kernel actually uses disagree.
-#      Measured on the H5000M: with `to 198.51.100.7 lookup 1000` installed the
-#      main table still reported eth1 while the FIB resolved eth2.  Reading the
-#      wrong table is what makes a manager report the standby as active, or fail
-#      to switch at all.
-#      `ip -<fam> route get <probe>` is a pure FIB lookup (it emits no packets)
-#      and therefore honours policy rules; that is the oracle used here, with a
-#      deterministic lowest-metric fallback for when it cannot resolve.
+# Two "exit groups".  A group is the pair (IPv4 member, IPv6 member) of one
+# physical uplink, and it is always switched as a unit:
 #
-#   2. IPv4 and IPv6 defaults must leave through the same interface.
-#      A single writer (apply_ipv6_desired) owns the IPv6 default-route state.
-#      It moves the managed default route without forcing the standby IPv6
-#      interface down, so the backup exit keeps its IPv6 addresses warm while
-#      staying out of the live default-route decision.
+#     WAN_GROUP    = { wan, wan6 }        -> eth1 (wired)
+#     MODEM_GROUP  = { 2_1, 2_1v6 }       -> eth2 (5G module)
 #
-#   3. One invocation evaluates one immutable state snapshot.
-#      The previous implementation re-read the whole state up to three times per
-#      run, so it could align IPv6 with one exit while reporting a different one
-#      to daed.  State is now memoised per process and invalidated explicitly
-#      after an action expected to change it.
+# Three invariants drive the whole design.  Each one exists because it was
+# violated in the field.
 #
-# BusyBox/ash notes: no arrays, no `sleep 0.2` (integer only), `local` is fine.
+#   1. IPv4 and IPv6 always leave through the same physical exit.
+#      The live exit is read from the kernel FIB (`ip -4/-6 route get`, a pure
+#      lookup that honours policy rules), and the *priority* of an exit is the
+#      metric of its default route.  Both families of one group therefore always
+#      receive the same metric pair (active slot / standby slot), which makes a
+#      family split structurally impossible rather than something a script has
+#      to repair afterwards.  IPv6 is never disabled, never has its interface
+#      torn down and never loses its default route to make a switch work.
+#
+#   2. A switch never destroys the exit that is currently working.
+#      The old exit keeps its interface, its addresses, its leases and its
+#      default route until the new exit has been proven reachable on both
+#      families.  Nothing is ever `ifdown`ed; `ifup` is only used to warm a
+#      target that is not online yet.  When the target does not come up in
+#      time, or its IPv6 turns out to be broken, the switch is abandoned and
+#      the old exit is left untouched (rollback restores the previous metrics
+#      and nothing else).
+#
+#   3. Switching is a route-priority change, not an interface restart.
+#      `ip route replace` is keyed on (destination, metric) - verified against
+#      Linux 6.1 - so replacing the default route *in the active metric slot*
+#      hands the slot to another next hop atomically, in one kernel
+#      transaction, with no window in which the default route is missing.  The
+#      same key rule is what makes the swap safe against netifd: a stale route
+#      object can only delete a route whose gateway and device still match, and
+#      they no longer do.  (Both facts are pinned by tests/run_netns.sh.)
+#      The UCI metric is rewritten in the same commit, so netifd reproduces the
+#      same priority whenever it re-applies an interface; the direct route
+#      surgery only closes the gap between "config written" and "netifd
+#      happened to re-announce the route".
+#
+# BusyBox/ash notes: no arrays, integer sleeps only, `local` is fine.
+#
+# Subcommands: see usage() / the dispatch table at the end of the file.
 
 TAG="h5000m-netmode"
 
@@ -39,8 +57,13 @@ TAG="h5000m-netmode"
 # defaults are the production values; nothing sets these variables on a router.
 LOCK_DIR="${H5000M_LOCK_DIR:-/var/lock/h5000m-netmode.lock}"
 HEALTH_STATE_FILE="${H5000M_HEALTH_STATE:-/var/run/h5000m-netmode.health}"
+STATE_FILE="${H5000M_STATE_FILE:-/var/run/h5000m-netmode.state}"
 SYS_CLASS_NET="${H5000M_SYSFS_NET:-/sys/class/net}"
 SELF="${H5000M_SELF:-/usr/sbin/h5000m-netmode}"
+# The switch worker is re-executed through this path by `set`, so it has to be a
+# file the shell can run; H5000M_SELF lets the test suite point it at the
+# checkout instead of the installed copy.
+WORKER="${H5000M_WORKER:-$SELF}"
 
 # Probes for the FIB lookup.  Both are anycast resolvers, so a lookup on this
 # router can never be answered by one of its own host routes.
@@ -52,6 +75,11 @@ PROBE6="2606:4700:4700::1111"
 # the event would be dropped and the state would stay stale until the next one.
 DEFAULT_RECONCILE_WAIT=5
 
+# ubus is called with a connection timeout so a wedged daemon cannot hang a
+# switch.  The flag is probed once per process because a build without it would
+# turn every call into a failure.
+UBUS_TIMEOUT=5
+
 # Logging is disabled for `status`, which LuCI polls every 5 seconds.
 LOGGING=1
 
@@ -60,6 +88,32 @@ STATE_READY=0
 NETWORK_CHANGED=0
 
 mode="$(uci -q get h5000m_netmode.settings.mode 2>/dev/null || true)"
+
+# Metric slots.  The active group's default routes carry ACTIVE_METRIC, the
+# standby group's carry STANDBY_METRIC; a switch exchanges the two.  Keeping the
+# numbers fixed (instead of, say, decreasing a counter) is what makes the switch
+# a single replace per family and what makes an interrupted switch recoverable:
+# the two values are the complete state.
+ACTIVE_METRIC=10
+STANDBY_METRIC=50
+
+# Exit group names.
+GROUP_WAN="wan"
+GROUP_MODEM="modem"
+
+# Phase names of the switch state machine, in order.  The worker writes the
+# current one into $STATE_FILE so LuCI can show progress without blocking.
+SM_PREPARING="PREPARING_TARGET"
+SM_WAIT4="WAIT_IPV4"
+SM_WAIT6="WAIT_IPV6"
+SM_VERIFY4="VERIFY_IPV4"
+SM_VERIFY6="VERIFY_IPV6"
+SM_SWITCHING="SWITCHING"
+SM_VERIFY_TARGET="VERIFY_TARGET"
+SM_COMMITTED="COMMITTED"
+SM_ROLLBACK="ROLLBACK"
+SM_FAILED="FAILED"
+SM_IDLE="IDLE"
 
 # ---------------------------------------------------------------------------
 # primitives
@@ -77,6 +131,25 @@ normalize_mode() {
 	esac
 }
 
+mode_is_only() {
+	case "$1" in
+		wan_only|modem_only) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# Primary (policy) group of a mode.
+mode_primary_group() {
+	case "$1" in
+		modem_first|modem_only) printf '%s\n' "$GROUP_MODEM" ;;
+		*) printf '%s\n' "$GROUP_WAN" ;;
+	esac
+}
+
+other_group() {
+	if [ "$1" = "$GROUP_MODEM" ]; then printf '%s\n' "$GROUP_WAN"; else printf '%s\n' "$GROUP_MODEM"; fi
+}
+
 bool_value() {
 	case "$1" in
 		1|true|yes|on) echo 1 ;;
@@ -84,8 +157,56 @@ bool_value() {
 	esac
 }
 
-uci_get() {
-	uci -q get "$1" 2>/dev/null || true
+# Every configuration read goes through a cached `uci show <config>` dump.
+#
+# A single switch asks for the same handful of options dozens of times (the mode,
+# each section's metric and defaultroute, the device map, the tunables), and every
+# `uci` invocation is a fork/exec plus a full re-parse of /etc/config on a router
+# whose CPU is the scarce resource.  One dump per config file, parsed in the
+# shell, replaces roughly a hundred process spawns with one.  `uci_gen_bump`
+# invalidates the dump whenever this program writes, so a value read after a write
+# of our own is never stale.
+UCI_GEN=0
+uci_gen_bump() { UCI_GEN=$((UCI_GEN + 1)); }
+
+uci_dump() { # <config>
+	local config="$1" var flag
+	var="UCI_DUMP_$config"
+	eval "flag=\${${var}_gen:-x}"
+	if [ "$flag" != "$UCI_GEN" ]; then
+		eval "${var}=\"\$(uci -q show \"$config\" 2>/dev/null || true)\""
+		eval "${var}_gen=$UCI_GEN"
+	fi
+	eval "printf '%s\\n' \"\${$var:-}\""
+}
+
+uci_get() { # <config[.section[.option]]>
+	local key="$1" line quote="'"
+	[ -n "$key" ] || return 0
+	# Built in variables rather than written inline: dash mis-parses a literal
+	# quote inside a ${...} expansion, and a config reader that fails to parse is
+	# exactly the kind of silent breakage this program must not have.  Both the
+	# quoted (`key='value'`) and unquoted (`key=value`) shapes are accepted, so a
+	# dump from any uci build reads the same.
+	prefix="$key=$quote"
+	while IFS= read -r line; do
+		case "$line" in
+			"$key="*)
+				line="${line#"$key="}"
+				case "$line" in
+					"$quote"*) line="${line#"$quote"}" ;;
+				esac
+				case "$line" in
+					*"$quote") line="${line%$quote}" ;;
+				esac
+				printf '%s\n' "$line"
+				return 0
+				;;
+		esac
+	done <<EOF7
+$(uci_dump "${key%%.*}")
+EOF7
+	return 0
 }
 
 interface_exists() {
@@ -101,6 +222,52 @@ number_or() {
 
 netdev_exists() {
 	[ -n "$1" ] && [ -e "${SYS_CLASS_NET}/$1" ]
+}
+
+# Monotonic clock in centiseconds.  BusyBox `date` has no sub-second format, and
+# the whole point of this rewrite is that a fast switch is measured in fractions
+# of a second, so the kernel's own uptime counter is used instead.
+# A centisecond clock, used for the coarse timings in the log and for the total
+# switch budget.  /proc/uptime is monotonic, so a wall-clock step (NTP, a manual
+# `date -s`) can never shorten or stretch a budget; the wall clock is the fallback
+# for a system without /proc.  H5000M_UPTIME_FILE is a test seam.
+#
+# The fraction is stripped of leading zeros before the arithmetic.  It is a
+# two-digit string, and `08` is an invalid OCTAL literal: dash aborts the whole
+# expression, now_cs prints nothing, and the caller's budget became `$(( + 3000 ))`
+# - an already-expired budget.  In ~10% of switches (a hundredth-of-a-second value
+# starting with a zero) every probe then gave up after its first attempt, a
+# healthy target was declared unreachable and the switch rolled back.
+now_cs() {
+	local up whole frac digits
+	up="$(cut -d' ' -f1 "${H5000M_UPTIME_FILE:-/proc/uptime}" 2>/dev/null || true)"
+	case "$up" in
+		''|*[!0-9.]*)
+			up="$(date +%s 2>/dev/null || echo 0)"
+			case "$up" in ''|*[!0-9]*) up=0 ;; esac
+			printf '%s\n' "$((up * 100))"
+			return 0
+			;;
+	esac
+	whole="${up%%.*}"
+	frac="${up#*.}"
+	[ "$frac" != "$up" ] || frac=""
+	[ -n "$whole" ] || whole=0
+	frac="${frac}00"
+	digits="${frac%${frac#??}}"
+	while [ "${digits#0}" != "$digits" ]; do
+		digits="${digits#0}"
+	done
+	[ -n "$digits" ] || digits=0
+	printf '%s\n' "$((whole * 100 + digits))"
+}
+
+# Human readable centiseconds, e.g. 42 -> 0.42s
+fmt_cs() {
+	case "$1" in
+		''|*[!0-9]*) printf '0.00s\n'; return 0 ;;
+	esac
+	printf '%s.%02ds\n' "$(($1 / 100))" "$(($1 % 100))"
 }
 
 # POSIX sh has no arrays, so lists are space separated strings.  add_word appends
@@ -121,21 +288,117 @@ dedup_words() {
 	printf '%s\n' "$out"
 }
 
+word_in_list() {
+	case " $2 " in
+		*" $1 "*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
 set_field() {
 	# set_field <prefix> <FIELD> <value>
 	eval "${1}_${2}=\"\$3\""
 }
 
 invalidate_state() {
+	local k
 	STATE_READY=0
+	# The memoised ubus replies are dropped together with the snapshot: they
+	# describe the state the snapshot was taken from.
+	for k in $SECJSON_KEYS; do
+		eval "unset 'SECJSON_$k' 'SECJSON_${k}_set' 2>/dev/null || true"
+	done
+	SECJSON_KEYS=""
 }
 
 # ---------------------------------------------------------------------------
-# interface discovery
+# configuration
+# ---------------------------------------------------------------------------
+
+cfg_int() { # <uci-option> <default>
+	local v
+	v="$(number_or "$(uci_get "h5000m_netmode.settings.$1")" "")"
+	[ -n "$v" ] || v="$2"
+	# A sane floor keeps a typo'd 0 from turning every wait into an instant fail.
+	[ "$v" -ge "${3:-0}" ] || v="${3:-0}"
+	printf '%s\n' "$v"
+}
+
+cfg_bool() { # <uci-option> <default>
+	local v
+	v="$(uci_get "h5000m_netmode.settings.$1")"
+	case "$v" in
+		'') printf '%s\n' "$2" ;;
+		0|off|false|no) printf '0\n' ;;
+		*) printf '1\n' ;;
+	esac
+}
+
+switch_wait_ipv4() { cfg_int switch_wait_ipv4 15 1; }
+switch_wait_ipv6() { cfg_int switch_wait_ipv6 20 1; }
+switch_budget() { cfg_int switch_budget 60 5; }
+switch_settle() { cfg_int switch_settle 1 0; }
+# A target that is already online is switched to directly - two atomic route
+# replaces and nothing else - so the confirmation window is not waited out
+# before the switch is reported as committed.  The second verification still
+# runs, it is just not delayed.
+switch_settle_warm() { cfg_int switch_settle_warm 0 0; }
+probe_attempts() { cfg_int probe_attempts 3 1; }
+probe_timeout() { cfg_int probe_timeout 2 1; }
+probe_fail_streak() { cfg_int probe_fail_streak 3 1; }
+switch_cooldown() { cfg_int switch_cooldown 20 0; }
+align_confirm() { cfg_int align_confirm 2 1; }
+hotplug_debounce() { cfg_int hotplug_debounce 2 0; }
+
+probe_ok_threshold() {
+	local ok attempts
+	attempts="$(probe_attempts)"
+	ok="$(cfg_int probe_ok 2 1)"
+	[ "$ok" -le "$attempts" ] || ok="$attempts"
+	printf '%s\n' "$ok"
+}
+
+gw_required() { [ "$(cfg_bool gw_required 0)" = "1" ]; }
+health_check_enabled() {
+	case "$(uci_get h5000m_netmode.settings.health_check)" in
+		0|off|false|no) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+health_targets() {
+	local targets
+	targets="$(uci_get h5000m_netmode.settings.health_targets)"
+	[ -n "$targets" ] || targets="223.5.5.5 1.1.1.1"
+	printf '%s\n' "$targets"
+}
+
+# Probe targets are separate from the diagnostic health targets because a switch
+# is a one-shot decision: an operator who lives behind a network that filters a
+# particular resolver can point these at something that answers.
+probe_targets() { # <family>
+	local v
+	if [ "$1" = "6" ]; then
+		v="$(uci_get h5000m_netmode.settings.probe_targets6)"
+		[ -n "$v" ] || v="$(uci_get h5000m_netmode.settings.health_targets6)"
+		[ -n "$v" ] || v="2400:3200::1 2606:4700:4700::1111"
+	else
+		v="$(uci_get h5000m_netmode.settings.probe_targets)"
+		[ -n "$v" ] || v="$(uci_get h5000m_netmode.settings.health_targets)"
+		[ -n "$v" ] || v="223.5.5.5 1.1.1.1"
+	fi
+	printf '%s\n' "$v"
+}
+
+# ---------------------------------------------------------------------------
+# interface discovery - which sections and netdevs make up an exit group
 # ---------------------------------------------------------------------------
 
 all_interface_sections() {
-	uci -q show network 2>/dev/null | sed -n 's/^network\.\([^.]*\)=interface$/\1/p'
+	# `uci show` quotes values (`network.wan='interface'`); the optional quote
+	# classes keep this working against an unquoted dump as well.
+	uci -q show network 2>/dev/null | \
+		sed -n "s/^network\.\([^.]*\)=[\"']*interface[\"']*\$/\1/p" 
 }
 
 section_device_raw() {
@@ -221,6 +484,137 @@ discover_modem_interfaces() {
 	done
 }
 
+# discover_groups - fill in the exit-group membership.
+#
+# Group membership is (section, family) -> section, and every later check works
+# through group_sec()/group_devs() so a manual mapping override applies to both
+# families of the group at once.  Overriding only the IPv4 member and then
+# checking IPv6 readiness against the stale one was a real defect (v1.4.0..1.6.x).
+discover_groups() {
+	local wan_dev_manual modem_dev_manual
+
+	discover_modem_interfaces
+
+	WAN4_SEC="$(interface_exists wan && printf 'wan' || true)"
+	WAN6_SEC="$(interface_exists wan6 && printf 'wan6' || true)"
+	MODEM4_SEC="$MODEM_PRIMARY"
+	MODEM6_SEC="$MODEM6_PRIMARY"
+
+	WAN4_DEVS="$(resolve_section_devices "$WAN4_SEC" 0)"
+	WAN6_DEVS="$(resolve_section_devices "$WAN6_SEC" 0)"
+	MODEM4_DEVS="$(resolve_section_devices "$MODEM4_SEC" 0)"
+	MODEM6_DEVS="$(resolve_section_devices "$MODEM6_SEC" 0)"
+
+	wan_dev_manual="$(uci_get h5000m_netmode.settings.wan_device)"
+	modem_dev_manual="$(uci_get h5000m_netmode.settings.modem_device)"
+
+	if [ -n "$wan_dev_manual" ]; then
+		WAN4_DEVS="$wan_dev_manual"
+		WAN6_DEVS="$wan_dev_manual"
+		WAN_DEVICE_SOURCE="manual"
+	else
+		WAN_DEVICE_SOURCE="auto"
+	fi
+	if [ -n "$modem_dev_manual" ]; then
+		MODEM4_DEVS="$modem_dev_manual"
+		MODEM6_DEVS="$modem_dev_manual"
+		MODEM_DEVICE_SOURCE="manual"
+	else
+		MODEM_DEVICE_SOURCE="auto"
+	fi
+
+	WAN_DEVS="$(dedup_words "$WAN4_DEVS $WAN6_DEVS")"
+	MODEM_DEVS="$(dedup_words "$MODEM4_DEVS $MODEM6_DEVS")"
+
+	# Display-only fallback: the raw UCI device is better than an empty string
+	# for the picker in the UI even when the netdev does not exist yet.
+	WAN_DEVICE="${WAN4_DEVS%% *}"
+	[ -n "$WAN_DEVICE" ] || WAN_DEVICE="$(section_device_raw "${WAN4_SEC:-wan}")"
+	MODEM_DEVICE="${MODEM4_DEVS%% *}"
+	[ -n "$MODEM_DEVICE" ] || MODEM_DEVICE="$(section_device_raw "${MODEM4_SEC:-}")"
+}
+
+# The manual device mapping is authoritative, and it is applied *after* the
+# per-section state has been read: that read fills the same per-group device
+# fields from the UCI sections, so applying the override earlier (as v1.6.x did)
+# meant a saved mapping was silently discarded and every verdict, probe and
+# route comparison used the device the operator had just overridden.
+apply_manual_devices() {
+	local manual
+
+	manual="$(uci_get h5000m_netmode.settings.wan_device)"
+	if [ -n "$manual" ]; then
+		WAN4_DEVS="$manual"
+		WAN6_DEVS="$manual"
+		WAN_DEVICE_SOURCE="manual"
+	fi
+	manual="$(uci_get h5000m_netmode.settings.modem_device)"
+	if [ -n "$manual" ]; then
+		MODEM4_DEVS="$manual"
+		MODEM6_DEVS="$manual"
+		MODEM_DEVICE_SOURCE="manual"
+	fi
+
+	WAN_DEVS="$(dedup_words "$WAN4_DEVS $WAN6_DEVS")"
+	MODEM_DEVS="$(dedup_words "$MODEM4_DEVS $MODEM6_DEVS")"
+	WAN_DEVICE="${WAN4_DEVS%% *}"
+	[ -n "$WAN_DEVICE" ] || WAN_DEVICE="$(section_device_raw "${WAN4_SEC:-wan}")"
+	MODEM_DEVICE="${MODEM4_DEVS%% *}"
+	[ -n "$MODEM_DEVICE" ] || MODEM_DEVICE="$(section_device_raw "${MODEM4_SEC:-}")"
+	return 0
+}
+
+group_sec() { # <group> <4|6>
+	case "$1" in
+		modem)
+			if [ "$2" = "6" ]; then printf '%s\n' "$MODEM6_SEC"; else printf '%s\n' "$MODEM4_SEC"; fi
+			;;
+		*)
+			if [ "$2" = "6" ]; then printf '%s\n' "$WAN6_SEC"; else printf '%s\n' "$WAN4_SEC"; fi
+			;;
+	esac
+}
+
+group_devs() { # <group> <4|6>
+	case "$1" in
+		modem)
+			if [ "$2" = "6" ]; then printf '%s\n' "$MODEM6_DEVS"; else printf '%s\n' "$MODEM4_DEVS"; fi
+			;;
+		*)
+			if [ "$2" = "6" ]; then printf '%s\n' "$WAN6_DEVS"; else printf '%s\n' "$WAN4_DEVS"; fi
+			;;
+	esac
+}
+
+group_all_devs() { # <group>
+	case "$1" in
+		modem) printf '%s\n' "$MODEM_DEVS" ;;
+		*) printf '%s\n' "$WAN_DEVS" ;;
+	esac
+}
+
+group_label() { # <group>
+	case "$1" in
+		modem) printf '5g\n' ;;
+		wan) printf 'wan\n' ;;
+		*) printf 'none\n' ;;
+	esac
+}
+
+# Is the group capable of the family at all?  A group whose IPv6 member is not
+# configured can never be a complete dual-stack exit, which is what the strict
+# switch policy requires (只允许完整双栈出口被提升).
+group_family_capable() { # <group> <4|6>
+	local sec
+	sec="$(group_sec "$1" "$2")"
+	[ -n "$sec" ] || return 1
+	interface_exists "$sec" || return 1
+	[ -n "$(group_devs "$1" "$2")" ] && return 0
+	# No netdev resolved yet (interface down, symbolic ref to a dead section):
+	# still capable, the device shows up once the proto comes up.
+	return 0
+}
+
 # ---------------------------------------------------------------------------
 # per-section link/protocol probing
 #
@@ -230,6 +624,81 @@ discover_modem_interfaces() {
 # reported, so the UI can distinguish 未配置 / 未接入 / 协商中 / 已断开 / 已连接
 # instead of collapsing everything into a bogus "已断开".
 # ---------------------------------------------------------------------------
+
+# ubus with a bounded connection: a wedged daemon must not be able to hang a
+# switch.  The timeout flag is probed once per process (a build without it would
+# make every call fail, which is worse than no timeout at all).
+ubus_opts() {
+	if [ -z "${UBUS_OPTS_READY:-}" ]; then
+		if ubus -t 1 list >/dev/null 2>&1; then
+			UBUS_OPTS="-t $UBUS_TIMEOUT"
+		else
+			UBUS_OPTS=""
+		fi
+		UBUS_OPTS_READY=1
+	fi
+	printf '%s' "$UBUS_OPTS"
+}
+
+ubus_call() {
+	# shellcheck disable=SC2086
+	ubus $(ubus_opts) call "$@" 2>/dev/null || true
+}
+
+# Does a device hold a usable address of one family?  The kernel is the oracle:
+# an interface whose proto claims "up" but which has no address cannot carry
+# traffic, which is exactly the case requirement 7 asks to reject.
+dev_has_address() { # <4|6> <devs>
+	local family="$1" devs="$2" dev out
+	for dev in $devs; do
+		netdev_exists "$dev" || continue
+		out="$(ip "-${family}" addr show dev "$dev" 2>/dev/null || true)"
+		if [ "$family" = "6" ]; then
+			# A link-local address alone cannot reach anything; require a
+			# non-link-local one (scope global / site / host).
+			printf '%s\n' "$out" | grep 'inet6 ' | grep -v ' scope link' | grep -q . && return 0
+		else
+			printf '%s\n' "$out" | grep -q 'inet ' && return 0
+		fi
+	done
+	return 1
+}
+
+# Address presence for a group, ubus first (it also tells us whether the proto
+# considers the address usable), kernel second.
+group_family_has_address() { # <group> <4|6>
+	local group="$1" family="$2" sec json devs
+	sec="$(group_sec "$group" "$family")"
+	if [ -n "$sec" ]; then
+		json="$(section_status_json "$sec")"
+		if [ -n "$json" ]; then
+			if [ "$family" = "6" ]; then
+				printf '%s' "$json" | jsonfilter -e '@["ipv6-address"][0].address' 2>/dev/null | grep -q . && return 0
+			else
+				printf '%s' "$json" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null | grep -q . && return 0
+			fi
+		fi
+	fi
+	devs="$(group_devs "$group" "$family")"
+	dev_has_address "$family" "$devs"
+}
+
+# `ubus call network.interface.<section> status` memoised for the lifetime of the
+# process: the same four sections are read by the state reader, the address check
+# and the status output, and `status` is polled every five seconds.
+section_status_json() { # <section>
+	local key var cached flag
+	key="$(printf '%s' "$1" | tr -c 'a-zA-Z0-9' '_')"
+	var="SECJSON_$key"
+	eval "flag=\${${var}_set:-0}"
+	if [ "$flag" != "1" ]; then
+		eval "${var}=\"\$(ubus_call \"network.interface.$1\" status)\""
+		eval "${var}_set=1"
+		SECJSON_KEYS="$(add_word "$SECJSON_KEYS" "$key")"
+	fi
+	eval "cached=\${$var:-}"
+	printf '%s' "$cached"
+}
 
 read_section_state() {
 	local section="$1" json value dev resolved
@@ -244,7 +713,7 @@ read_section_state() {
 
 	interface_exists "$section" && SEC_EXISTS=1
 
-	json="$(ubus call "network.interface.$section" status 2>/dev/null || true)"
+	json="$(section_status_json "$section")"
 	if [ -n "$json" ]; then
 		value="$(printf '%s' "$json" | jsonfilter -e '@.available' 2>/dev/null || true)"
 		SEC_AVAILABLE="$(bool_value "$value")"
@@ -293,56 +762,171 @@ read_section_state() {
 # routing table oracles
 # ---------------------------------------------------------------------------
 
-route_dev() {
-	printf '%s\n' "$1" | sed -n 's/.*[[:space:]]dev[[:space:]]\([^[:space:]]*\).*/\1/p'
+# Word-walking in the shell instead of `awk`: this is the hottest helper in the
+# program (every route line is parsed several times per pass) and a fork/exec per
+# field shows up as switch latency on a router CPU.
+route_field() { # <route line> <field>
+	local token previous="" target="$2"
+	for token in $1; do
+		if [ "$previous" = "$target" ]; then
+			printf '%s\n' "$token"
+			return 0
+		fi
+		previous="$token"
+	done
+	return 0
 }
 
-# Lowest-metric default route of one family.  Deterministic selection instead of
-# relying on dump order, which is not part of any kernel interface contract.
-best_default_route() {
+route_dev() { route_field "$1" dev; }
+route_gateway() { route_field "$1" via; }
+route_proto() { route_field "$1" proto; }
+route_pref() { route_field "$1" pref; }
+
+# Kernel default metric when a route line carries none: IPv4 routes default to
+# metric 0, IPv6 routes to 1024 (the kernel's own default for RA routes).
+route_metric() { # <4|6> <route line>
+	local m
+	m="$(route_field "$2" metric)"
+	case "$m" in
+		''|*[!0-9]*)
+			if [ "$1" = "6" ]; then printf '1024\n'; else printf '0\n'; fi
+			return 0
+			;;
+		*)
+			printf '%s\n' "$m"
+			;;
+	esac
+}
+
+# Every usable default route of one family in the main table.  `prohibit`,
+# `blackhole`, `unreachable` and `throw` entries are not usable exits, and
+# `default via ... dev X` entries with `linkdown` are dead.
+# `show_defaults` is the hottest oracle in the program: one switch reads the
+# default routes of both families a dozen times.  The live table cannot change
+# inside a pass except through route_replace_slot / route_del_line / route add,
+# and those bump the generation, so the dump is memoised per generation.  Every
+# mutation therefore has to call route_gen_bump() - see the route surgery above.
+ROUTE_GEN=0
+route_gen_bump() { ROUTE_GEN=$((ROUTE_GEN + 1)); }
+show_defaults() { # <4|6>
+	local key var flag cached
+	key="def$1"
+	var="DEF_$key"
+	eval "flag=\${${var}_gen:-x}"
+	if [ "$flag" != "$ROUTE_GEN" ]; then
+		eval "${var}=\"\$(ip \"-$1\" route show default 2>/dev/null | grep -vE '^(prohibit|blackhole|unreachable|throw)\\b' | grep -v 'linkdown')\""
+		eval "${var}_gen=$ROUTE_GEN"
+	fi
+	eval "cached=\${$var:-}"
+	printf '%s\n' "$cached"
+}
+
+# Lowest-metric default route.  Deterministic selection instead of relying on
+# dump order, which is not part of any kernel interface contract.
+winning_default() { # <4|6>
 	local family="$1"
-	ip "-${family}" route show default 2>/dev/null | awk '
+	show_defaults "$family" | awk -v fam="$family" '
+		function metric_of(line,   n, i, a, m) {
+			n = split(line, a, /[ \t]+/)
+			for (i = 1; i < n; i++)
+				if (a[i] == "metric")
+					return a[i + 1] + 0
+			return (fam == "6") ? 1024 : 0
+		}
 		{
-			metric = 0
-			for (i = 1; i < NF; i++)
-				if ($i == "metric")
-					metric = $(i + 1) + 0
-			if (!found || metric < best) {
-				found = 1
-				best = metric
-				line = $0
-			}
+			m = metric_of($0)
+			if (!found || m < best) { found = 1; best = m; line = $0 }
 		}
 		END { if (found) print line }
 	'
 }
 
-# The device the kernel would actually use for a global destination.  Pure FIB
-# lookup: nothing is transmitted, and policy rules are honoured.
-fib_egress() {
-	local family="$1" probe line dev
-
-	if [ "$family" = "6" ]; then probe="$PROBE6"; else probe="$PROBE4"; fi
-
-	line="$(ip "-${family}" route get "$probe" 2>/dev/null | head -n 1 || true)"
-	dev="$(route_dev "$line")"
-	[ -n "$dev" ] || dev="$(route_dev "$(best_default_route "$family")")"
-	printf '%s\n' "$dev"
+winner_dev() { # <4|6>
+	route_dev "$(winning_default "$1")"
 }
 
-has_default_route() {
+winner_metric() { # <4|6>
+	route_metric "$1" "$(winning_default "$1")"
+}
+
+# How many default routes share the winning metric?  Two routes at the same
+# metric (a multipath entry or a leftover from another manager) make "which exit
+# is active" ambiguous, and `ip route show` order is not an answer.
+equal_metric_count() { # <4|6> <metric>
+	show_defaults "$1" | awk -v m="$2" -v fam="$1" '
+		function metric_of(line,   n, i, a) {
+			n = split(line, a, /[ \t]+/)
+			for (i = 1; i < n; i++)
+				if (a[i] == "metric")
+					return a[i + 1] + 0
+			return (fam == "6") ? 1024 : 0
+		}
+		{ if (metric_of($0) == m) c++ }
+		END { print c + 0 }
+	'
+}
+
+# The default route of one exit group: the lowest-metric default route whose
+# device belongs to the group.  (A group's route can be temporarily parked in the
+# standby slot while a switch is in flight, so the metric is not part of the
+# selection here.)
+group_default_route() { # <4|6> <group>
+	local family="$1" group="$2" devs line best="" bestm=""
+	devs="$(group_devs "$group" "$family")"
+	[ -n "$devs" ] || return 0
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		word_in_list "$(route_dev "$line")" "$devs" || continue
+		m="$(route_metric "$family" "$line")"
+		if [ -z "$best" ] || [ "$m" -lt "$bestm" ]; then
+			best="$line"
+			bestm="$m"
+		fi
+	done <<EOF2
+$(show_defaults "$family")
+EOF2
+	printf '%s\n' "$best"
+}
+
+has_default_route() { # <4|6> <dev>   (kept for the diagnostic output)
 	local family="$1" device="$2"
 	[ -n "$device" ] || return 1
-	ip "-${family}" route show default 2>/dev/null | awk -v device="$device" '
+	show_defaults "$family" | awk -v device="$device" '
 		{
-			if ($1 == "prohibit" || $1 == "unreachable" || $1 == "blackhole")
-				next
 			for (i = 1; i < NF; i++)
 				if ($i == "dev" && $(i + 1) == device)
 					found = 1
 		}
 		END { exit found ? 0 : 1 }
 	'
+}
+
+# The metric of the group's default route in one family, or an empty value when
+# the group holds no route for that family at all.  This is what the UI prints as
+# the slot of an exit (10 = active, 50 = warm standby, empty = no route).
+slot_metric() { # <4|6> <group>
+	local line
+	line="$(group_default_route "$1" "$2")"
+	[ -n "$line" ] || return 0
+	route_metric "$1" "$line"
+}
+
+group_gateway() { # <4|6> <group>
+	route_gateway "$(group_default_route "$1" "$2")"
+}
+
+has_default_route_any() { # <4|6> <devs>
+	local family="$1" devs="$2" dev line
+	[ -n "$devs" ] || return 1
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		for dev in $devs; do
+			[ "$(route_dev "$line")" = "$dev" ] && return 0
+		done
+	done <<EOF4
+$(show_defaults "$family")
+EOF4
+	return 1
 }
 
 device_matches() {
@@ -360,12 +944,9 @@ device_matches() {
 # The device carries a transparent proxy whose own egress is one of the two
 # uplinks (daed / sing-box / a VPN helper).  Such an interface is never the
 # physical exit: `singtun0` holds the default route in the proxy table, but the
-# packets ultimately leave through eth1 or eth2.  Classifying the tunnel name
-# itself with route_owner() compared a TUN against the uplink netdevs, never
-# matched, and produced `active6=other` - which then tripped `split=1` and made
-# the page report a family split on a device whose IPv4 and IPv6 both left via
-# the modem.  Detection is by netdev type (ARPHRD_NONE / ARPHRD_TUNNEL and
-# friends), so it does not depend on a name list that a user can change.
+# packets ultimately leave through eth1 or eth2.  Detection is by netdev type
+# (ARPHRD_NONE / ARPHRD_TUNNEL and friends), so it does not depend on a name
+# list that a user can change.
 is_tunnel_device() {
 	local device="$1" type
 	[ -n "$device" ] || return 1
@@ -380,9 +961,9 @@ is_tunnel_device() {
 route_owner() {
 	local device="$1" fallback="${2:-}"
 	[ -n "$device" ] || { echo none; return 0; }
-	if device_matches "$device" $WAN_DEVICES; then
+	if device_matches "$device" $WAN_DEVS; then
 		echo wan
-	elif device_matches "$device" $MODEM_DEVICES; then
+	elif device_matches "$device" $MODEM_DEVS; then
 		echo modem
 	elif is_tunnel_device "$device"; then
 		# Virtual TUN devices are not exits this app should manage.  Attribute
@@ -398,12 +979,25 @@ route_owner() {
 	fi
 }
 
+# The device the kernel would actually use for a global destination.  Pure FIB
+# lookup: nothing is transmitted, and policy rules are honoured.
+fib_egress() {
+	local family="$1" probe line dev
+
+	if [ "$family" = "6" ]; then probe="$PROBE6"; else probe="$PROBE4"; fi
+
+	line="$(ip "-${family}" route get "$probe" 2>/dev/null | head -n 1 || true)"
+	dev="$(route_dev "$line")"
+	[ -n "$dev" ] || dev="$(route_dev "$(winning_default "$family")")"
+	printf '%s\n' "$dev"
+}
+
 # ---------------------------------------------------------------------------
 # state snapshot
 # ---------------------------------------------------------------------------
 
 read_role_state() {
-	# read_role_state <PREFIX> <section4> <section6>
+	# read_role_state <value-prefix> <section4> <section6>
 	local prefix="$1" sec4="$2" sec6="$3"
 
 	read_section_state "$sec4"
@@ -434,7 +1028,7 @@ detect_physical_modem() {
 		. /usr/share/mt5700m/usb.sh
 		if mt5700m_usb_info >/dev/null 2>&1; then
 			MODEM_PRESENT=1
-			dev="$(mt5700m_netdev || true)"
+			dev="$( (command -v mt5700m_netdev >/dev/null 2>&1 && mt5700m_netdev) || true)"
 			[ -n "$dev" ] && MODEM4_DEVS="$(add_word "$MODEM4_DEVS" "$dev")"
 			[ -n "$dev" ] && netdev_exists "$dev" && MODEM_DEVICES="$(add_word "$MODEM_DEVICES" "$dev")"
 		fi
@@ -444,7 +1038,7 @@ detect_physical_modem() {
 		. /usr/share/qmodem/usb.sh
 		if qmodem_usb_info >/dev/null 2>&1; then
 			MODEM_PRESENT=1
-			dev="$(qmodem_netdev || true)"
+			dev="$( (command -v qmodem_netdev >/dev/null 2>&1 && qmodem_netdev) || true)"
 			[ -n "$dev" ] && MODEM4_DEVS="$(add_word "$MODEM4_DEVS" "$dev")"
 			[ -n "$dev" ] && netdev_exists "$dev" && MODEM_DEVICES="$(add_word "$MODEM_DEVICES" "$dev")"
 		fi
@@ -452,236 +1046,587 @@ detect_physical_modem() {
 	return 0
 }
 
+# Structural readiness of one family of one group: the device exists, holds an
+# address of that family, and the group has a default route of that family.  This
+# is the cheap half of requirement 7 - reachability is probed separately, and
+# never inferred from these bits.
+group_family_ready() { # <group> <4|6>
+	local group="$1" family="$2" devs line
+	# A family the group has no interface for cannot be ready: a route left over
+	# from an earlier configuration must not make an IPv4-only exit look like a
+	# complete dual-stack exit.
+	group_family_capable "$group" "$family" || return 1
+	devs="$(group_devs "$group" "$family")"
+	[ -n "$devs" ] || return 1
+	line="$(group_default_route "$family" "$group")"
+	[ -n "$line" ] || return 1
+	group_family_has_address "$group" "$family" || return 1
+	return 0
+}
+
 read_live_state() {
 	[ "$STATE_READY" = "1" ] && return 0
 
-	local wan_dev_manual modem_dev_manual dev shared mm
+	local dev shared
 
-	discover_modem_interfaces
-	read_role_state WAN wan wan6
-	read_role_state MODEM "${MODEM_PRIMARY:-__missing_modem__}" "${MODEM6_PRIMARY:-__missing_modem6__}"
+	discover_groups
+
+	read_role_state WAN "$WAN4_SEC" "$WAN6_SEC"
+	read_role_state MODEM "${MODEM4_SEC:-__missing_modem__}" "${MODEM6_SEC:-__missing_modem6__}"
 
 	if [ "$MODEM_PRESENT" != "1" ]; then
 		detect_physical_modem
 	fi
+	apply_manual_devices
 
-	# Manual device mapping overrides automatic discovery for the whole role,
-	# including its IPv6 member.  The previous code only overrode the IPv4 device
-	# and then checked IPv6 readiness against the stale one.
-	wan_dev_manual="$(uci_get h5000m_netmode.settings.wan_device)"
-	modem_dev_manual="$(uci_get h5000m_netmode.settings.modem_device)"
-
-	if [ -n "$wan_dev_manual" ]; then
-		WAN_DEVICES="$wan_dev_manual"
-		WAN_DEVICE="$wan_dev_manual"
-		WAN_DEVICE_SOURCE="manual"
-	else
-		WAN_DEVICES="$(dedup_words "${WAN4_DEVS:-} ${WAN6_DEVS:-}")"
-		WAN_DEVICE="${WAN4_DEVS%% *}"
-		WAN_DEVICE_SOURCE="auto"
-	fi
-	if [ -n "$modem_dev_manual" ]; then
-		MODEM_DEVICES="$modem_dev_manual"
-		MODEM_DEVICE="$modem_dev_manual"
-		MODEM_DEVICE_SOURCE="manual"
-	else
-		MODEM_DEVICES="$(dedup_words "${MODEM4_DEVS:-} ${MODEM6_DEVS:-}")"
-		MODEM_DEVICE="${MODEM4_DEVS%% *}"
-		MODEM_DEVICE_SOURCE="auto"
-	fi
-
-	# Display-only fallback: the raw UCI device is better than an empty string
-	# for the picker in the UI even when the netdev does not exist yet.
-	[ -n "$WAN_DEVICE" ] || WAN_DEVICE="$(section_device_raw "${WAN_SOURCE4:-wan}")"
-	[ -n "$MODEM_DEVICE" ] || MODEM_DEVICE="$(section_device_raw "${MODEM_SOURCE4:-}")"
+	MODEM_DEVICES="$(dedup_words "$MODEM4_DEVS $MODEM6_DEVS")"
 
 	# A device claimed by both roles makes every verdict ambiguous.  The wired
 	# side wins (documented behaviour) and the conflict is logged loudly.
 	for dev in $MODEM_DEVICES; do
-		device_matches "$dev" $WAN_DEVICES && shared="$dev"
+		device_matches "$dev" $WAN_DEVS && shared="$dev"
 	done
 	if [ -n "$shared" ]; then
+		WAN_DEVICES="$(add_word "$WAN_DEVICES" "$shared")"
+		MODEM_DEVICES="$(dedup_words "$(printf '%s\n' "$MODEM_DEVICES" | tr ' ' '\n' | grep -vx "$shared" | tr '\n' ' ')")"
+		MODEM_DEVS="$MODEM_DEVICES"
 		log_note "warning: device $shared is mapped to both exits; treating it as wired WAN"
 	fi
+	WAN_DEVICES="$WAN_DEVS"
+
+	# Per-group default routes and structural readiness.
+	WAN_ROUTE4="$(group_default_route 4 "$GROUP_WAN")"
+	WAN_ROUTE6="$(group_default_route 6 "$GROUP_WAN")"
+	MODEM_ROUTE4="$(group_default_route 4 "$GROUP_MODEM")"
+	MODEM_ROUTE6="$(group_default_route 6 "$GROUP_MODEM")"
+	WAN_GW4="$(route_gateway "$WAN_ROUTE4")"
+	WAN_GW6="$(route_gateway "$WAN_ROUTE6")"
+	MODEM_GW4="$(route_gateway "$MODEM_ROUTE4")"
+	MODEM_GW6="$(route_gateway "$MODEM_ROUTE6")"
 
 	WAN4_READY=0; WAN6_READY=0; MODEM4_READY=0; MODEM6_READY=0
-	for dev in $WAN_DEVICES; do
-		has_default_route 4 "$dev" && WAN4_READY=1
-		has_default_route 6 "$dev" && WAN6_READY=1
-	done
-	for dev in $MODEM_DEVICES; do
-		has_default_route 4 "$dev" && MODEM4_READY=1
-		has_default_route 6 "$dev" && MODEM6_READY=1
-	done
+	group_family_ready "$GROUP_WAN" 4 && WAN4_READY=1
+	group_family_ready "$GROUP_WAN" 6 && WAN6_READY=1
+	group_family_ready "$GROUP_MODEM" 4 && MODEM4_READY=1
+	group_family_ready "$GROUP_MODEM" 6 && MODEM6_READY=1
 
 	WAN6_CAPABLE=0
-	interface_exists wan6 && WAN6_CAPABLE=1
+	group_family_capable "$GROUP_WAN" 6 && WAN6_CAPABLE=1
 	MODEM6_CAPABLE=0
-	[ -n "$MODEM6_PRIMARY" ] && interface_exists "$MODEM6_PRIMARY" && MODEM6_CAPABLE=1
+	group_family_capable "$GROUP_MODEM" 6 && MODEM6_CAPABLE=1
 
+	# The live exit: the kernel FIB decides which next hop is used (policy rules
+	# included); the metric decides which default route owns the priority slot.
 	EGRESS4="$(fib_egress 4)"
 	EGRESS6="$(fib_egress 6)"
-	DEFAULT4="$(best_default_route 4)"
-	DEFAULT6="$(best_default_route 6)"
+	DEFAULT4="$(winning_default 4)"
+	DEFAULT6="$(winning_default 6)"
 	ACTIVE4="$(route_owner "$EGRESS4")"
 	ACTIVE6="$(route_owner "$EGRESS6" "$ACTIVE4")"
+
+	WIN4_DEV="$(route_dev "$DEFAULT4")"
+	WIN6_DEV="$(route_dev "$DEFAULT6")"
+	WIN4_METRIC="$(route_metric 4 "$DEFAULT4")"
+	WIN6_METRIC="$(route_metric 6 "$DEFAULT6")"
+	WIN4_OWNER="$(route_owner "$WIN4_DEV" "$ACTIVE4")"
+	WIN6_OWNER="$(route_owner "$WIN6_DEV" "$ACTIVE6")"
+	WIN4_ECMP="$(equal_metric_count 4 "$WIN4_METRIC")"
+	WIN6_ECMP="$(equal_metric_count 6 "$WIN6_METRIC")"
+	[ -n "$WIN4_DEV" ] || WIN4_ECMP=0
+	[ -n "$WIN6_DEV" ] || WIN6_ECMP=0
+
+	DEFAULT4_SLOT="$(route_metric 4 "$WAN_ROUTE4")"
+	DEFAULT6_SLOT="$(route_metric 6 "$WAN_ROUTE6")"
+
+	# Cached probe verdicts - read-only, never refreshed from here, because
+	# `status` is polled by LuCI every five seconds and must not spend traffic.
+	PROBE4_WAN="$(cached_verdict wan 4)"
+	PROBE6_WAN="$(cached_verdict wan 6)"
+	PROBE4_MODEM="$(cached_verdict modem 4)"
+	PROBE6_MODEM="$(cached_verdict modem 6)"
+	PROBE_TS="$(cached_field ts)"
+	PROBE_FAIL_WAN="$(number_or "$(cached_field wan_fail)" 0)"
+	PROBE_FAIL_MODEM="$(number_or "$(cached_field modem_fail)" 0)"
+	PROBE_FAIL_WAN6="$(number_or "$(cached_field wan6_fail)" 0)"
+	PROBE_FAIL_MODEM6="$(number_or "$(cached_field modem6_fail)" 0)"
+
+	# The group that currently owns the priority slot for both families.  It is
+	# derived from the metric, not from route order, and it is the only thing a
+	# switch has to move (requirement 23).
+	SLOT_OWNER="$(slot_owner)"
 
 	STATE_READY=1
 	return 0
 }
 
+# Which group holds the active metric slot?  Both families must agree; when they
+# do not, the IPv4 family wins the verdict (IPv4 is the family the user-facing
+# policy is written in) and the divergence is repaired by the reconciler.
+slot_owner() {
+	local o4 o6
+	o4="$(slot_owner_family 4)"
+	o6="$(slot_owner_family 6)"
+	case "$o4" in
+		wan|modem) printf '%s\n' "$o4"; return 0 ;;
+	esac
+	case "$o6" in
+		wan|modem) printf '%s\n' "$o6"; return 0 ;;
+	esac
+	printf 'none\n'
+}
+
+# The owner of the slot the kernel actually prefers (the winning route), with the
+# FIB owner as the fallback for a tunnel-carried exit.
+slot_owner_family() { # <4|6>
+	local family="$1" dev owner
+	dev="$(winner_dev "$family")"
+	[ -n "$dev" ] || return 0
+	owner="$(route_owner "$dev")"
+	case "$owner" in
+		other|none)
+			owner="$(route_owner "$(fib_egress "$family")")"
+			;;
+	esac
+	printf '%s\n' "$owner"
+}
+
 # ---------------------------------------------------------------------------
-# health (diagnostic, on by default)
+# health cache and connectivity probing
 #
 # The probe deliberately targets public anycast resolvers instead of the next
 # hop.  Measured on the H5000M: the cellular uplink passes traffic (0% loss to
 # 223.5.5.5) while its gateway 10.13.35.1 answers 0 of 2 ICMP echoes.  A
 # next-hop probe would therefore report a healthy cellular uplink as dead and
-# provoke a spurious failover, which is why a verdict here never moves traffic.
+# provoke a spurious failover, which is why a gateway verdict is advisory here
+# and never the sole reason to call a family dead.
 #
-# Off switch: h5000m_netmode.settings.health_check=0 (or off/false/no).
-# Cadence:    h5000m_netmode.settings.health_probe_interval, seconds, default 60.
+# A single ping is not a verdict either: every reachability decision goes
+# through probe_group_family, which needs `probe_ok` successes out of
+# `probe_attempts` tries (early exit on success) and is bounded by the switch
+# budget.  The watchdog adds a second layer - a group is only demoted after
+# `probe_fail_streak` consecutive failed rounds - so a burst of loss cannot
+# provoke a failover ping-pong.
 # ---------------------------------------------------------------------------
 
-health_targets() {
-	local targets
-	targets="$(uci_get h5000m_netmode.settings.health_targets)"
-	[ -n "$targets" ] || targets="223.5.5.5 1.1.1.1"
-	printf '%s\n' "$targets"
+cached_field() {
+	sed -n "s/^$1=//p" "$HEALTH_STATE_FILE" 2>/dev/null | head -n 1
 }
 
-# Opt-out, exactly like the watchdog: the probe is on unless the operator writes
-# 0/off/false/no.  `health_check` used to be opt-in, which meant the diagnostic
-# that detects a "proto up but nothing passes" link was off on every default
-# install - the one situation it exists for.
-health_check_enabled() {
-	case "$(uci_get h5000m_netmode.settings.health_check)" in
-		0|off|false|no) return 1 ;;
-		*) return 0 ;;
+cached_verdict() { # <group> <4|6>
+	local v
+	if [ "$2" = "6" ]; then
+		v="$(cached_field "$1"6)"
+	else
+		v="$(cached_field "$1")"
+	fi
+	case "$v" in
+		1) printf '1\n' ;;
+		0) printf '0\n' ;;
+		*) printf 'unknown\n' ;;
 	esac
 }
 
-probe_reachable() {
-	local family="$1" devices="$2" target dev
+cached_health() {
+	cached_verdict "$1" 4
+}
 
-	for target in $(health_targets); do
+# How to ask for IPv6.  BusyBox `ping` and modern iputils both accept `-6`; an
+# iputils build without it exposes `ping6` instead; BusyBox without `-6` still
+# detects the family from the address itself.  The choice is made once per
+# process by looking for an "invalid option" complaint - not by the exit code,
+# because an unreachable probe must not be mistaken for an unsupported flag.
+ping6_mode() {
+	if [ -z "${PING6_MODE:-}" ]; then
+		if [ -n "${PING6_MODE_DETECTED:-}" ]; then
+			PING6_MODE="plain"
+		else
+			PING6_MODE_DETECTED=1
+			case "$(ping -6 -c 1 -W 1 ::1 2>&1)" in
+				*'invalid option'*|*'unrecognized option'*|*'invalid argument'*|*'illegal option'*|*'bad option'*|*'unknown option'*)
+					if command -v ping6 >/dev/null 2>&1; then
+						PING6_MODE="tool6"
+					else
+						PING6_MODE="plain"
+					fi
+					;;
+				*)
+					PING6_MODE="flag6"
+					;;
+			esac
+		fi
+	fi
+	printf '%s
+' "$PING6_MODE"
+}
+
+ping_one() { # <4|6> <dev> <timeout> <target>
+	local family="$1" dev="$2" timeout="$3" target="$4"
+	if [ "$family" = "6" ]; then
+		case "$(ping6_mode)" in
+			flag6) ping -6 -c 1 -W "$timeout" -I "$dev" "$target" >/dev/null 2>&1 ;;
+			tool6) ping6 -c 1 -W "$timeout" -I "$dev" "$target" >/dev/null 2>&1 ;;
+			*) ping -c 1 -W "$timeout" -I "$dev" "$target" >/dev/null 2>&1 ;;
+		esac
+		return $?
+	fi
+	ping -c 1 -W "$timeout" -I "$dev" "$target" >/dev/null 2>&1
+}
+
+ping_targets_once() { # <4|6> <devs> <timeout>
+	local family="$1" devs="$2" timeout="$3" target dev
+	[ -n "$devs" ] || return 1
+	for target in $(probe_targets "$family"); do
 		case "$target" in
 			*:*) [ "$family" = "6" ] || continue ;;
-			*) [ "$family" = "4" ] || continue ;;
+			*.*) [ "$family" = "4" ] || continue ;;
+			*) continue ;;
 		esac
-		for dev in $devices; do
+		for dev in $devs; do
 			netdev_exists "$dev" || continue
-			ping -c 1 -W 2 -I "$dev" "$target" >/dev/null 2>&1 && return 0
+			ping_one "$family" "$dev" "$timeout" "$target" && return 0
 		done
 	done
 	return 1
 }
 
+# Is the next hop of the group's default route answering?  Advisory: measured on
+# this hardware the cellular gateway is silent while the link carries traffic.
+gateway_reachable() { # <4|6> <devs> <gateway>
+	local family="$1" devs="$2" gw="$3" timeout dev
+	[ -n "$gw" ] || return 1
+	timeout="$(probe_timeout)"
+	for dev in $devs; do
+		netdev_exists "$dev" || continue
+		ping_one "$family" "$dev" "$timeout" "$gw" && return 0
+	done
+	return 1
+}
+
+# Multi-attempt reachability verdict for one group + family.  Echoes 1 or 0.
+probe_group_family() { # <4|6> <group>
+	local family="$1" group="$2" devs attempts need timeout i=0 ok=0
+	devs="$(group_devs "$group" "$family")"
+	attempts="$(probe_attempts)"
+	need="$(probe_ok_threshold)"
+	timeout="$(probe_timeout)"
+
+	if [ -n "$devs" ]; then
+		while [ "$i" -lt "$attempts" ]; do
+			i=$((i + 1))
+			if ping_targets_once "$family" "$devs" "$timeout"; then
+				ok=$((ok + 1))
+				if [ "$ok" -ge "$need" ]; then
+					printf '1\n'
+					return 0
+				fi
+			fi
+			# Not enough attempts left to reach the threshold?
+			[ $((ok + attempts - i)) -ge "$need" ] || break
+			[ "$(budget_left_cs)" -gt 0 ] || break
+		done
+	fi
+
+	# A failed probe must say what it was probing: a verdict of 0 with no
+	# explanation is the hardest thing to diagnose from a router's log.
+	log_note "ipv$family probe on $group failed: devices=${devs:-none} attempts=$i/$attempts ok=$ok need=$need"
+	printf '0\n'
+	return 1
+}
+
+# Both state files are key=value stores written whole and read key by key.  A
+# write must never drop keys it does not mention: the health cache carries the two
+# families of both groups plus their failure streaks, and each of those is updated
+# by a different probe.
+kv_write() { # <file> <key=value> ...
+	local file="$1" tmp skip=" " pair k line umask_old
+	shift
+	[ $# -gt 0 ] || return 0
+	for pair in "$@"; do
+		k="${pair%%=*}"
+		skip="$skip$k "
+	done
+	umask_old="$(umask)"
+	umask 077
+	tmp="${file}.$$"
+	{
+		if [ -f "$file" ]; then
+			while IFS= read -r line; do
+				case "$line" in
+					*=*) k="${line%%=*}" ;;
+					*) continue ;;
+				esac
+				case "$k" in
+					''|*[!a-z0-9_]*) continue ;;
+				esac
+				case "$skip" in
+					*" $k "*) continue ;;
+				esac
+				printf '%s\n' "$line"
+			done < "$file"
+		fi
+		for pair in "$@"; do
+			printf '%s=%s\n' "${pair%%=*}" "$(sanitize_value "${pair#*=}")"
+		done
+	} > "$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null
+	umask "$umask_old"
+	return 0
+}
+
+health_write() { # <key=value> ...
+	kv_write "$HEALTH_STATE_FILE" "$@"
+}
+
+# One probe round: every (group, family) that structurally can answer is probed,
+# the verdicts and their failure streaks are persisted.  Throttled by
+# health_probe_interval so the watchdog cannot spend traffic re-learning a value
+# that rarely changes.
 refresh_health() {
-	local wan=unknown modem=unknown devices now last interval
+	local wan wan6 modem modem6 now last interval streak
+	local wan_fail modem_fail wan6_fail modem6_fail
 
 	now="$(date +%s 2>/dev/null || echo 0)"
 	interval="$(number_or "$(uci_get h5000m_netmode.settings.health_probe_interval)" 60)"
-	last="$(number_or "$(sed -n 's/^ts=//p' "$HEALTH_STATE_FILE" 2>/dev/null | head -n 1)" 0)"
+	last="$(number_or "$(cached_field ts)" 0)"
 
-	# The probe is on by default now, which makes its cost a real consideration:
-	# the watchdog reconciles every few seconds, and probing a cellular uplink at
-	# that cadence would spend traffic to re-learn a value that rarely changes.  A
-	# verdict younger than health_probe_interval is reused as it stands, and the
-	# page reads the cached value, so the display stays live without the traffic.
 	if [ "$interval" -gt 0 ] && [ "$last" -gt 0 ] && [ "$now" -gt 0 ] &&
-		[ $(( now - last )) -lt "$interval" ]; then
+		[ $((now - last)) -lt "$interval" ]; then
 		return 0
 	fi
 
 	read_live_state
 
-	if [ "$WAN4_READY" = "1" ]; then
-		devices="$WAN_DEVICES"
-		if probe_reachable 4 "$devices"; then wan=1; else wan=0; fi
-	fi
-	if [ "$MODEM4_READY" = "1" ]; then
-		devices="$MODEM_DEVICES"
-		if probe_reachable 4 "$devices"; then modem=1; else modem=0; fi
-	fi
+	# A family that has no address or no route cannot be probed; its verdict is
+	# "unknown" rather than "failed", so a group that is simply down does not
+	# accumulate a failure streak and cannot trigger a failover on its own.
+	wan=unknown; wan6=unknown; modem=unknown; modem6=unknown
+	[ "$WAN4_READY" = "1" ] && wan="$(probe_group_family 4 "$GROUP_WAN")"
+	[ "$WAN6_READY" = "1" ] && wan6="$(probe_group_family 6 "$GROUP_WAN")"
+	[ "$MODEM4_READY" = "1" ] && modem="$(probe_group_family 4 "$GROUP_MODEM")"
+	[ "$MODEM6_READY" = "1" ] && modem6="$(probe_group_family 6 "$GROUP_MODEM")"
 
-	umask 077
-	printf 'wan=%s\nmodem=%s\nts=%s\n' "$wan" "$modem" "$now" > "${HEALTH_STATE_FILE}.$$" 2>/dev/null || return 0
-	mv -f "${HEALTH_STATE_FILE}.$$" "$HEALTH_STATE_FILE" 2>/dev/null || true
-	log_note "health check: wan=$wan modem=$modem"
+	streak="$(number_or "$(cached_field wan_fail)" 0)"
+	case "$wan" in 1) streak=0 ;; 0) streak=$((streak + 1)) ;; esac
+	wan_fail="$streak"
+	streak="$(number_or "$(cached_field modem_fail)" 0)"
+	case "$modem" in 1) streak=0 ;; 0) streak=$((streak + 1)) ;; esac
+	modem_fail="$streak"
+	streak="$(number_or "$(cached_field wan6_fail)" 0)"
+	case "$wan6" in 1) streak=0 ;; 0) streak=$((streak + 1)) ;; esac
+	wan6_fail="$streak"
+	streak="$(number_or "$(cached_field modem6_fail)" 0)"
+	case "$modem6" in 1) streak=0 ;; 0) streak=$((streak + 1)) ;; esac
+	modem6_fail="$streak"
+
+	health_write \
+		"wan=$wan" "modem=$modem" "wan6=$wan6" "modem6=$modem6" \
+		"wan_fail=$wan_fail" "modem_fail=$modem_fail" \
+		"wan6_fail=$wan6_fail" "modem6_fail=$modem6_fail" \
+		"ts=$now"
+
+	log_note "health check: wan=$wan/$wan6 modem=$modem/$modem6"
 	return 0
 }
 
-cached_health() {
-	# cached_health <wan|modem>
-	local value
-	value="$(sed -n "s/^$1=//p" "$HEALTH_STATE_FILE" 2>/dev/null | head -n 1)"
-	case "$value" in
-		1|0) printf '%s\n' "$value" ;;
-		*) printf 'unknown\n' ;;
+# ---------------------------------------------------------------------------
+# switch task state (the state machine's observable half)
+# ---------------------------------------------------------------------------
+
+state_dir() {
+	local dir
+	dir="$(dirname "$STATE_FILE")"
+	[ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || true
+}
+
+state_get() {
+	local line
+	[ -f "$STATE_FILE" ] || return 0
+	while IFS= read -r line; do
+		case "$line" in
+			"$1="*)
+				printf '%s\n' "${line#"$1="}"
+				return 0
+				;;
+		esac
+	done < "$STATE_FILE"
+	return 0
+}
+
+sanitize_value() {
+	# state_write appends values with printf, so only a value that actually
+	# carries a newline needs the (forking) cleanup path.
+	case "$1" in
+		*'
+'*|*'	'*) printf '%s' "$1" | tr '\n\r\t' '   ' ;;
+		*) printf '%s' "$1" ;;
 	esac
 }
 
+# The task state file: one key=value store for the switch state machine, the
+# per-phase timings, the remembered next hops and the hotplug counters.  A write
+# replaces only the keys it names, so the phases a worker wrote earlier survive
+# the next update.
+state_write() { # <key=value> ...
+	kv_write "$STATE_FILE" "$@"
+}
+
+# The state machine's current phase, with crash recovery: a worker that died
+# mid-flight leaves a state that claims to be in progress, so the liveness of the
+# pid decides whether that claim is still true.
+switch_state() {
+	local st pid
+	st="$(state_get state)"
+	[ -n "$st" ] || { printf '%s\n' "$SM_IDLE"; return 0; }
+	case "$st" in
+		"$SM_IDLE"|"$SM_COMMITTED"|"$SM_FAILED") printf '%s\n' "$st"; return 0 ;;
+	esac
+	pid="$(state_get pid)"
+	case "$pid" in
+		''|*[!0-9]*) printf '%s\n' "$SM_FAILED"; return 0 ;;
+	esac
+	if kill -0 "$pid" 2>/dev/null; then
+		printf '%s\n' "$st"
+	else
+		printf '%s\n' "$SM_FAILED"
+	fi
+}
+
+switch_in_progress() {
+	case "$(switch_state)" in
+		"$SM_IDLE"|"$SM_COMMITTED"|"$SM_FAILED") return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+state_init() {
+	state_dir
+	if [ ! -f "$STATE_FILE" ]; then
+		state_write "state=$SM_IDLE" "result=none" "reason=" "target=none" \
+			"mode=" "gen=0" "started=0" "elapsed=" "phases=" "message="
+	fi
+}
+
 # ---------------------------------------------------------------------------
-# IPv6 alignment - the single writer of the managed IPv6 default-route state
+# locking
+#
+# Every mutating action is serialised on one lock directory.  The previous
+# implementation only locked `reconcile`, `apply` and `set`; a device mapping
+# saved while a mode change was in flight could be silently overwritten, because
+# UCI rewrites the whole config file on every `uci set`.
 # ---------------------------------------------------------------------------
 
-# Decide where the IPv6 default route may live.
-#
-#   IPV6_DESIRED = wan | modem | off | keep
-#
-# `keep` means "there is no IPv4 egress to stay consistent with, so do not touch
-# IPv6".  Every state that would place the managed IPv6 default on an exit other
-# than the live IPv4 exit resolves to `off`, which removes managed IPv6 default
-# routes rather than letting IPv6 leak out of the wrong uplink.
-select_ipv6_desired() {
-	case "$ACTIVE4" in
-		wan|modem)
-			IPV6_DESIRED="$ACTIVE4"
-			;;
-		other)
-			case "$ACTIVE6" in
-				wan|modem) IPV6_DESIRED="off" ;;
-				*) IPV6_DESIRED="keep" ;;
-			esac
-			;;
-		*)
-			# No IPv4 default at all: keep following whichever managed exit
-			# currently owns IPv6 instead of flapping between the two.
-			case "$ACTIVE6" in
-				wan|modem) IPV6_DESIRED="$ACTIVE6" ;;
-				*) IPV6_DESIRED="keep" ;;
-			esac
-			;;
+lock_pid_alive() {
+	local owner
+	owner="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+	case "$owner" in
+		''|*[!0-9]*) return 1 ;;
 	esac
+	kill -0 "$owner" 2>/dev/null
+}
 
-	# A single-exit policy must not leave IPv6 parked on the exit it disables
-	# while IPv4 has no default route at all.
-	case "$mode" in
-		wan_only)
-			[ "$ACTIVE4" = "none" ] && [ "$IPV6_DESIRED" = "modem" ] && IPV6_DESIRED="off"
-			;;
-		modem_only)
-			[ "$ACTIVE4" = "none" ] && [ "$IPV6_DESIRED" = "wan" ] && IPV6_DESIRED="off"
-			;;
-	esac
+acquire_lock() {
+	local wait_s waited=0
+	wait_s="$(number_or "${1:-0}" 0)"
 
-	# Capability guard: never point IPv6 at an exit that has no IPv6 interface.
-	case "$IPV6_DESIRED" in
-		wan)
-			if [ "$WAN6_CAPABLE" != "1" ]; then
-				log_note "IPv6 would follow the wired exit but no wan6 interface exists; disabling managed IPv6 to avoid a split egress"
-				IPV6_DESIRED="off"
-			fi
-			;;
-		modem)
-			if [ "$MODEM6_CAPABLE" != "1" ]; then
-				log_note "IPv6 would follow the 5G exit but no modem IPv6 interface exists; disabling managed IPv6 to avoid a split egress"
-				IPV6_DESIRED="off"
-			fi
-			;;
-	esac
+	while :; do
+		if mkdir "$LOCK_DIR" 2>/dev/null; then
+			echo "$$" > "$LOCK_DIR/pid"
+			return 0
+		fi
+
+		if ! lock_pid_alive; then
+			rm -rf "$LOCK_DIR" 2>/dev/null
+			continue
+		fi
+
+		[ "$waited" -lt "$wait_s" ] || return 1
+		sleep 1
+		waited=$((waited + 1))
+	done
+}
+
+release_lock() {
+	rm -rf "$LOCK_DIR" 2>/dev/null
 	return 0
+}
+
+# ---------------------------------------------------------------------------
+# switch budget
+#
+# Every wait is bounded twice: by its own timeout and by the total switch
+# budget.  A switch that runs out of budget fails and rolls back instead of
+# holding the lock - and the LuCI request that started it has already returned.
+# ---------------------------------------------------------------------------
+
+budget_left_cs() {
+	local now
+	[ -n "${SWITCH_DEADLINE_CS:-}" ] || { printf '2147483647\n'; return 0; }
+	case "$SWITCH_DEADLINE_CS" in
+		''|*[!0-9]*) printf '2147483647\n'; return 0 ;;
+	esac
+	now="$(now_cs)"
+	case "$now" in ''|*[!0-9]*) printf '2147483647\n'; return 0 ;; esac
+	printf '%s\n' "$(( SWITCH_DEADLINE_CS - now ))"
+}
+
+budget_expired() {
+	[ "$(budget_left_cs)" -le 0 ]
+}
+
+budget_start() {
+	local now budget
+	now="$(now_cs)"
+	case "$now" in
+		''|*[!0-9]*)
+			# An unreadable clock must not invent a deadline: the individual
+			# waits are still bounded by their own timeouts, and a budget that
+			# is wrong is worse than no budget at all.
+			SWITCH_DEADLINE_CS=""
+			log_note "warning: no usable clock; running without a switch budget"
+			return 0
+			;;
+	esac
+	budget="$(switch_budget)"
+	case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
+	SWITCH_DEADLINE_CS=$(( now + budget * 100 ))
+}
+
+# Sleep in one-second steps, never longer than the remaining budget.
+bounded_sleep() { # <seconds>
+	local want="$1" left_s
+	left_s="$(budget_left_cs)"
+	case "$left_s" in ''|*[!0-9-]*) left_s=0 ;; esac
+	left_s=$(( left_s / 100 ))
+	[ "$left_s" -gt 0 ] || return 1
+	[ "$want" -le "$left_s" ] || want="$left_s"
+	sleep "$want"
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# exit policy - the persisted priority plan
+#
+# A mode maps to: which group owns the active metric slot, and whether the other
+# group is allowed to install default routes at all (`only` isolation).  Both
+# families of a group always get the same treatment, which is what removes the
+# family-split class of bug at the source.
+# ---------------------------------------------------------------------------
+
+policy_group_metric() { # <mode> <group>
+	local primary
+	primary="$(mode_primary_group "$1")"
+	if [ "$2" = "$primary" ]; then
+		printf '%s\n' "$ACTIVE_METRIC"
+	else
+		printf '%s\n' "$STANDBY_METRIC"
+	fi
+}
+
+policy_group_defaultroute() { # <mode> <group>
+	if mode_is_only "$1" && [ "$2" != "$(mode_primary_group "$1")" ]; then
+		printf '0\n'
+	else
+		printf '1\n'
+	fi
 }
 
 set_network_option() {
@@ -696,215 +1641,1120 @@ set_network_option_if_changed() {
 	current="$(uci_get "network.${section}.${option}")"
 	[ "$current" = "$value" ] && return 0
 	uci -q set "network.${section}.${option}=${value}" || return 1
+	uci_gen_bump
 	NETWORK_CHANGED=1
 	return 0
 }
 
-drop_ipv6_default_routes() {
-	local dev route
+# Persist the priority plan of one mode.  Writes both families of both groups,
+# never touches `ipv6`/`ip6assign`/`auto` of a standby, and never removes an IPv6
+# interface: IPv6 stays enabled in every mode, including `only` (where only the
+# standby's default-route *announcement* is isolated, symmetrically for both
+# families, so no split can result).
+apply_policy() { # <mode>
+	local target_mode="$1" group family section metric dr
 
-	for dev in $1; do
-		[ -n "$dev" ] || continue
-		ip -6 route show default dev "$dev" 2>/dev/null | while IFS= read -r route; do
-			[ -n "$route" ] || continue
-			# Intentionally split the route line back into ip-route arguments.
-			# shellcheck disable=SC2086
-			ip -6 route del $route >/dev/null 2>&1 || true
+	for group in "$GROUP_WAN" "$GROUP_MODEM"; do
+		metric="$(policy_group_metric "$target_mode" "$group")"
+		dr="$(policy_group_defaultroute "$target_mode" "$group")"
+		for family in 4 6; do
+			section="$(group_sec "$group" "$family")"
+			[ -n "$section" ] || continue
+			set_network_option_if_changed "$section" metric "$metric" || return 1
+			set_network_option_if_changed "$section" defaultroute "$dr" || return 1
+			if [ "$family" = "6" ]; then
+				# IPv6 is always enabled: the standby keeps auto=1 so its
+				# addresses, RA and DHCPv6 state survive the switch, and so a
+				# reboot reproduces the same topology.
+				set_network_option_if_changed "$section" auto 1 || return 1
+			fi
 		done
 	done
-}
-
-enable_managed_ipv6_autostart() {
-	set_network_option_if_changed wan6 auto 1 || return 1
-	if [ -n "$MODEM6_PRIMARY" ]; then
-		set_network_option_if_changed "$MODEM6_PRIMARY" auto 1 || return 1
-	fi
-}
-
-apply_ipv6_desired() {
-	local previous
-
-	previous="$(uci_get h5000m_netmode.settings.ipv6_owner)"
-
-	case "$IPV6_DESIRED" in
-		keep)
-			return 0
-			;;
-		wan)
-			NETWORK_CHANGED=0
-			enable_managed_ipv6_autostart || return 1
-			set_network_option_if_changed wan6 defaultroute 1 || return 1
-			if [ -n "$MODEM6_PRIMARY" ]; then
-				set_network_option_if_changed "$MODEM6_PRIMARY" defaultroute 0 || return 1
-			fi
-			;;
-		modem)
-			NETWORK_CHANGED=0
-			enable_managed_ipv6_autostart || return 1
-			set_network_option_if_changed wan6 defaultroute 0 || return 1
-			set_network_option_if_changed "$MODEM6_PRIMARY" defaultroute 1 || return 1
-			;;
-		off)
-			NETWORK_CHANGED=0
-			enable_managed_ipv6_autostart || return 1
-			set_network_option_if_changed wan6 defaultroute 0 || return 1
-			if [ -n "$MODEM6_PRIMARY" ]; then
-				set_network_option_if_changed "$MODEM6_PRIMARY" defaultroute 0 || return 1
-			fi
-			;;
-	esac
 
 	[ "$NETWORK_CHANGED" = "0" ] || uci -q commit network || return 1
 
-	# The owner is persisted so a reboot reproduces the state that is live now,
-	# and so `keep` stays auditable from the status output.
-	if [ "$previous" != "$IPV6_DESIRED" ]; then
-		uci -q set "h5000m_netmode.settings.ipv6_owner=${IPV6_DESIRED}" || return 1
+	if [ "$(uci_get h5000m_netmode.settings.mode)" != "$target_mode" ]; then
+		uci -q get h5000m_netmode.settings >/dev/null 2>&1 || \
+			uci -q set h5000m_netmode.settings='settings'
+		uci -q set "h5000m_netmode.settings.mode=${target_mode}" || return 1
 		uci -q commit h5000m_netmode || return 1
-		log_note "IPv6 exit ${previous:-none}->${IPV6_DESIRED} (active4=${ACTIVE4} active6=${ACTIVE6} mode=${mode})"
+		uci_gen_bump
 	fi
 
-	# Enforce the live side without shutting down the standby IPv6 interface.
-	# Removing the standby's default route is enough to keep it out of the live
-	# exit decision; forcing ifdown/auto=0 also drops its addresses and makes a
-	# later failover colder than it needs to be.
-	case "$IPV6_DESIRED" in
-		wan)
-			drop_ipv6_default_routes "$MODEM6_DEVS"
-			if [ "$WAN_UP" = "1" ] && [ "$WAN6_UP" != "1" ] && [ "$WAN6_PRESENT" = "1" ]; then
-				ifup wan6 >/dev/null 2>&1 || true
+	# Vendor integration: the MT5700M manager keeps its own copy of the modem
+	# metric.  Only the value is synced here - the manager is never asked to
+	# restart an interface during a switch, because that would tear down the
+	# exit we just verified.
+	uci -q get mt5700m.connection >/dev/null 2>&1 && {
+		if [ "$(uci_get mt5700m.connection.metric)" != "$(policy_group_metric "$target_mode" "$GROUP_MODEM")" ]; then
+			if uci -q set "mt5700m.connection.metric=$(policy_group_metric "$target_mode" "$GROUP_MODEM")" && \
+				uci -q commit mt5700m; then
+				uci_gen_bump
 			fi
-			;;
-		modem)
-			drop_ipv6_default_routes "$WAN6_DEVS"
-			if [ "$MODEM_UP" = "1" ] && [ "$MODEM6_UP" != "1" ] && [ -n "$MODEM6_PRIMARY" ]; then
-				ifup "$MODEM6_PRIMARY" >/dev/null 2>&1 || true
-			fi
-			;;
-		off)
-			drop_ipv6_default_routes "$WAN6_DEVS"
-			drop_ipv6_default_routes "$MODEM6_DEVS"
-			;;
-	esac
-
+		fi
+	}
 	return 0
 }
 
-# Hard violation of invariant 2, restricted to the mismatches this service can
-# actually repair (a foreign exit's IPv6 route is not ours to remove; it is
-# reported through `split=` in the status output instead of being retried).
-ipv6_diverged() {
-	case "$ACTIVE4" in
-		wan) [ "$ACTIVE6" = "modem" ] && return 0; return 1 ;;
-		modem) [ "$ACTIVE6" = "wan" ] && return 0; return 1 ;;
-		other)
-			case "$ACTIVE6" in
-				wan|modem) return 0 ;;
-				*) return 1 ;;
-			esac
-			;;
-		*) return 1 ;;
-	esac
+# ---------------------------------------------------------------------------
+# route surgery - the fast half of a switch
+#
+# `ip route replace` is keyed on (destination, metric): replacing the default
+# route *in the active metric slot* moves the slot to another next hop in one
+# kernel transaction, so there is no instant in which traffic has no default
+# route, and no equal-metric pair can appear (the kernel rejects a plain add at
+# an occupied metric with EEXIST - verified, see tests/run_netns.sh).
+#
+# The routes this program installs carry no `proto` attribute, i.e. the kernel's
+# default `boot`.  That marks them as ours: the reconciler may clean up *our*
+# orphans, while netifd's own routes are never deleted behind its back.  It also
+# means a stale route object held by netifd can only ever match a route with the
+# same gateway and device, which is exactly the property that keeps the swapped
+# slots safe.
+# ---------------------------------------------------------------------------
+
+route_replace_slot() { # <4|6> <gateway> <dev> <metric>
+	local family="$1" gw="$2" dev="$3" metric="$4" rc
+	[ -n "$gw" ] && [ -n "$dev" ] && [ -n "$metric" ] || return 1
+	log_note "ip -$family route replace default via $gw dev $dev metric $metric"
+	ip "-$family" route replace default via "$gw" dev "$dev" metric "$metric" >/dev/null 2>&1
+	rc=$?
+	route_gen_bump
+	return "$rc"
+}
+
+route_del_line() { # <4|6> <route line>
+	local family="$1" line="$2"
+	[ -n "$line" ] || return 1
+	local rc
+	log_note "ip -$family route del $line"
+	# Intentionally split the route line back into ip-route arguments.
+	# shellcheck disable=SC2086
+	ip "-$family" route del $line >/dev/null 2>&1
+	rc=$?
+	route_gen_bump
+	return "$rc"
+}
+
+# Remember the last known next hop of a group so an isolated standby (an
+# `only` mode has no default route on it by design) can be warmed again without
+# waiting for its proto to re-announce: the remembered hop is verified by the
+# switch probe before anything is committed, so a stale value fails the switch
+# rather than the network.
+remember_group_route() { # <group> <4|6> <route line>
+	local key line gw dev
+	line="$3"
+	[ -n "$line" ] || return 0
+	gw="$(route_gateway "$line")"
+	dev="$(route_dev "$line")"
+	[ -n "$gw" ] && [ -n "$dev" ] || return 0
+	key="rt_$1$2"
+	state_write "$key=$gw $dev"
+}
+
+recall_group_route() { # <group> <4|6>  -> "gw dev"
+	state_get "rt_$1$2"
+}
+
+# Install the warm route of a group at the standby metric if the group has an
+# address but no default route yet.
+warm_group_route() { # <group>
+	local group="$1" family sec devs line gw dev
+
+	# A group the plan isolates (the standby of an `only` mode) is deliberately
+	# without a default route: reinstalling one here would leak IPv4 or IPv6 onto
+	# an exit the user took out of service.
+	[ "$(policy_group_defaultroute "$mode" "$group")" = "1" ] || return 0
+
+	for family in 4 6; do
+		sec="$(group_sec "$group" "$family")"
+		[ -n "$sec" ] || continue
+		devs="$(group_devs "$group" "$family")"
+		[ -n "$devs" ] || continue
+		line="$(group_default_route "$family" "$group")"
+		if [ -n "$line" ]; then
+			remember_group_route "$group" "$family" "$line"
+			continue
+		fi
+		group_family_has_address "$group" "$family" || continue
+		set -- $(recall_group_route "$group" "$family")
+		gw="${1:-}"
+		dev="${2:-}"
+		[ -n "$gw" ] && [ -n "$dev" ] || continue
+		word_in_list "$dev" "$devs" || continue
+		log_note "warming $group ipv$family from the remembered next hop $gw dev $dev"
+		route_replace_slot "$family" "$gw" "$dev" "$STANDBY_METRIC"
+	done
+	return 0
 }
 
 # ---------------------------------------------------------------------------
-# reconcile
+# verification
 # ---------------------------------------------------------------------------
+
+verify_group_priority() { # <group>  -> 0 ok, 1 not ok (reason in VERIFY_REASON)
+	local group="$1" family dev owner fib4_owner ecmp metric odev ocount
+
+	VERIFY_REASON=""
+	for family in 4 6; do
+		dev="$(winner_dev "$family")"
+		if [ -z "$dev" ]; then
+			# A family that the target group cannot carry at all (no IPv6
+			# member configured) is not a defect of the switch.
+			if ! group_family_capable "$group" "$family"; then
+				continue
+			fi
+			VERIFY_REASON="ipv${family}_no_default_route"
+			return 1
+		fi
+		owner="$(route_owner "$dev" "$(route_owner "$(fib_egress "$family")")")"
+		if [ "$owner" != "$group" ]; then
+			# Only our own groups are actionable; an exit managed by something
+			# else (mwan3, VPN) is reported, never fought over.
+			case "$owner" in
+				wan|modem)
+					VERIFY_REASON="ipv${family}_default_via_${owner}"
+					return 1
+					;;
+				*)
+					log_note "ipv$family priority set but an external router owns the FIB ($dev)"
+					;;
+			esac
+		fi
+		metric="$(route_metric "$family" "$(winning_default "$family")")"
+		ecmp="$(equal_metric_count "$family" "$metric")"
+		if [ "$ecmp" -gt 1 ]; then
+			VERIFY_REASON="ipv${family}_ambiguous_metric_${metric}"
+			return 1
+		fi
+	done
+
+	# The standby, when it has a route at all, must sit strictly below the
+	# active slot: that is the warm failover path, and a standby route above the
+	# active one would make the exit decision depend on route dump order.
+	for family in 4 6; do
+		local g oline ometric
+		for g in "$GROUP_WAN" "$GROUP_MODEM"; do
+			[ "$g" = "$group" ] && continue
+			oline="$(group_default_route "$family" "$g")"
+			[ -n "$oline" ] || continue
+			ometric="$(route_metric "$family" "$oline")"
+			if [ "$ometric" -le "$(route_metric "$family" "$(winning_default "$family")")" ]; then
+				VERIFY_REASON="ipv${family}_standby_not_demoted"
+				return 1
+			fi
+		done
+	done
+	return 0
+}
+
+verify_group_online() { # <group>  -> 0 ok, 1 not ok (reason in VERIFY_REASON)
+	local group="$1" family verdict
+
+	VERIFY_REASON=""
+	for family in 4 6; do
+		if ! group_family_capable "$group" "$family"; then
+			continue
+		fi
+		verdict="$(probe_group_family "$family" "$group")"
+		if [ "$verdict" != "1" ]; then
+			VERIFY_REASON="ipv${family}_unreachable"
+			return 1
+		fi
+	done
+	return 0
+}
+
+
+# ---------------------------------------------------------------------------
+# completeness of an exit group
+#
+# `strict_dual_stack` (default 1) is the project's core promise: an exit group is
+# only promoted when both families are up and proven reachable.  An operator can
+# opt out of it - a device whose 5G module has no IPv6 interface at all can then
+# still be used as an IPv4-only exit - and when the opt-out is active the standby
+# group's route for the family the active group cannot carry is suppressed
+# together with both families, so the "one physical exit for both families"
+# invariant still cannot break.
+# ---------------------------------------------------------------------------
+
+strict_dual_stack() { [ "$(cfg_bool strict_dual_stack 1)" = "1" ]; }
+
+group_family_required() { # <group> <4|6>
+	group_family_capable "$1" "$2" && return 0
+	strict_dual_stack
+}
+
+group_complete() { # <group>
+	local family
+	for family in 4 6; do
+		group_family_required "$1" "$family" || continue
+		group_family_ready "$1" "$family" || return 1
+	done
+	return 0
+}
+
+group_complete_online() { # <group>  (structural + cached reachability)
+	local family verdict
+	group_complete "$1" || return 1
+	for family in 4 6; do
+		group_family_required "$1" "$family" || continue
+		verdict="$(cached_verdict "$1" "$family")"
+		[ "$verdict" = "1" ] || return 1
+	done
+	return 0
+}
+
+# Families this group cannot carry at all.  In the opt-out mode, an active group
+# with a hole here forces the standby's corresponding route to be parked.
+group_hole_families() { # <group>
+	local family out=""
+	for family in 4 6; do
+		group_family_required "$1" "$family" && continue
+		out="$(add_word "$out" "$family")"
+	done
+	printf '%s\n' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# switch task state and phase logging
+# ---------------------------------------------------------------------------
+
+TASK_START_CS=""
+PHASE_START_CS=""
+PHASE_LOG=""
+
+task_begin() { # <kind> <target_group> <target_mode>
+	TASK_START_CS="$(now_cs)"
+	PHASE_START_CS="$TASK_START_CS"
+	PHASE_LOG=""
+	state_write "state=$SM_PREPARING" "kind=$1" "target=$2" "target_mode=$3" \
+		"result=none" "reason=" "pid=$$" "started=$(date +%s 2>/dev/null || echo 0)" \
+		"elapsed=0.00s" "phases=" "message="
+}
+
+task_phase() { # <phase> <message>
+	local now
+	now="$(now_cs)"
+	PHASE_LOG="$PHASE_LOG$1:$(fmt_cs $((now - PHASE_START_CS))) "
+	PHASE_START_CS="$now"
+	state_write "state=$1" "message=$2" "phases=$PHASE_LOG" \
+		"elapsed=$(fmt_cs $((now - TASK_START_CS)))"
+	log_note "[$1] $2"
+}
+
+task_finish() { # <state> <result> <reason> <message>
+	local now
+	now="$(now_cs)"
+	state_write "state=$1" "result=$2" "reason=$3" "message=$4" \
+		"elapsed=$(fmt_cs $((now - TASK_START_CS)))" "phases=$PHASE_LOG" "pid="
+	log_note "$4"
+}
+
+# ---------------------------------------------------------------------------
+# the switch pipeline
+#
+#   current exit intact
+#        |
+#        v
+#   PREPARING_TARGET  warm the target (UCI + ifup only what is missing)
+#        |
+#        v
+#   WAIT_IPV4 / WAIT_IPV6      bounded wait for address + default route
+#        |
+#        v
+#   VERIFY_IPV4 / VERIFY_IPV6  bounded reachability probes, both must pass
+#        |
+#        v
+#   SWITCHING         persist the plan, then move the two metric slots per family
+#        |
+#        v
+#   VERIFY_TARGET     re-read ip route / ip -6 route, assert one exit for both
+#        |
+#        v
+#   COMMITTED   (or ROLLBACK -> FAILED, with the old exit still intact)
+#
+# Only the last two stages touch the live routing table, and each of them is a
+# single `ip route replace` per family.  The old exit is never taken down: it is
+# moved to the standby metric, which keeps its addresses, leases and warm route.
+# ---------------------------------------------------------------------------
+
+wait_group_family() { # <group> <4|6> <timeout>
+	local group="$1" family="$2" limit="$3" waited=0 tried_warm=0 tried_ifup=0 sec
+	while :; do
+		if group_family_ready "$group" "$family"; then
+			return 0
+		fi
+		if [ "$waited" -ge "$limit" ] || budget_expired; then
+			return 1
+		fi
+		if [ "$waited" -eq 0 ] && [ "$tried_warm" = "0" ]; then
+			tried_warm=1
+			warm_group_route "$group"
+		fi
+		# One bounded retry: ask netifd to bring the section up again.  Nothing is
+		# ever torn down, so a section that is already carrying traffic is left
+		# alone by this step (ifup on a healthy interface is a no-op).
+		if [ "$waited" -eq 2 ] && [ "$tried_ifup" = "0" ]; then
+			tried_ifup=1
+			sec="$(group_sec "$group" "$family")"
+			if [ -n "$sec" ]; then
+				log_note "retrying ifup $sec"
+				ifup "$sec" >/dev/null 2>&1 || true
+			fi
+		fi
+		bounded_sleep 1 || return 1
+		waited=$((waited + 1))
+		state_write "message=waiting ipv$family ($group) ${waited}s/${limit}s"
+	done
+}
+
+prepare_group() { # <group> <target_mode>
+	local group="$1" target_mode="$2" family sec metric dr devs changed_before
+
+	# Bring the target's own configuration in line with the plan for the mode we
+	# are switching to: both families of the target may install their default
+	# route, its IPv6 stays auto=1, and its metric is the standby slot until the
+	# commit exchanges the slots.
+	for family in 4 6; do
+		sec="$(group_sec "$group" "$family")"
+		[ -n "$sec" ] || continue
+		metric="$(policy_group_metric "$target_mode" "$group")"
+		set_network_option_if_changed "$sec" metric "$metric" || true
+		set_network_option_if_changed "$sec" defaultroute 1 || true
+		if [ "$family" = "6" ]; then
+			set_network_option_if_changed "$sec" auto 1 || true
+		fi
+	done
+	[ "$NETWORK_CHANGED" = "0" ] || uci -q commit network || true
+
+	for family in 4 6; do
+		sec="$(group_sec "$group" "$family")"
+		[ -n "$sec" ] || continue
+		group_family_ready "$group" "$family" && continue
+		read_section_state "$sec"
+		if [ "$SEC_UP" != "1" ] || [ -z "$SEC_DEVS" ]; then
+			log_note "bringing the target interface $sec up"
+			ifup "$sec" >/dev/null 2>&1 || true
+		fi
+	done
+
+	# A target that is up but whose default route was suppressed by an `only`
+	# isolation gets its warm route back from the remembered next hop; the switch
+	# probe verifies it before anything is committed.
+	warm_group_route "$group"
+	return 0
+}
+
+# Move one family's active slot to `group`.  Two atomic replaces, in an order
+# that never leaves the family without a default route:
+#   1. the target takes the active slot (a single replace, no window)
+#   2. the previous owner is moved to the standby slot (warm failover path)
+commit_family() { # <4|6> <group> <previous owner group>
+	local family="$1" group="$2" previous="$3"
+	local tline tgw tdev oline ogw odev
+
+	tline="$(group_default_route "$family" "$group")"
+	tgw="$(route_gateway "$tline")"
+	tdev="$(route_dev "$tline")"
+	if [ -z "$tgw" ] || [ -z "$tdev" ]; then
+		# Last resort for a group that is up with an address but whose proto has
+		# not announced a next hop: the remembered one (verified afterwards).
+		set -- $(recall_group_route "$group" "$family")
+		tgw="${1:-}"
+		tdev="${2:-}"
+	fi
+	[ -n "$tgw" ] && [ -n "$tdev" ] || return 1
+
+	if [ "$previous" = "$group" ] || [ -z "$previous" ] || [ "$previous" = "none" ]; then
+		route_replace_slot "$family" "$tgw" "$tdev" "$ACTIVE_METRIC" || return 1
+		return 0
+	fi
+
+	oline="$(group_default_route "$family" "$previous")"
+	ogw="$(route_gateway "$oline")"
+	odev="$(route_dev "$oline")"
+
+	# 1. promote the target into the active slot (atomic)
+	route_replace_slot "$family" "$tgw" "$tdev" "$ACTIVE_METRIC" || return 1
+	log_note "ipv$family default -> $group (via $tgw dev $tdev metric $ACTIVE_METRIC)"
+
+	# 2. demote the previous owner into the standby slot, so a later failure of
+	#    the new exit still fails over to a warm route instead of a blackhole.
+	if [ -n "$ogw" ] && [ -n "$odev" ]; then
+		route_replace_slot "$family" "$ogw" "$odev" "$STANDBY_METRIC" || true
+		log_note "ipv$family standby -> $previous (via $ogw dev $odev metric $STANDBY_METRIC)"
+	else
+		log_note "ipv$family: $previous has no usable route; the standby slot keeps the target's warm route"
+	fi
+	return 0
+}
+
+# Park the standby's route for a family the active group cannot carry at all (the
+# explicit opt-out of the dual-stack promise, see strict_dual_stack()).
+apply_group_holes() { # <active group>
+	local group="$1" family standings sec line
+	strict_dual_stack && return 0
+	standings="$(other_group "$group")"
+	for family in $(group_hole_families "$group"); do
+		sec="$(group_sec "$standings" "$family")"
+		[ -n "$sec" ] || continue
+		set_network_option_if_changed "$sec" defaultroute 0 || true
+		[ "$NETWORK_CHANGED" = "0" ] || uci -q commit network || true
+		line="$(group_default_route "$family" "$standings")"
+		[ -n "$line" ] && route_del_line "$family" "$line"
+		log_note "warning: $standings cannot be the active exit for ipv$family; parked its route (strict_dual_stack=0)"
+	done
+	return 0
+}
+
+verify_excluded_families() { # <active group>
+	local group="$1" family standings line
+	strict_dual_stack && return 0
+	standings="$(other_group "$group")"
+	for family in $(group_hole_families "$group"); do
+		line="$(group_default_route "$family" "$standings")"
+		if [ -n "$line" ]; then
+			VERIFY_REASON="ipv${family}_leaked_to_${standings}"
+			return 1
+		fi
+	done
+	return 0
+}
+
+# Undo one family's commit.  The previous owner goes back into the active slot,
+# and the failed target is parked on the standby slot - but only if the previous
+# owner is still usable.  A rollback must never create a blackhole: when the old
+# exit died during the switch, the target keeps the active slot.
+rollback_family() { # <4|6> <previous group> <target group>
+	local family="$1" previous="$2" target="$3"
+	local pline pgw pdev tline tgw tdev
+
+	pline="$(group_default_route "$family" "$previous")"
+	pgw="$(route_gateway "$pline")"
+	pdev="$(route_dev "$pline")"
+	if [ -z "$pgw" ] || [ -z "$pdev" ] || ! netdev_exists "$pdev"; then
+		log_note "ipv$family: previous exit $previous has no usable route; keeping the live exit"
+		return 1
+	fi
+
+	route_replace_slot "$family" "$pgw" "$pdev" "$ACTIVE_METRIC" || return 1
+	log_note "ipv$family default -> $previous (rollback, via $pgw dev $pdev)"
+
+	tline="$(group_default_route "$family" "$target")"
+	tgw="$(route_gateway "$tline")"
+	tdev="$(route_dev "$tline")"
+	if [ -n "$tgw" ] && [ -n "$tdev" ] && [ "$pgw $pdev" != "$tgw $tdev" ]; then
+		route_replace_slot "$family" "$tgw" "$tdev" "$STANDBY_METRIC" || true
+	fi
+	return 0
+}
+
+# After a rollback (or a partially failed one) the two families must still agree
+# on one exit.  They can only disagree if the previous exit has a family the
+# target lacks, in which case the family that is still on the target follows the
+# family that is on the previous exit.
+post_failure_converge() {
+	local group s4 s6 chosen
+	read_live_state
+	s4="$(slot_owner_family 4)"
+	s6="$(slot_owner_family 6)"
+	[ -n "$s4" ] || s4="none"
+	[ -n "$s6" ] || s6="none"
+	[ "$s4" = "$s6" ] && return 0
+	chosen="$s4"
+	case "$chosen" in wan|modem) ;; *) chosen="$s6" ;; esac
+	case "$chosen" in
+		wan|modem) log_note "converging the family split onto $chosen after the failed switch" ;;
+		*) return 0 ;;
+	esac
+	for group in 4 6; do
+		commit_family "$group" "$chosen" "$(other_group "$chosen")" || true
+	done
+	return 0
+}
+
+# Optional vendor integration.  The MT5700M manager keeps its own copy of the
+# modem metric and re-applies it to the module when it reconfigures it, so the
+# two have to agree.  The call happens only *after* the switch is committed and
+# verified, so it can never disturb a switch in progress, it is bounded, and a
+# failure is logged rather than propagated: the reconciler repairs the live
+# state on its next pass regardless.
+vendor_sync() {
+	local bin=/usr/sbin/mt5700m-manager
+	[ -x "$bin" ] || return 0
+	if command -v timeout >/dev/null 2>&1; then
+		if ! timeout 5 "$bin" sync >/dev/null 2>&1; then
+			log_note "mt5700m-manager sync did not succeed; the reconciler will re-check the exit"
+		fi
+	else
+		"$bin" sync >/dev/null 2>&1 || true
+	fi
+	return 0
+}
+
+# Keep a warm standby route installed.  After a switch the previous exit's route
+# sits on the standby metric, so a later failure of the new exit fails over to a
+# route that is already there instead of blackholing until the next reconcile.
+# Only a *missing* route is restored, and only from a next hop this program has
+# seen, so a steady state produces no writes at all.
+maintain_warm_routes() {
+	local group family line active
+	active="$(slot_owner)"
+
+	for group in "$GROUP_WAN" "$GROUP_MODEM"; do
+		for family in 4 6; do
+			# Warming a route for a family that has no live slot at all would
+			# create a route the kernel then uses - a split.  A warm standby is
+			# only ever a route *behind* an active one.
+			case "$(slot_owner_family "$family")" in wan|modem) ;; *) continue ;; esac
+			line="$(group_default_route "$family" "$group")"
+			[ -n "$line" ] && continue
+			group_family_capable "$group" "$family" || continue
+			group_family_has_address "$group" "$family" || continue
+			# The active exit's own route missing is a different fault: the
+			# alignment below handles it, and warming it here would hide it.
+			[ "$group" = "$active" ] && continue
+			warm_group_route "$group"
+		done
+	done
+	return 0
+}
+
+# The full pipeline.  `kind` is `switch` for a user-initiated change and `align`
+# for a reconciler repair; both run the same state machine and the same checks.
+switch_run() { # <target_mode> [kind] [target_group]
+	local target_mode="$1" kind="${2:-switch}" forced_target="${3:-}"
+	local target previous previous_mode target_mode_check req_family failure=""
+	local target_warm settle_used plan_written=0 committed4=0 committed6=0
+
+	normalize_mode
+	target_mode_check="$(printf '%s' "$target_mode" | sed -n 's/^\(wan_first\|modem_first\|wan_only\|modem_only\)$/\1/p')"
+	[ -n "$target_mode_check" ] || return 64
+	target_mode="$target_mode_check"
+
+	target="${forced_target:-$(mode_primary_group "$target_mode")}"
+	previous_mode="$mode"
+	# read_live_state memoises into the caller's shell, so the snapshot must not
+	# happen inside a command substitution.
+	read_and_snapshot
+	previous="$(slot_owner)"
+
+	budget_start
+	target_warm=0
+	group_complete "$target" && target_warm=1
+	task_begin "$kind" "$target" "$target_mode"
+	log_note "$kind ${previous:-none} -> $target (mode=$target_mode, strict_dual_stack=$(cfg_bool strict_dual_stack 1))"
+
+	# ---- PREPARING_TARGET -------------------------------------------------
+	task_phase "$SM_PREPARING" "preparing target $target (mode=$target_mode)"
+	prepare_group "$target" "$target_mode" || failure="prepare_failed"
+
+	# A required family the target has no interface for can never become ready:
+	# fail now with a reason the UI can print, instead of waiting out the timeout.
+	if [ -z "$failure" ]; then
+		local req_family
+		for req_family in 4 6; do
+			group_family_required "$target" "$req_family" || continue
+			if ! group_family_capable "$target" "$req_family"; then
+				failure="ipv${req_family}_not_configured"
+			fi
+		done
+	fi
+
+	# ---- WAIT_IPV4 / WAIT_IPV6 -------------------------------------------
+	if [ -z "$failure" ]; then
+		task_phase "$SM_WAIT4" "waiting IPv4 on $target"
+		if group_family_required "$target" 4; then
+			if ! wait_group_family "$target" 4 "$(switch_wait_ipv4)"; then
+				failure="ipv4_not_ready"
+			else
+				log_note "IPv4 ready ($(group_devs "$target" 4))"
+			fi
+		fi
+	fi
+	if [ -z "$failure" ]; then
+		task_phase "$SM_WAIT6" "waiting IPv6 on $target"
+		if group_family_required "$target" 6; then
+			if ! wait_group_family "$target" 6 "$(switch_wait_ipv6)"; then
+				failure="ipv6_not_ready"
+			else
+				log_note "IPv6 ready ($(group_devs "$target" 6))"
+			fi
+		fi
+	fi
+
+	# ---- VERIFY_IPV4 / VERIFY_IPV6 ---------------------------------------
+	if [ -z "$failure" ]; then
+		task_phase "$SM_VERIFY4" "probing IPv4 reachability on $target"
+		if group_family_required "$target" 4; then
+			if [ "$(probe_group_family 4 "$target")" = "1" ]; then
+				log_note "IPv4 connectivity OK"
+			else
+				failure="ipv4_unreachable"
+			fi
+		fi
+	fi
+	if [ -z "$failure" ]; then
+		task_phase "$SM_VERIFY6" "probing IPv6 reachability on $target"
+		if group_family_required "$target" 6; then
+			if [ "$(probe_group_family 6 "$target")" = "1" ]; then
+				log_note "IPv6 connectivity OK"
+			else
+				failure="ipv6_unreachable"
+			fi
+		fi
+	fi
+	if [ -z "$failure" ] && [ "$(gw_required)" = "1" ]; then
+		local gw
+		gw="$(route_gateway "$(group_default_route 4 "$target")")"
+		if ! gateway_reachable 4 "$(group_devs "$target" 4)" "$gw"; then
+			failure="ipv4_gateway_unreachable"
+		fi
+	fi
+
+	# ---- SWITCHING -------------------------------------------------------
+	if [ -z "$failure" ]; then
+		task_phase "$SM_SWITCHING" "switching default routes to $target"
+		if apply_policy "$target_mode"; then
+			plan_written=1
+		else
+			failure="policy_write_failed"
+		fi
+	fi
+	if [ -z "$failure" ]; then
+		if commit_family 4 "$target" "$previous"; then
+			committed4=1
+		else
+			failure="ipv4_commit_failed"
+		fi
+	fi
+	if [ -z "$failure" ]; then
+		if commit_family 6 "$target" "$previous"; then
+			committed6=1
+		else
+			failure="ipv6_commit_failed"
+		fi
+	fi
+	if [ -z "$failure" ]; then
+		apply_group_holes "$target" || failure="hole_parking_failed"
+	fi
+
+	# ---- VERIFY_TARGET ---------------------------------------------------
+	if [ -z "$failure" ]; then
+		task_phase "$SM_VERIFY_TARGET" "verifying the committed exit"
+		if ! verify_group_priority "$target"; then
+			failure="${VERIFY_REASON:-priority_verify_failed}"
+		elif ! verify_excluded_families "$target"; then
+			failure="${VERIFY_REASON:-family_leak}"
+		else
+			# One settle window, then the same verification again: netifd can
+			# re-announce a route a moment after the switch, and a route that only
+			# holds for 100 ms is not a committed switch.  A target that was
+			# already online is not delayed (switch_settle_warm, default 0).
+			settle_used="$(switch_settle)"
+			[ "$target_warm" = "0" ] || settle_used="$(switch_settle_warm)"
+			if [ "$settle_used" -gt 0 ] && ! budget_expired; then
+				bounded_sleep "$settle_used" || true
+			fi
+			read_live_state
+			if ! verify_group_priority "$target"; then
+				failure="${VERIFY_REASON:-priority_verify_failed_after_settle}"
+			elif ! verify_group_online "$target"; then
+				failure="${VERIFY_REASON:-target_unreachable_after_settle}"
+			fi
+		fi
+	fi
+
+	# ---- outcome ---------------------------------------------------------
+	if [ -z "$failure" ]; then
+		mode="$target_mode"
+		state_write "applied_mode=$target_mode"
+		task_finish "$SM_COMMITTED" "ok" "" \
+			"$kind committed: ${previous:-none} -> $target in $(fmt_cs $(( $(now_cs) - TASK_START_CS )))"
+		refresh_health
+		vendor_sync
+		return 0
+	fi
+
+	task_phase "$SM_ROLLBACK" "rollback to ${previous:-none} ($failure)"
+	log_note "$kind failed: $failure"
+	# Undo only what the switch actually changed.  A target that never became
+	# ready, or a probe that never passed, failed before the commit: the live exit
+	# was never touched, so moving routes here would be churn on a working exit -
+	# and it is exactly the churn that used to flap the default route on a failed
+	# switch.
+	if [ "$plan_written" = "1" ] && [ -n "$previous_mode" ]; then
+		apply_policy "$previous_mode" || true
+	fi
+	if [ -n "$previous" ] && [ "$previous" != "none" ] && [ "$previous" != "$target" ]; then
+		[ "$committed4" = "1" ] && { rollback_family 4 "$previous" "$target" || true; }
+		[ "$committed6" = "1" ] && { rollback_family 6 "$previous" "$target" || true; }
+	fi
+	# A half-committed switch can leave the two families on different groups;
+	# re-converge them only when a family was really moved.
+	[ "$committed4$committed6" = "00" ] || post_failure_converge
+	task_finish "$SM_FAILED" "failed" "$failure" \
+		"$kind failed: $failure; rolled back to ${previous:-none}"
+	refresh_health
+	return 1
+}
+
+# Read the live state and return the group that currently owns the priority slot
+# (the exit that must survive the switch).
+read_and_snapshot() {
+	invalidate_state
+	read_live_state
+	slot_owner
+}
+
+# ---------------------------------------------------------------------------
+# reconciler - converge the live state on the plan, without churn
+#
+# What it repairs:
+#   * a family split (IPv4 on one group, IPv6 on the other) - the one state that
+#     must never survive a reconcile;
+#   * a standby that lost its warm default route, so a failover has somewhere to
+#     go;
+#   * an orphan default route left on a device that no longer exists.
+#
+# What it deliberately does not do:
+#   * touch the exit while a switch is in flight (that worker owns the state);
+#   * flip the exit on a single failed probe (a group is only demoted after
+#     `probe_fail_streak` consecutive failed rounds, and the alignment itself is
+#     rate-limited by `switch_cooldown`);
+#   * fail back instantly (a promotion needs `align_confirm` consecutive
+#     affirmative rounds), so a flapping primary cannot produce a
+#     WAN -> 5G -> WAN ping-pong.
+# ---------------------------------------------------------------------------
+
+remember_routes() {
+	local group family line
+	for group in "$GROUP_WAN" "$GROUP_MODEM"; do
+		for family in 4 6; do
+			line="$(group_default_route "$family" "$group")"
+			[ -n "$line" ] || continue
+			remember_group_route "$group" "$family" "$line"
+		done
+	done
+	return 0
+}
+
+# Delete a default route that points at a device which does not exist any more.
+# Only routes this program installs (kernel-default `proto boot`) are considered,
+# so nothing netifd or another manager owns is ever removed.
+reap_orphan_routes() {
+	local family line dev proto
+	for family in 4 6; do
+		while IFS= read -r line; do
+			[ -n "$line" ] || continue
+			dev="$(route_dev "$line")"
+			[ -n "$dev" ] || continue
+			netdev_exists "$dev" && continue
+			proto="$(route_proto "$line")"
+			[ "$proto" = "boot" ] || continue
+			log_note "removing an orphan default route on the missing device $dev"
+			route_del_line "$family" "$line"
+		done <<EOF3
+$(show_defaults "$family")
+EOF3
+	done
+	return 0
+}
+
+# Consecutive failed health rounds for one group/family, as recorded by
+# refresh_health: `wan_fail`, `wan6_fail`, `modem_fail`, `modem6_fail`.
+health_streak() { # <group> <4|6>
+	if [ "$2" = "6" ]; then
+		number_or "$(cached_field "${1}6_fail")" 0
+	else
+		number_or "$(cached_field "${1}_fail")" 0
+	fi
+}
+
+# A complete group whose required family has failed `probe_fail_streak`
+# consecutive health rounds is degraded.  One lost round is noise and must never
+# move the exit; the threshold is the hysteresis that keeps a flapping uplink
+# from producing a switch per probe.
+group_degraded() { # <group>
+	local family need
+	group_complete "$1" || return 1
+	need="$(probe_fail_streak)"
+	for family in 4 6; do
+		group_family_required "$1" "$family" || continue
+		[ "$(health_streak "$1" "$family")" -ge "$need" ] && return 0
+	done
+	return 1
+}
+
+align_cooldown_ok() {
+	local now last
+	# The UI's one-click align bypasses the rate limit: a split is a fault, and
+	# waiting out a cooldown before repairing it would be wrong.  The confirmation
+	# requirement is bypassed too, for the same reason.
+	[ "${H5000M_FORCE_ALIGN:-0}" = "1" ] && return 0
+	now="$(date +%s 2>/dev/null || echo 0)"
+	last="$(number_or "$(state_get last_align_ts)" 0)"
+	[ $((now - last)) -ge "$(switch_cooldown)" ]
+}
+
+mark_align() {
+	state_write "last_align_ts=$(date +%s 2>/dev/null || echo 0)" "last_align_reason=$1" \
+		"last_align_target=$2"
+}
+
+# Consecutive-observation confirmation for a promotion.
+confirm_candidate() { # <group>
+	local group="$1" cand hits
+	cand="$(state_get align_candidate)"
+	hits="$(number_or "$(state_get align_candidate_hits)" 0)"
+	if [ "$cand" = "$group" ]; then
+		hits=$((hits + 1))
+	else
+		hits=1
+	fi
+	state_write "align_candidate=$group" "align_candidate_hits=$hits"
+	[ "$hits" -ge "$(align_confirm)" ]
+}
+
+clear_candidate() {
+	[ "$(number_or "$(state_get align_candidate_hits)" 0)" = "0" ] || \
+		state_write "align_candidate_hits=0"
+	return 0
+}
+
+# Move both families' active slot to <group>.  The target is probed first: an
+# alignment must never promote an exit that is not actually reachable.
+align_to() { # <group> <reason>
+	local group="$1" reason="$2" previous family ok=1
+
+	previous="$(other_group "$group")"
+	if ! align_cooldown_ok; then
+		log_note "alignment to $group deferred (cooldown)"
+		return 1
+	fi
+	if ! verify_group_online "$group"; then
+		log_note "alignment to $group aborted: ${VERIFY_REASON:-target_not_online}"
+		return 1
+	fi
+
+	task_begin "align" "$group" "$mode"
+	log_note "align -> $group ($reason)"
+	task_phase "$SM_SWITCHING" "aligning both families to $group ($reason)"
+	for family in 4 6; do
+		group_family_required "$group" "$family" || continue
+		commit_family "$family" "$group" "$previous" || ok=0
+	done
+
+	task_phase "$SM_VERIFY_TARGET" "verifying $group"
+	if [ "$ok" = "1" ] && verify_group_priority "$group" && verify_excluded_families "$group"; then
+		mark_align "$reason" "$group"
+		task_finish "$SM_COMMITTED" "ok" "" "aligned to $group ($reason)"
+		state_write "align_candidate_hits=0"
+		refresh_health
+		return 0
+	fi
+
+	task_phase "$SM_ROLLBACK" "restoring $previous after a failed alignment"
+	for family in 4 6; do
+		commit_family "$family" "$previous" "$group" || true
+	done
+	post_failure_converge
+	task_finish "$SM_FAILED" "failed" "${VERIFY_REASON:-align_verify_failed}" \
+		"alignment to $group failed; restored $previous"
+	return 1
+}
+
+reconcile_align() {
+	local s4 s6 active primary backup chosen owner standby
+	s4="$(slot_owner_family 4)"
+	s6="$(slot_owner_family 6)"
+	[ -n "$s4" ] || s4="none"
+	[ -n "$s6" ] || s6="none"
+	primary="$(mode_primary_group "$mode")"
+	backup="$(other_group "$primary")"
+
+	if [ "$s4" = "$s6" ]; then
+		active="$s4"
+		owner="$active"
+		case "$active" in
+			wan|modem)
+				standby="$(other_group "$active")"
+				if group_degraded "$active" && group_complete_online "$standby"; then
+					# The live exit lost a required family for several consecutive
+					# rounds while the standby is complete and reachable: hand both
+					# families over.  Staying on an exit that carries only one of
+					# them is the split state this release exists to remove, and the
+					# streak is what keeps a single lost probe from moving anyone.
+					log_note "exit $active degraded ($(probe_fail_streak) failed rounds): failing over to $standby"
+					align_to "$standby" "exit_degraded" && owner="$standby"
+				elif [ "$active" != "$primary" ] && group_complete_online "$primary"; then
+					# The preferred exit is healthy again: fail back, but only after
+					# the verdict repeated - a flapping primary must not cause a
+					# WAN -> 5G -> WAN loop.  A forced align skips the confirmation.
+					if [ "${H5000M_FORCE_ALIGN:-0}" = "1" ] || confirm_candidate "$primary"; then
+						align_to "$primary" "failback" && owner="$primary"
+					fi
+				else
+					clear_candidate
+				fi
+				;;
+			*)
+				# No usable default route at all: rescue onto whichever group is
+				# complete, preferring the policy primary.
+				if group_complete_online "$primary"; then
+					align_to "$primary" "rescue" && owner="$primary"
+				elif group_complete_online "$backup"; then
+					align_to "$backup" "rescue" && owner="$backup"
+				fi
+				;;
+		esac
+		# Record where IPv6 actually leaves: after a failover or a failback the
+		# owner is the group the alignment just committed, not the one that was
+		# live when the decision was taken.
+		write_ipv6_owner "$owner"
+		return 0
+	fi
+
+	# Only one family has an exit at all.  There is no divergence to repair, and
+	# the family that is missing its route must never be "matched" by tearing the
+	# other one down - its route is netifd's to re-announce, not ours to remove.
+	if [ "$s4" = "none" ] || [ "$s6" = "none" ]; then
+		owner="$s4"
+		[ "$owner" = "none" ] && owner="$s6"
+		log_note "ipv4=$s4 ipv6=$s6: only one family has a default route; leaving it alone"
+		write_ipv6_owner "$owner"
+		return 0
+	fi
+
+	owner="split"
+	chosen=""
+	if group_complete "$primary"; then
+		chosen="$primary"
+	elif group_complete "$backup"; then
+		chosen="$backup"
+	fi
+	if [ -n "$chosen" ]; then
+		log_note "IPv4/IPv6 split (ipv4=$s4 ipv6=$s6): aligning both families to $chosen"
+		align_to "$chosen" "split_repair" && owner="$chosen"
+	else
+		log_note "IPv4/IPv6 split (ipv4=$s4 ipv6=$s6) and no complete dual-stack exit is available"
+	fi
+	# The audit field follows the repair: an unrepairable split keeps the value
+	# 'split' so the UI can flag it, a repaired one names the group that carries
+	# both families.
+	write_ipv6_owner "$owner"
+	return 0
+}
+
+write_ipv6_owner() { # <active group|split|none>
+	local value="$1" previous
+	case "$value" in
+		wan|modem|split|none) ;;
+		*) value="none" ;;
+	esac
+	previous="$(uci_get h5000m_netmode.settings.ipv6_owner)"
+	[ "$previous" = "$value" ] && return 0
+	uci -q get h5000m_netmode.settings >/dev/null 2>&1 || \
+		uci -q set h5000m_netmode.settings='settings'
+	uci -q set "h5000m_netmode.settings.ipv6_owner=${value}" >/dev/null 2>&1 || return 0
+	uci_gen_bump
+	uci -q commit h5000m_netmode >/dev/null 2>&1 || return 0
+	log_note "ipv6 exit ${previous:-none}->${value}"
+	return 0
+}
 
 reconcile_body() {
 	invalidate_state
 	read_live_state
-	select_ipv6_desired
-	apply_ipv6_desired
-}
 
-run_reconcile() {
-	local retried=0
-
-	reconcile_body || return 1
-
-	# One corrective pass.  netifd can re-add a route right after an interface is
-	# torn down, and a freshly raised owner needs a moment before its address
-	# appears in the FIB.
-	invalidate_state
-	read_live_state
-	if ipv6_diverged; then
-		log_note "IPv4/IPv6 still diverge (active4=${ACTIVE4} active6=${ACTIVE6}); retrying alignment"
-		sleep 1
-		reconcile_body || return 1
-		retried=1
-		invalidate_state
-		read_live_state
-		if ipv6_diverged; then
-			log_note "IPv4/IPv6 still diverge after the corrective pass (active4=${ACTIVE4} active6=${ACTIVE6})"
-		fi
+	if switch_in_progress; then
+		# The switch worker owns the network state until it commits or rolls back.
+		# Touching the exit from here is what produced the duplicate switches and
+		# the route flapping this rewrite exists to remove.
+		log_note "reconcile skipped: $(switch_state) in progress"
+		return 0
 	fi
 
 	if health_check_enabled; then
 		refresh_health
+		invalidate_state
+		read_live_state
 	fi
 
+	remember_routes
+	maintain_warm_routes
+	reconcile_align
+	reap_orphan_routes
+	return 0
+}
+
+run_reconcile() {
+	reconcile_body || return 1
 	return 0
 }
 
 # ---------------------------------------------------------------------------
-# policy application
+# hotplug
 # ---------------------------------------------------------------------------
 
-apply_policy() {
-	local wan_metric modem_metric wan4_defaultroute modem4_defaultroute section device
+# Coalescing debounce: one pending reconcile per debounce window, so a burst of
+# ifup/ifdown events (a modem re-registering fires several) produces one
+# evaluation instead of one per event.
+hotplug_notify() { # <section> [action]
+	local section="$1" action="${2:-event}" marker="${STATE_FILE}.debounce" events runs
 
-	discover_modem_interfaces
+	events=$(( $(number_or "$(state_get hotplug_events)" 0) + 1 ))
+	state_write "hotplug_last=${section}:${action}" "hotplug_events=$events" 		"hotplug_last_ts=$(date +%s 2>/dev/null || echo 0)"
 
-	case "$mode" in
-		modem_first)
-			wan_metric=50; modem_metric=10
-			wan4_defaultroute=1; modem4_defaultroute=1
-			;;
-		wan_only)
-			wan_metric=10; modem_metric=50
-			wan4_defaultroute=1; modem4_defaultroute=0
-			;;
-		modem_only)
-			wan_metric=50; modem_metric=10
-			wan4_defaultroute=0; modem4_defaultroute=1
-			;;
-		*)
-			mode=wan_first
-			wan_metric=10; modem_metric=50
-			wan4_defaultroute=1; modem4_defaultroute=1
-			;;
-	esac
-
-	# Only the IPv4 side and the metrics are written here.  The IPv6
-	# default-route state belongs exclusively to apply_ipv6_desired: two writers
-	# racing over `auto` produced an interface that netifd kept restarting while
-	# reconcile kept stopping it.
-	uci -q get h5000m_netmode.settings >/dev/null 2>&1 || \
-		uci -q set h5000m_netmode.settings='settings' || return 1
-	uci -q set "h5000m_netmode.settings.mode=${mode}" || return 1
-	uci -q commit h5000m_netmode || return 1
-
-	set_network_option wan metric "$wan_metric" || return 1
-	set_network_option wan6 metric "$wan_metric" || return 1
-	set_network_option wan norelease 1 || return 1
-	set_network_option wan defaultroute "$wan4_defaultroute" || return 1
-	for section in $MODEM_SECTIONS; do
-		set_network_option "$section" metric "$modem_metric" || return 1
-		# The IPv6 member of the modem must never carry an IPv4 default route.
-		[ "$section" = "$MODEM6_PRIMARY" ] && continue
-		case "$(section_device_raw "$section")" in
-			"@${MODEM_PRIMARY}") continue ;;
-		esac
-		set_network_option "$section" defaultroute "$modem4_defaultroute" || return 1
-	done
-	uci -q commit network || return 1
-
-	if uci -q get mt5700m.connection >/dev/null 2>&1; then
-		uci -q set "mt5700m.connection.metric=${modem_metric}" || return 1
-		uci -q commit mt5700m || return 1
+	if ! mkdir "$marker" 2>/dev/null; then
+		# Coalesced into the run that is already scheduled: a burst of events
+		# (a modem re-registering fires several) must produce one evaluation.
+		return 0
 	fi
+	echo "$$" > "$marker/pid" 2>/dev/null
+	runs=$(( $(number_or "$(state_get hotplug_runs)" 0) + 1 ))
+	state_write "hotplug_runs=$runs"
+	log_note "hotplug $section/$action -> reconcile in $(hotplug_debounce)s"
+
+	# Bounded sleep: the debounce window is operator configurable, and a marker
+	# from a dead worker must never wedge the event path.
+	sleep "$(hotplug_debounce)" 2>/dev/null || true
+	rmdir "$marker" 2>/dev/null || rm -rf "$marker" 2>/dev/null
+
+	if ! acquire_lock "$DEFAULT_RECONCILE_WAIT"; then
+		return 0
+	fi
+	trap release_lock EXIT INT TERM
+	run_reconcile || true
+	release_lock
+	trap - EXIT INT TERM
 	return 0
+}
+
+# ---------------------------------------------------------------------------
+# watch (procd-managed watchdog)
+# ---------------------------------------------------------------------------
+
+watch_interval() {
+	local interval
+	interval="$(number_or "$(uci_get h5000m_netmode.settings.watch_interval)" 10)"
+	[ "$interval" -ge 3 ] || interval=3
+	[ "$interval" -le 3600 ] || interval=3600
+	printf '%s\n' "$interval"
+}
+
+run_watch() {
+	local interval
+	interval="$(watch_interval)"
+	log_note "watcher started, interval=${interval}s"
+
+	"$SELF" reconcile >/dev/null 2>&1 || true
+
+	while :; do
+		sleep "$interval"
+		"$SELF" reconcile >/dev/null 2>&1 || true
+	done
 }
 
 # ---------------------------------------------------------------------------
@@ -925,26 +2775,70 @@ read_wireless_state() {
 	WIFI_SSID=""
 	WIFI_CLIENTS=0
 
-	json="$(ubus call network.wireless status 2>/dev/null || true)"
+	json="$(ubus_call network.wireless status)"
 	[ -n "$json" ] || return 0
 
-	# One entry per radio.  `up` is the field every radio carries; `band` is not
-	# guaranteed to exist, so it must not be used for counting.
 	ups="$(printf '%s' "$json" | jsonfilter -e '@.*.up' 2>/dev/null || true)"
 	WIFI_TOTAL="$(printf '%s\n' "$ups" | grep -c . || true)"
 	WIFI_UP="$(printf '%s\n' "$ups" | grep -c '^true$' || true)"
 
 	WIFI_SSID="$(printf '%s' "$json" | jsonfilter -e '@.*.interfaces[*].config.ssid' 2>/dev/null | head -n 1 || true)"
 
-	# Associated stations are counted per BSS.  A radio whose driver has no
-	# iwinfo support simply contributes nothing.
 	ifaces="$(printf '%s' "$json" | jsonfilter -e '@.*.interfaces[*].ifname' 2>/dev/null || true)"
 	for dev in $ifaces; do
-		count="$(ubus call iwinfo assoclist "{\"device\":\"$dev\"}" 2>/dev/null \
-			| jsonfilter -e '@.results[*].mac' 2>/dev/null | grep -c . || true)"
-		WIFI_CLIENTS=$(( WIFI_CLIENTS + count ))
+		count="$(ubus_call_iwinfo "$dev" | grep -c . || true)"
+		WIFI_CLIENTS=$((WIFI_CLIENTS + count))
 	done
 
+	return 0
+}
+
+ubus_call_iwinfo() { # <device>
+	local json
+	json="$(ubus_call iwinfo assoclist "{\"device\":\"$1\"}")"
+	printf '%s' "$json" | jsonfilter -e '@.results[*].mac' 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# DNS (reported, never a switch gate)
+#
+# A switch moves the default route; the resolver list is generated by netifd from
+# every interface that announces DNS servers, so after a switch the old exit's
+# servers are usually still listed.  In practice a resolver that is unreachable
+# over the new exit costs one timeout and dnsmasq moves on, so a DNS verdict must
+# never be allowed to fail a switch or trigger a failover - it is reported, and in
+# an opt-in mode it is probed once per health round.
+# ---------------------------------------------------------------------------
+
+active_group() {
+	slot_owner
+}
+
+dns_servers_of() { # <group>
+	local group="$1" family sec json out=""
+	for family in 4 6; do
+		sec="$(group_sec "$group" "$family")"
+		[ -n "$sec" ] || continue
+		json="$(section_status_json "$sec")"
+		[ -n "$json" ] || continue
+		out="$out$(printf '%s' "$json" | jsonfilter -e '@["dns-server"][*]' 2>/dev/null | tr '\n' ' ')"
+	done
+	printf '%s\n' "$out"
+}
+
+probe_dns() {
+	local name verdict
+	name="$(uci_get h5000m_netmode.settings.dns_probe_name)"
+	[ -n "$name" ] || name="openwrt.org"
+	if ! command -v nslookup >/dev/null 2>&1 || ! command -v timeout >/dev/null 2>&1; then
+		printf 'unknown\n'
+		return 0
+	fi
+	if timeout 5 nslookup "$name" 127.0.0.1 >/dev/null 2>&1; then
+		printf '1\n'
+	else
+		printf '0\n'
+	fi
 	return 0
 }
 
@@ -953,48 +2847,41 @@ read_wireless_state() {
 # ---------------------------------------------------------------------------
 
 print_status() {
-	local ipv6_owner split watcher modem_metric
+	local group family active primary backup line metric split split_detail dns_state modem_metric
+	local sw_state sw_pid now started
 
 	read_live_state
-	select_ipv6_desired
 
-	ipv6_owner="$(uci_get h5000m_netmode.settings.ipv6_owner)"
+	primary="$(mode_primary_group "$mode")"
+	backup="$(other_group "$primary")"
+	active="$(slot_owner)"
 
-	# A split is "the two families leave through different uplinks", so the two
-	# families are compared by uplink owner - not by interface name.
-	#
-	# Comparing EGRESS4 with EGRESS6 only worked while both exits were physical
-	# netdevs.  With a transparent proxy in the path the IPv6 default route sits
-	# on the TUN (singtun0) while its traffic still leaves through the same
-	# uplink as IPv4, so a name comparison reported a split on a device that had
-	# none - and the page then told the user to press "对齐出口" for a problem
-	# that did not exist.  ACTIVE4/ACTIVE6 already resolve a device to its role,
-	# including the tunnel-to-uplink attribution done in route_owner(), so they
-	# are the correct operands here.  `other` is deliberately not compared
-	# against `none`: no default route at all is reported by the caller as its
-	# own condition, not as a split.
+	# A split is "the two families leave through different uplinks", compared by
+	# uplink ownership - not by interface name, because a transparent proxy puts
+	# the IPv6 default route on a TUN while its traffic still leaves through the
+	# same physical uplink as IPv4.
 	split=0
 	if [ -n "$EGRESS4" ] && [ -n "$EGRESS6" ] \
 		&& [ "$ACTIVE4" != "none" ] && [ "$ACTIVE6" != "none" ] \
 		&& [ "$ACTIVE4" != "$ACTIVE6" ]; then
 		split=1
 	fi
-
-	if pgrep -f 'h5000m-netmode watch' >/dev/null 2>&1; then
-		watcher="on"
-	else
-		watcher="off"
+	split_detail=""
+	if [ "$(slot_owner_family 4)" != "$(slot_owner_family 6)" ]; then
+		split_detail="ipv4=$(slot_owner_family 4) ipv6=$(slot_owner_family 6)"
 	fi
 
-	modem_metric="$(uci_get network.MT5700M.metric)"
-	[ -n "$modem_metric" ] || modem_metric="$(uci_get mt5700m.connection.metric)"
-
 	echo "mode=$mode"
-	echo "ipv6_policy=follow_active4"
-	echo "ipv6_owner=${ipv6_owner:-none}"
-	echo "ipv6_desired=$IPV6_DESIRED"
+	echo "ipv6_policy=follow_active_group"
+	echo "ipv6_owner=$(uci_get h5000m_netmode.settings.ipv6_owner)"
+	echo "ipv6_desired=$active"
 	echo "ipv6_capable_wan=$WAN6_CAPABLE"
 	echo "ipv6_capable_modem=$MODEM6_CAPABLE"
+	echo "strict_dual_stack=$(cfg_bool strict_dual_stack 1)"
+
+	echo "group_primary=$primary"
+	echo "group_backup=$backup"
+	echo "group_active=$active"
 
 	echo "wan_present=$WAN_PRESENT"
 	echo "wan_available=$WAN_AVAILABLE"
@@ -1027,11 +2914,52 @@ print_status() {
 	echo "active4=$ACTIVE4"
 	echo "active6=$ACTIVE6"
 	echo "split=$split"
+	echo "split_detail=$split_detail"
 	echo "default4=$DEFAULT4"
 	echo "default6=$DEFAULT6"
 
+	# Requirement 23: the exit is decided by the metric (and, cross-checked, the
+	# FIB), never by the order of `ip route show` output.
+	echo "win4_dev=${WIN4_DEV:-none}"
+	echo "win6_dev=${WIN6_DEV:-none}"
+	echo "win4_owner=${WIN4_OWNER:-none}"
+	echo "win6_owner=${WIN6_OWNER:-none}"
+	echo "win4_metric=${WIN4_METRIC:-0}"
+	echo "win6_metric=${WIN6_METRIC:-0}"
+	echo "win4_ecmp=${WIN4_ECMP:-0}"
+	echo "win6_ecmp=${WIN6_ECMP:-0}"
+
+	# Per-group slots, next hops and family readiness.  These are written as
+	# literal `echo "key=...` lines on purpose: tests/svg_audit.js reads the field
+	# contract straight out of this function, and the UI must be able to show why
+	# a target can or cannot be promoted instead of a bare "not ready".
+	echo "slot4_wan=$(slot_metric 4 "$GROUP_WAN")"
+	echo "gw4_wan=$(group_gateway 4 "$GROUP_WAN")"
+	echo "addr4_wan=$(group_family_has_address "$GROUP_WAN" 4 && echo 1 || echo 0)"
+	echo "req4_wan=$(group_family_required "$GROUP_WAN" 4 && echo 1 || echo 0)"
+	echo "slot4_modem=$(slot_metric 4 "$GROUP_MODEM")"
+	echo "gw4_modem=$(group_gateway 4 "$GROUP_MODEM")"
+	echo "addr4_modem=$(group_family_has_address "$GROUP_MODEM" 4 && echo 1 || echo 0)"
+	echo "req4_modem=$(group_family_required "$GROUP_MODEM" 4 && echo 1 || echo 0)"
+	echo "slot6_wan=$(slot_metric 6 "$GROUP_WAN")"
+	echo "gw6_wan=$(group_gateway 6 "$GROUP_WAN")"
+	echo "addr6_wan=$(group_family_has_address "$GROUP_WAN" 6 && echo 1 || echo 0)"
+	echo "req6_wan=$(group_family_required "$GROUP_WAN" 6 && echo 1 || echo 0)"
+	echo "slot6_modem=$(slot_metric 6 "$GROUP_MODEM")"
+	echo "gw6_modem=$(group_gateway 6 "$GROUP_MODEM")"
+	echo "addr6_modem=$(group_family_has_address "$GROUP_MODEM" 6 && echo 1 || echo 0)"
+	echo "req6_modem=$(group_family_required "$GROUP_MODEM" 6 && echo 1 || echo 0)"
+	echo "group_ready_wan=$(group_complete "$GROUP_WAN" && echo 1 || echo 0)"
+	echo "group_ready_modem=$(group_complete "$GROUP_MODEM" && echo 1 || echo 0)"
+	echo "group_online_wan=$(group_complete_online "$GROUP_WAN" && echo 1 || echo 0)"
+	echo "group_online_modem=$(group_complete_online "$GROUP_MODEM" && echo 1 || echo 0)"
+
 	echo "daed_exit_state=none"
-	echo "watcher=$watcher"
+	if pgrep -f 'h5000m-netmode watch' >/dev/null 2>&1; then
+		echo "watcher=on"
+	else
+		echo "watcher=off"
+	fi
 	echo "watch_interval=$(watch_interval)"
 	if health_check_enabled; then
 		echo "health_check=1"
@@ -1040,6 +2968,51 @@ print_status() {
 	fi
 	echo "wan_health=$(cached_health wan)"
 	echo "modem_health=$(cached_health modem)"
+	echo "wan6_health=$(cached_verdict wan 6)"
+	echo "modem6_health=$(cached_verdict modem 6)"
+	echo "probe_ts=${PROBE_TS:-0}"
+	echo "probe_ok_threshold=$(probe_ok_threshold)/$(probe_attempts)"
+	echo "wan_fail_streak=$PROBE_FAIL_WAN"
+	echo "modem_fail_streak=$PROBE_FAIL_MODEM"
+	echo "wan6_fail_streak=$PROBE_FAIL_WAN6"
+	echo "modem6_fail_streak=$PROBE_FAIL_MODEM6"
+
+	if [ "$(cfg_bool dns_check 0)" = "1" ]; then
+		echo "dns_check=1"
+	else
+		echo "dns_check=0"
+	fi
+	dns_state="$(cached_field dns)"
+	[ -n "$dns_state" ] || dns_state="unknown"
+	echo "dns_ok=$dns_state"
+	echo "dns_servers_active=$(dns_servers_of "$active")"
+
+	# State machine: the UI reads these to show progress while a switch runs.
+	sw_state="$(switch_state)"
+	sw_pid="$(state_get pid)"
+	started="$(number_or "$(state_get started)" 0)"
+	now="$(date +%s 2>/dev/null || echo 0)"
+	[ "$started" -gt 0 ] || started=0
+	echo "switch_state=$sw_state"
+	echo "switch_kind=$(state_get kind)"
+	echo "switch_target=$(state_get target)"
+	echo "switch_target_mode=$(state_get target_mode)"
+	echo "switch_result=$(state_get result)"
+	echo "switch_reason=$(state_get reason)"
+	echo "switch_message=$(state_get message)"
+	echo "switch_elapsed=$(state_get elapsed)"
+	echo "switch_phases=$(state_get phases)"
+	echo "switch_started=$started"
+	echo "switch_age=$(( now - started ))"
+	echo "switch_gen=$(number_or "$(state_get gen)" 0)"
+	echo "requested_mode=$(state_get requested_mode)"
+	if switch_in_progress; then
+		echo "switch_busy=1"
+	else
+		echo "switch_busy=0"
+	fi
+	echo "last_align_reason=$(state_get last_align_reason)"
+	echo "last_align_target=$(state_get last_align_target)"
 
 	read_wireless_state
 	echo "wifi_total=$WIFI_TOTAL"
@@ -1058,81 +3031,194 @@ print_status() {
 	echo "usb_defaultroute=$(uci_get "network.${MODEM_PRIMARY}.defaultroute")"
 	echo "usbv6_defaultroute=$(uci_get "network.${MODEM6_PRIMARY}.defaultroute")"
 	echo "usbv6_auto=$(uci_get "network.${MODEM6_PRIMARY}.auto")"
+	modem_metric="$(uci_get network.MT5700M.metric)"
+	[ -n "$modem_metric" ] || modem_metric="$(uci_get "network.${MODEM_PRIMARY}.metric")"
+	[ -n "$modem_metric" ] || modem_metric="$(uci_get mt5700m.connection.metric)"
 	echo "modem_metric=$modem_metric"
+
+	echo "switch_wait_ipv4=$(switch_wait_ipv4)"
+	echo "switch_wait_ipv6=$(switch_wait_ipv6)"
+	echo "switch_budget=$(switch_budget)"
+	echo "switch_settle=$(switch_settle)"
+	echo "switch_cooldown=$(switch_cooldown)"
+	echo "hotplug_debounce=$(hotplug_debounce)"
+	echo "align_confirm=$(align_confirm)"
+	echo "gw_required=$(cfg_bool gw_required 0)"
 }
 
 # ---------------------------------------------------------------------------
-# locking
+# switch entry points
 # ---------------------------------------------------------------------------
 
-acquire_lock() {
-	local wait_s owner waited=0
+spawn_worker() { # <mode> <gen>
+	if command -v setsid >/dev/null 2>&1; then
+		setsid "$WORKER" switch-worker "$1" "$2" >/dev/null 2>&1 </dev/null &
+	else
+		"$WORKER" switch-worker "$1" "$2" >/dev/null 2>&1 </dev/null &
+	fi
+	return 0
+}
 
-	wait_s="$(number_or "${1:-0}" 0)"
+# The async contract: the LuCI call returns as soon as the task exists, because
+# the connection serving that call rides over the exit being switched.  LuCI then
+# polls `status` and reads switch_state / switch_message.
+cmd_set() { # <mode> [--wait]
+	local target_mode="$1" wait_flag="${2:-}" gen target
 
-	while :; do
-		if mkdir "$LOCK_DIR" 2>/dev/null; then
-			echo "$$" > "$LOCK_DIR/pid"
-			return 0
-		fi
+	case "$target_mode" in
+		wan_first|modem_first|wan_only|modem_only) ;;
+		*) echo "invalid exit policy" >&2; return 64 ;;
+	esac
 
-		owner="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-		case "$owner" in
-			''|*[!0-9]*) owner="" ;;
-		esac
-		if [ -z "$owner" ] || ! kill -0 "$owner" 2>/dev/null; then
-			rm -rf "$LOCK_DIR" 2>/dev/null
+	target="$(mode_primary_group "$target_mode")"
+	gen=$(( $(number_or "$(state_get gen)" 0) + 1 ))
+	state_write "gen=$gen" "requested_mode=$target_mode" \
+		"requested_ts=$(date +%s 2>/dev/null || echo 0)" "requested_by=luci"
+
+	if switch_in_progress; then
+		# A worker is already switching; it re-reads requested_mode before it
+		# exits, so this request is not lost - it is queued behind the running one.
+		log_note "switch request queued: $(switch_state) is already running"
+		echo "state=busy"
+		echo "gen=$gen"
+		echo "target=$target"
+		echo "mode=$target_mode"
+		return 3
+	fi
+
+	echo "state=started"
+	echo "gen=$gen"
+	echo "target=$target"
+	echo "mode=$target_mode"
+
+	if [ "$wait_flag" = "--wait" ] || [ "$H5000M_FOREGROUND" = "1" ]; then
+		cmd_switch_worker "$target_mode" "$gen"
+		return $?
+	fi
+	spawn_worker "$target_mode" "$gen"
+	return 0
+}
+
+cmd_switch_worker() { # <mode> <gen>
+	local applied="$1" my_gen="$2" runs=0 pending pending_gen applied_mode rc=0
+
+	if ! acquire_lock 2; then
+		log_note "switch worker skipped: another writer holds the lock"
+		return 2
+	fi
+	trap release_lock EXIT INT TERM
+
+	while [ "$runs" -lt 3 ]; do
+		runs=$((runs + 1))
+		if switch_run "$applied" "switch"; then rc=0; else rc=1; fi
+		pending="$(state_get requested_mode)"
+		applied_mode="$(state_get applied_mode)"
+		pending_gen="$(number_or "$(state_get gen)" 0)"
+		# A newer click arrived while this run was in flight: execute it too, so
+		# the final state is the user's last request rather than the first.  The
+		# comparison is against applied_mode (not the local variable), so a request
+		# that arrived during the commit is never mistaken for "already applied".
+		if [ "$pending_gen" -gt "$my_gen" ] && [ -n "$pending" ] && [ "$pending" != "$applied_mode" ]; then
+			log_note "a newer request ($pending) arrived while switching; applying it now"
+			my_gen="$pending_gen"
+			applied="$pending"
 			continue
 		fi
-
-		[ "$waited" -lt "$wait_s" ] || return 1
-		sleep 1
-		waited=$((waited + 1))
+		break
 	done
+
+	# Re-arm the warm standby route and the audit field after the switch.
+	invalidate_state
+	reconcile_body >/dev/null 2>&1 || true
+	release_lock
+	trap - EXIT INT TERM
+	return "$rc"
 }
 
-release_lock() {
-	rm -rf "$LOCK_DIR" 2>/dev/null
+# `align` is the UI's 一键对齐双栈出口: a forced reconcile that bypasses the
+# cooldown, because a split is a fault and not a preference change.
+cmd_align() { # [--wait]
+	local gen
+	gen=$(( $(number_or "$(state_get gen)" 0) + 1 ))
+	state_write "gen=$gen" "requested_ts=$(date +%s 2>/dev/null || echo 0)" "requested_by=align"
+
+	if switch_in_progress; then
+		echo "state=busy"
+		return 3
+	fi
+	echo "state=started"
+	echo "gen=$gen"
+
+	if [ "${1:-}" = "--wait" ] || [ "$H5000M_FOREGROUND" = "1" ]; then
+		H5000M_FORCE_ALIGN=1
+		cmd_align_worker
+		return $?
+	fi
+	if command -v setsid >/dev/null 2>&1; then
+		H5000M_FORCE_ALIGN=1 setsid "$WORKER" align-worker >/dev/null 2>&1 </dev/null &
+	else
+		H5000M_FORCE_ALIGN=1 "$WORKER" align-worker >/dev/null 2>&1 </dev/null &
+	fi
+	return 0
 }
 
-# ---------------------------------------------------------------------------
-# watch (procd-managed watchdog)
-# ---------------------------------------------------------------------------
-
-watch_interval() {
-	local interval
-	interval="$(number_or "$(uci_get h5000m_netmode.settings.watch_interval)" 10)"
-	[ "$interval" -ge 3 ] || interval=3
-	[ "$interval" -le 3600 ] || interval=3600
-	printf '%s\n' "$interval"
-}
-
-run_watch() {
-	local interval
-	interval="$(watch_interval)"
-	log_note "watcher started, interval=${interval}s"
-
-	# Bring the invariant in line immediately, then re-check on a fixed cadence.
-	# A hotplug event that arrives while another run holds the lock is queued
-	# rather than dropped, but a genuinely lost event is still recovered within
-	# one interval.
-	"$SELF" reconcile >/dev/null 2>&1 || true
-
-	while :; do
-		sleep "$interval"
-		"$SELF" reconcile >/dev/null 2>&1 || true
-	done
+cmd_align_worker() {
+	H5000M_FORCE_ALIGN=1
+	if ! acquire_lock 2; then
+		log_note "align worker skipped: another writer holds the lock"
+		return 2
+	fi
+	trap release_lock EXIT INT TERM
+	run_reconcile || true
+	release_lock
+	trap - EXIT INT TERM
+	return 0
 }
 
 # ---------------------------------------------------------------------------
 # dispatch
 # ---------------------------------------------------------------------------
 
+usage() {
+	cat >&2 <<'USAGE'
+Usage: h5000m-netmode <command> [args]
+
+  status                     print the current state (read-only, no locking)
+  apply                      converge the live state on the configured plan
+  set <mode> [--wait]        switch the exit group; returns immediately unless
+                             --wait is given (mode: wan_first|modem_first|
+                             wan_only|modem_only)
+  align [--wait]             repair an IPv4/IPv6 split (one-click align)
+  switch-worker <mode> <n>   internal: the detached switch worker
+  align-worker               internal: the detached align worker
+  notify <section> [action]  internal: hotplug event (coalesced, debounced)
+  reconcile                  serialised re-evaluation (hotplug + watchdog)
+  watch                      procd watchdog loop
+  iface-role <section>       classify a network section (wan|modem|other)
+  health                     run the bounded health probes now
+  list-devices               physical netdevs for the mapping picker
+  get-device-map             current manual mapping
+  set-device-map <role> <dev>
+  eth-candidates             sections that could be the wired fallback
+  eth-fallback get|set <sections>
+USAGE
+}
+
 normalize_mode
 action="${1:-}"
 LOCK_WAIT=0
+FOREGROUND_ACTION=0
 
 case "$action" in
+	now-cs)
+		# Internal: print the centisecond clock.  It exists because the clock
+		# parse is a place where an arithmetic edge case silently disabled the
+		# switch budget, and a unit test is the only way to keep it from coming
+		# back.
+		LOGGING=0
+		now_cs
+		exit 0
+		;;
 	status)
 		LOGGING=0
 		print_status
@@ -1196,15 +3282,37 @@ case "$action" in
 		refresh_health
 		echo "wan=$(cached_health wan)"
 		echo "modem=$(cached_health modem)"
+		echo "wan6=$(cached_verdict wan 6)"
+		echo "modem6=$(cached_verdict modem 6)"
 		echo "wan_devices=$WAN_DEVICES"
 		echo "modem_devices=$MODEM_DEVICES"
 		exit 0
 		;;
-	set)
-		case "${2:-}" in
-			wan_first|modem_first|wan_only|modem_only) mode="$2" ;;
-			*) echo "invalid exit policy" >&2; exit 64 ;;
-		esac
+	set|switch)
+		[ $# -ge 2 ] || { usage; exit 64; }
+		cmd_set "$2" "${3:-}"
+		exit $?
+		;;
+	align)
+		cmd_align "${2:-}"
+		exit $?
+		;;
+	switch-worker)
+		[ $# -ge 2 ] || exit 64
+		cmd_switch_worker "$2" "${3:-0}"
+		exit $?
+		;;
+	align-worker)
+		cmd_align_worker
+		exit $?
+		;;
+	notify)
+		hotplug_notify "${2:-unknown}" "${3:-event}"
+		exit 0
+		;;
+	watch)
+		run_watch
+		exit 0
 		;;
 	set-device-map)
 		case "${2:-}" in
@@ -1216,23 +3324,18 @@ case "$action" in
 		esac
 		[ -n "${3:-}" ] || { echo "Usage: $0 set-device-map {wan|modem} <device>" >&2; exit 64; }
 		;;
-	watch)
-		run_watch
-		exit 0
-		;;
 	reconcile)
-		LOCK_WAIT="$(number_or "${H5000M_LOCK_WAIT:-}" "$DEFAULT_RECONCILE_WAIT")"
+		LOCK_WAIT="$(number_or "$(uci_get h5000m_netmode.settings.reconcile_wait)" "$DEFAULT_RECONCILE_WAIT")"
 		;;
-	apply|'') ;;
+	apply|'')
+		;;
 	*)
-		echo "Usage: $0 {status|apply|reconcile|watch|set MODE|iface-role SECTION|health|list-devices|get-device-map|set-device-map|eth-candidates|eth-fallback}" >&2
+		usage
 		exit 64
 		;;
 esac
 
-# Every mutating action is serialised.  `set-device-map` used to run outside the
-# lock, and UCI rewrites the whole config file on every `uci set`, so a mapping
-# saved while a mode change was in flight could be silently overwritten.
+# Every mutating action is serialised.
 if ! acquire_lock "$LOCK_WAIT"; then
 	echo "another exit policy update is already running" >&2
 	exit 2
@@ -1244,6 +3347,7 @@ case "$action" in
 		shift 2
 		uci -q set "h5000m_netmode.settings.eth_fallback=$*" || exit 1
 		uci -q commit h5000m_netmode || exit 1
+		uci_gen_bump
 		log_note "eth_fallback=$*"
 		exit 0
 		;;
@@ -1252,10 +3356,15 @@ case "$action" in
 		netdev_exists "$dev" || log_note "warning: $dev is not present in /sys/class/net"
 		uci -q set "h5000m_netmode.settings.${2}_device=${dev}" || exit 1
 		uci -q commit h5000m_netmode || exit 1
+		uci_gen_bump
 		log_note "manual device map ${2}=${dev}"
 		exit 0
 		;;
 	reconcile)
+		if switch_in_progress; then
+			log_note "reconcile skipped: $(switch_state) in progress"
+			exit 0
+		fi
 		if ! run_reconcile; then
 			log_note "failed to reconcile the exit state"
 			exit 1
@@ -1264,38 +3373,16 @@ case "$action" in
 		;;
 esac
 
-if ! apply_policy; then
+# apply / no-argument: converge the persisted plan onto the live state.  This is
+# what the first-install script calls, and it is deliberately the *slow* path:
+# no switch decision is taken, the reconciler only repairs divergences.
+if ! apply_policy "$mode"; then
 	log_note "failed to persist exit policy mode=$mode"
 	echo "failed to persist exit policy" >&2
 	exit 1
 fi
-
-if [ "$action" = "apply" ] || [ "$action" = "set" ]; then
-	if ! /etc/init.d/network reload >/dev/null 2>&1; then
-		log_note "network reload failed after applying mode=$mode"
-		echo "network reload failed" >&2
-		exit 1
-	fi
-	# Reconcile the dedicated manager after netifd recreates the interfaces.
-	if [ -x /usr/sbin/mt5700m-manager ] && ! /usr/sbin/mt5700m-manager sync >/dev/null 2>&1; then
-		log_note "MT5700M manager sync failed after applying mode=$mode"
-		echo "MT5700M manager sync failed" >&2
-		exit 1
-	fi
-	# Give netifd a moment to install the fresh routes before deciding which
-	# family is live; the alignment result is verified inside run_reconcile.
-	sleep 1
-fi
-
+state_init
 if ! reconcile_body; then
-	log_note "failed to align the IPv6 exit with the live IPv4 exit"
+	log_note "failed to converge the exit state"
 fi
-if health_check_enabled; then
-	refresh_health
-fi
-
-if [ "$action" = "apply" ] || [ "$action" = "set" ]; then
-	log_note "applied exit policy mode=$mode"
-fi
-
 exit 0

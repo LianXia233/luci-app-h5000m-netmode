@@ -39,16 +39,16 @@ case "$cmd" in
 		exit 0
 		;;
 	show)
+		# Same shape as the real thing: `config.section.option='value'`, quotes and
+		# every key included.  The backend reads its whole configuration through
+		# this dump (one `uci show` replaces a hundred `uci get` forks on a router
+		# CPU), so the quoting has to be reproduced faithfully.
 		cfg="${1:-}"
 		[ -d "$scen/uci" ] || exit 0
 		for f in "$scen/uci/$cfg".*; do
 			[ -f "$f" ] || continue
 			name="${f##*/}"
-			rest="${name#"$cfg".}"
-			case "$rest" in
-				*.*) continue ;;
-			esac
-			printf '%s=%s\n' "$name" "$(read_first_line "$f")"
+			printf "%s='%s'\n" "$name" "$(read_first_line "$f")"
 		done
 		exit 0
 		;;

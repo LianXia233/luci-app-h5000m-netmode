@@ -263,6 +263,30 @@ return view.extend({
 			/* 状态停止动效：故障或离线时让动效平稳归于静止 */
 			'.h5net .is-idle svg *,.h5net .tone-down svg *,.h5net .tone-off svg *{animation:none!important}',
 
+			/* ================= 切换进度 (后台任务) ================= */
+			'.h5net-switch{',
+				'margin-top:12px;padding:14px 18px;border-radius:14px;',
+				'background:var(--h5-card-bg);border:1px solid var(--h5-card-border);',
+				'box-shadow:var(--h5-card-shadow);',
+				'}',
+			'.h5net-switch.busy{border-color:var(--h5-blue)}',
+			'.h5net-switch.failed{border-color:var(--h5-red)}',
+			'.h5net-switch-head{display:flex;align-items:center;gap:9px;font-size:13.5px;font-weight:700;color:var(--h5-text-main)}',
+			'.h5net-switch-head .spin{width:13px;height:13px;border-radius:50%;border:2px solid var(--h5-blue);border-top-color:transparent;animation:h5-ring .8s linear infinite}',
+			'.h5net-switch-head .dot-ok{width:9px;height:9px;border-radius:50%;background:var(--h5-green)}',
+			'.h5net-switch-head .dot-fail{width:9px;height:9px;border-radius:50%;background:var(--h5-red)}',
+			'.h5net-switch-meta{margin-top:6px;color:var(--h5-text-sub);font-size:12px;line-height:1.7;word-break:break-all}',
+			'.h5net-switch-meta code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px}',
+			'.h5net-switch-steps{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}',
+			'.h5net-switch-step{',
+				'padding:3px 9px;border-radius:999px;font-size:11.5px;font-weight:600;',
+				'background:rgba(148,163,184,0.14);color:var(--h5-text-muted);',
+				'}',
+			'.h5net-switch-step.done{background:var(--h5-green-soft);color:#047857}',
+			'.h5net-switch-step.active{background:var(--h5-blue);color:#fff;animation:h5-pulse 1.4s ease-in-out infinite}',
+			'.h5net-switch-step.failed{background:var(--h5-red-soft);color:var(--h5-red)}',
+			'.h5net-switch-actions{margin-top:10px;display:flex;justify-content:flex-end}',
+
 			/* ================= 响应式排版 ================= */
 			'@media(max-width:960px){',
 				'.h5net-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}',
@@ -735,7 +759,7 @@ return view.extend({
 
 	selectRoute: function(kind, ev) {
 		if (ev) ev.preventDefault();
-		if (this.applying) return;
+		if (this.applying || this.switchRunning()) return;
 
 		var next = kind === 'modem' ? 'modem_first' : 'wan_first';
 		if (this.pendingMode === next && !this.selecting) return;
@@ -747,7 +771,7 @@ return view.extend({
 
 	selectOnly: function(kind, ev) {
 		if (ev) { ev.preventDefault(); ev.stopPropagation(); }
-		if (this.applying) return;
+		if (this.applying || this.switchRunning()) return;
 
 		var next = kind === 'modem' ? 'modem_only' : 'wan_only';
 		if (this.pendingMode === next) return;
@@ -764,7 +788,7 @@ return view.extend({
 	onDeviceChange: function(role, ev) {
 		if (ev) ev.stopPropagation();
 		var dev = ev.target.value;
-		if (!dev || this.applying) return;
+		if (!dev || this.applying || this.switchRunning()) return;
 
 		var otherRole = role === 'wan' ? 'modem' : 'wan';
 		if (this.pendingDeviceMap[otherRole] === dev)
@@ -812,7 +836,8 @@ return view.extend({
 		var active4 = data.active4 === kind;
 		var active6 = data.active6 === kind;
 		var state = this.connectionState(data, kind);
-		var cls = 'h5net-card ' + (modem ? 'modem' : 'wan') + (selected ? ' selected' : ' unselected') + ((active4 || active6) ? ' active' : '');
+		var cls = 'h5net-card ' + (modem ? 'modem' : 'wan') + (selected ? ' selected' : ' unselected') + ((active4 || active6) ? ' active' : '')
+			+ (this.switchBusy(this.liveData) ? ' switching' : '');
 
 		var iconBox = E('div', { 'class': 'h5net-icon ' + this.iconTone(state) });
 		iconBox.innerHTML = this.iconSvg(kind);
@@ -905,8 +930,228 @@ return view.extend({
 		]);
 	},
 
+	// ------------------------------------------------------------------
+	// 切换任务 (后台作业)
+	//
+	// 后端把切换做成一个后台任务：`set` 立刻返回，工作进程在后台推进状态机，中途
+	// 任何一步都不阻塞 LuCI 的 HTTP/ubus 调用。因此这里从不等待网络操作本身，只
+	// 轮询只读的 `status`，并把状态机当前阶段显示出来。
+	// ------------------------------------------------------------------
+	switchState: function(data) {
+		return (data || {}).switch_state || '';
+	},
+
+	switchBusy: function(data) {
+		return ((data || {}).switch_busy || '0') === '1';
+	},
+
+	switchRunning: function() {
+		return this.switchBusy(this.liveData);
+	},
+
+	// `set` 在已有任务运行时会以 rc=3 返回（请求已排队），两者都不是错误。
+	execStatus: function(args) {
+		return fs.exec('/usr/sbin/h5000m-netmode', args).then(function(res) {
+			return { code: (res && res.code) || 0, stdout: (res && res.stdout) || '' };
+		}, function(err) {
+			return {
+				code: (err && err.code) || 1,
+				stdout: (err && (err.stdout || '')) || ''
+			};
+		});
+	},
+
+	phaseList: function(data) {
+		var out = [];
+		String((data || {}).switch_phases || '').trim().split(/\s+/).forEach(function(part) {
+			if (!part) return;
+			var pos = part.indexOf(':');
+			if (pos > 0)
+				out.push({ name: part.substring(0, pos), time: part.substring(pos + 1) });
+		});
+		return out;
+	},
+
+	phaseLabel: function(name) {
+		var map = {
+			PREPARING_TARGET: _('准备目标出口'),
+			WAIT_IPV4: _('等待 IPv4 就绪'),
+			WAIT_IPV6: _('等待 IPv6 就绪'),
+			VERIFY_IPV4: _('验证 IPv4 连通性'),
+			VERIFY_IPV6: _('验证 IPv6 连通性'),
+			SWITCHING: _('切换默认路由'),
+			VERIFY_TARGET: _('复核新出口'),
+			COMMITTED: _('切换完成'),
+			ROLLBACK: _('回滚'),
+			FAILED: _('切换失败'),
+			IDLE: _('空闲')
+		};
+		return map[name] || name;
+	},
+
+	// 步骤条与后端状态机同序：执行到哪一步，就点亮到哪一步。
+	switchSteps: function(data) {
+		var order = [ 'PREPARING_TARGET', 'WAIT_IPV4', 'WAIT_IPV6', 'VERIFY_IPV4',
+			'VERIFY_IPV6', 'SWITCHING', 'VERIFY_TARGET' ];
+		var state = this.switchState(data);
+		var seen = {};
+		this.phaseList(data).forEach(function(phase) { seen[phase.name] = phase.time; });
+		return order.map(function(name) {
+			var cls = 'h5net-switch-step';
+			if (seen[name])
+				cls += ' done';
+			if (name === state)
+				cls += state === 'FAILED' ? ' failed' : ' active';
+			return { name: name, cls: cls, time: seen[name] || '' };
+		});
+	},
+
+	switchPanel: function(data) {
+		var busy = this.switchBusy(data);
+		var state = this.switchState(data);
+		if (!busy && state !== 'FAILED')
+			return null;
+		if (this.switchDismissed === state && !busy)
+			return null;
+
+		var target = (data.switch_target && data.switch_target !== 'none')
+			? this.exitLabel(data.switch_target) : '';
+		var meta = [];
+		if (target)
+			meta.push(E('span', {}, [ _('目标出口：'), E('b', {}, target) ]));
+		if (data.switch_message)
+			meta.push(E('span', {}, [ _('状态：'), E('b', {}, data.switch_message) ]));
+		if (data.switch_elapsed)
+			meta.push(E('span', {}, [ _('耗时：'), E('b', {}, data.switch_elapsed) ]));
+		if (!busy) {
+			meta.push(E('span', {}, [ _('失败原因：'), E('b', {}, this.switchReason(data)) ]));
+			meta.push(E('span', {}, [ _('当前出口：'), E('b', {}, this.exitLabel(data.active4) + ' / ' + this.exitLabel(data.active6)) ]));
+		}
+
+		var steps = this.switchSteps(data).map(function(step) {
+			return E('span', { 'class': step.cls, 'title': step.time ? step.name + ' ' + step.time : step.name },
+				this.phaseLabel(step.name) + (step.time ? ' ' + step.time : ''));
+		}, this);
+
+		var children = [
+			E('div', { 'class': 'h5net-switch-head' }, [
+				E('span', { 'class': busy ? 'spin' : (state === 'FAILED' ? 'dot-fail' : 'dot-ok') }),
+				busy ? _('正在切换出口，页面保持可用…')
+					: (state === 'FAILED' ? _('上次切换未完成，已恢复到原出口') : _('出口切换完成'))
+			]),
+			E('div', { 'class': 'h5net-switch-meta' }, meta),
+			E('div', { 'class': 'h5net-switch-steps' }, steps)
+		];
+		if (!busy) {
+			children.push(E('div', { 'class': 'h5net-switch-actions' }, [
+				E('button', {
+					'class': 'cbi-button cbi-button-neutral',
+					'click': L.bind(function(ev) {
+						ev.preventDefault();
+						this.switchDismissed = state;
+						this.repaint();
+					}, this)
+				}, _('知道了'))
+			]));
+		}
+		return E('div', { 'class': 'h5net-switch ' + (busy ? 'busy' : 'failed') }, children);
+	},
+
+	// 后端的状态机原因码 -> 中文说明（未知原因原样显示）
+	switchReason: function(data) {
+		var map = {
+			ipv4_not_ready: _('目标出口的 IPv4 未在限时内就绪'),
+			ipv6_not_ready: _('目标出口的 IPv6 未在限时内就绪'),
+			ipv4_not_configured: _('目标出口没有 IPv4 接口'),
+			ipv6_not_configured: _('目标出口没有 IPv6 接口（双栈出口要求，拒绝切换）'),
+			ipv4_unreachable: _('目标出口的 IPv4 探测不通'),
+			ipv6_unreachable: _('目标出口的 IPv6 探测不通'),
+			ipv4_gateway_unreachable: _('目标出口的 IPv4 网关不可达'),
+			ipv4_commit_failed: _('IPv4 默认路由切换失败'),
+			ipv6_commit_failed: _('IPv6 默认路由切换失败'),
+			priority_verify_failed: _('切换后出口优先级校验失败'),
+			priority_verify_failed_after_settle: _('静置后出口优先级校验失败'),
+			target_unreachable_after_settle: _('静置后目标出口不可达'),
+			policy_write_failed: _('策略写入失败'),
+			prepare_failed: _('目标出口准备失败')
+		};
+		var reason = data.switch_reason || '';
+		if (!reason)
+			return _('未记录');
+		return map[reason] || reason;
+	},
+
+	// 轮询直到后台任务结束。总时长有上限，到期后不阻塞页面，只在通知里说明仍在
+	// 后台执行 —— 切换的正确性由后端的状态机与回滚保证，与页面是否停留无关。
+	waitForSwitch: function(maxSeconds) {
+		var deadline = Date.now() + (maxSeconds || 90) * 1000;
+
+		return new Promise(L.bind(function(resolve) {
+			var tick = L.bind(function() {
+				this.statusCommand().then(L.bind(function(res) {
+					this.liveData = this.parseStatus(res);
+					this.switchFastPoll = this.switchBusy(this.liveData);
+					this.repaint();
+
+					var state = this.switchState(this.liveData);
+					var done = !this.switchBusy(this.liveData) &&
+						(state === 'COMMITTED' || state === 'FAILED' || state === 'IDLE' || state === '');
+					if (done) {
+						this.applying = false;
+						this.syncPollInterval();
+						this.repaint();
+						this.notifySwitchOutcome(this.liveData);
+						resolve(this.liveData);
+						return;
+					}
+					if (Date.now() >= deadline) {
+						// 后台仍在执行：把控制权还给页面，任务由后端继续完成。
+						this.applying = false;
+						this.syncPollInterval();
+						ui.addNotification(null, E('p',
+							_('切换任务仍在后台执行，页面将继续自动刷新结果。')), 'info');
+						resolve(this.liveData);
+						return;
+					}
+					window.setTimeout(tick, 1000);
+				}, this));
+			}, this);
+			window.setTimeout(tick, 300);
+		}, this));
+	},
+
+	notifySwitchOutcome: function(data) {
+		var state = this.switchState(data);
+		if (state === 'FAILED') {
+			ui.addNotification(null, E('p',
+				_('切换失败：') + this.switchReason(data) + _('，已保持/恢复到可用出口。')), 'danger');
+			return;
+		}
+		if (state === 'COMMITTED') {
+			ui.addNotification(null, E('p',
+				_('切换完成：IPv4 与 IPv6 均已经由 %s 出口。').format(this.exitLabel(data.active4 || data.active6))));
+		}
+	},
+
+	// 切换进行中把轮询间隔收紧到 1 秒（阶段变化要立刻可见），结束后回到 5 秒。
+	syncPollInterval: function() {
+		var want = this.switchRunning() ? 1 : 5;
+		if (want === this.pollInterval)
+			return;
+		try {
+			if (this.pollHandle != null && typeof poll.remove === 'function')
+				poll.remove(this.pollHandle);
+			this.pollHandle = poll.add(L.bind(this.refreshStatus, this), want);
+			this.pollInterval = want;
+		}
+		catch (e) {
+			// 老版本 LuCI 不支持 poll.remove：保持原有间隔即可，状态依旧会刷新。
+			this.pollInterval = this.pollInterval || 5;
+		}
+	},
+
 	applySelection: function() {
-		if (this.applying) return;
+		if (this.applying || this.switchRunning()) return;
 
 		var curWanDev = (this.deviceMap || {}).wan || '';
 		var curModemDev = (this.deviceMap || {}).modem || '';
@@ -917,15 +1162,17 @@ return view.extend({
 
 		if (!modeChanged && !deviceChanged) return;
 
+		// 接口绑定是两次 UCI 写入，会立即返回；出口策略 `set` 只负责创建后台
+		// 任务后立刻返回，真正的切换在后台进行。所以这里先写接口映射，再发起切换
+		// 并轮询进度 —— 全程不阻塞页面，也不允许重复点击启动第二个切换。
 		var steps = [];
 		if (curWanDev !== newWanDev && newWanDev)
 			steps.push({ label: _('有线 WAN 接口'), args: [ 'set-device-map', 'wan', newWanDev ] });
 		if (curModemDev !== newModemDev && newModemDev)
 			steps.push({ label: _('5G 模组接口'), args: [ 'set-device-map', 'modem', newModemDev ] });
-		if (modeChanged)
-			steps.push({ label: _('出口策略'), args: [ 'set', this.pendingMode ] });
 
 		this.applying = true;
+		this.switchDismissed = null;
 		this.repaint();
 
 		var chain = Promise.resolve();
@@ -938,14 +1185,24 @@ return view.extend({
 		});
 
 		return chain.then(L.bind(function() {
-			ui.addNotification(null, E('p', _('设置已下发生效，正在重新收敛路由拓扑…')));
 			this.selecting = false;
 			this.deviceDirty = false;
-			return new Promise(L.bind(function(resolve) {
-				window.setTimeout(L.bind(function() {
+			if (!modeChanged) {
+				ui.addNotification(null, E('p', _('接口映射已保存。')));
+				return this.refreshStatus().then(L.bind(function() {
 					this.applying = false;
-					this.refreshStatus().then(resolve);
-				}, this), 2000);
+					this.repaint();
+				}, this));
+			}
+
+			return this.execStatus([ 'set', this.pendingMode ]).then(L.bind(function(res) {
+				if (res.code !== 0 && res.code !== 3)
+					throw new Error(_('出口策略下发失败') + ' (rc=' + res.code + ')');
+				if (res.code === 3)
+					ui.addNotification(null, E('p', _('已有切换任务在执行，本次请求已排队，稍后自动执行。')), 'info');
+				else
+					ui.addNotification(null, E('p', _('切换任务已启动，正在后台切换出口…')));
+				return this.waitForSwitch(90);
 			}, this));
 		}, this)).catch(L.bind(function(err) {
 			this.applying = false;
@@ -955,7 +1212,7 @@ return view.extend({
 	},
 
 	reconcileExits: function() {
-		if (this.applying) return;
+		if (this.applying || this.switchRunning()) return;
 
 		this.applying = true;
 		this.repaint();
@@ -978,6 +1235,7 @@ return view.extend({
 		data.active6 = data.active6 || 'none';
 
 		var split = data.split === '1';
+		var busy = this.switchBusy(data);
 		var message = this.statusMessage(data);
 
 		var curWanDev = (this.deviceMap || {}).wan || '';
@@ -992,20 +1250,26 @@ return view.extend({
 		if (split) {
 			buttons.push(E('button', {
 				'class': 'cbi-button cbi-button-action',
-				'disabled': this.applying ? 'disabled' : null,
+				'disabled': (this.applying || busy) ? 'disabled' : null,
 				'click': L.bind(this.reconcileExits, this)
 			}, _('⚡ 一键对齐双栈出口')));
 		}
 		buttons.push(E('button', {
 			'class': 'cbi-button cbi-button-apply',
-			'disabled': (!dirty || this.applying) ? 'disabled' : null,
+			'disabled': (!dirty || this.applying || busy) ? 'disabled' : null,
 			'click': L.bind(this.applySelection, this)
-		}, this.applying ? _('策略部署中…') : _('保存并应用策略')));
+		}, busy ? _('切换执行中…') : (this.applying ? _('策略部署中…') : _('保存并应用策略'))));
 
-		return E('div', { 'class': 'h5net', id: 'h5net-status' }, [
+		// 切换进度卡片只在任务进行中或上次失败时出现。null 子节点在 LuCI 的 E() 里
+		// 会被忽略，但显式过滤掉更清楚，也让离线的渲染检查工具不必特判。
+		var sections = [
 			this.styleNode(),
 			this.exitCard(data),
 			E('div', { 'class': message.cls }, message.text),
+			this.switchPanel(data)
+		].filter(function(node) { return node != null; });
+
+		return E('div', { 'class': 'h5net', id: 'h5net-status' }, sections.concat([
 			this.statusTiles(data),
 			E('div', { 'class': 'h5net-grid' }, [
 				this.routeCard('wan', data),
@@ -1015,7 +1279,7 @@ return view.extend({
 				this.metaBar(data),
 				E('div', { 'class': 'h5net-buttons' }, buttons)
 			])
-		]);
+		]));
 	},
 
 	renderKey: function(data) {
@@ -1029,6 +1293,9 @@ return view.extend({
 			data.modem_present, data.modem_available, data.modem_pending, data.modem_carrier,
 			data.modem_up, data.modem6_up, data.modem4_ready, data.modem6_ready, data.modem_device,
 			data.wifi_total, data.wifi_up, data.wifi_ssid, data.wifi_clients,
+			data.switch_state, data.switch_busy, data.switch_target, data.switch_target_mode,
+			data.switch_reason, data.switch_message, data.switch_elapsed, data.switch_phases,
+			this.switchDismissed,
 			this.pendingMode,
 			(this.pendingDeviceMap || {}).wan,
 			(this.pendingDeviceMap || {}).modem,
@@ -1051,7 +1318,11 @@ return view.extend({
 
 	refreshStatus: function() {
 		return Promise.all([ this.statusCommand(), this.loadDeviceMap() ]).then(L.bind(function(results) {
+			var previous = (this.liveData || {}).switch_state;
 			this.liveData = this.parseStatus(results[0]);
+			if (previous !== this.liveData.switch_state)
+				this.switchDismissed = null;
+			this.syncPollInterval();
 			if (!this.applying) {
 				if (!this.selecting)
 					this.pendingMode = this.liveData.mode || 'wan_first';
@@ -1075,9 +1346,11 @@ return view.extend({
 		var dm = this.deviceMap || {};
 		this.pendingDeviceMap = { wan: dm.wan || '', modem: dm.modem || '' };
 
+		this.switchDismissed = null;
 		this.renderedKey = this.renderKey(this.liveData);
 
-		poll.add(L.bind(this.refreshStatus, this), 5);
+		this.pollInterval = 5;
+		this.pollHandle = poll.add(L.bind(this.refreshStatus, this), this.pollInterval);
 		return this.statusPanel(this.liveData);
 	}
 });
