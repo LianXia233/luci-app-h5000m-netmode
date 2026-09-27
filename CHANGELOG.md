@@ -2,6 +2,41 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.7.1] — 2026-09-28
+
+修复主备切换的**锁竞争、完成判定与前端锁定窗口**，并恢复 CI 全绿。
+
+### 修复
+
+- **用户点击的切换可能被静默丢弃**：切换 worker 此前只等 2 秒拿写锁，而切换自身会触发 ifup / hotplug，
+  hotplug 路径持有同一把写锁跑 reconcile，用户发起的切换于是被丢（`switch worker skipped: another
+  writer holds the lock`），请求 gen 已前进但 `applied_mode` 未变，前端据此误报「切换完成」。
+  现把等锁上限提到 10 秒；仍拿不到锁就写终态 `state=FAILED reason=lock_busy` 并刷新 started 时间戳，
+  请求「要么执行、要么明确失败」，不再静默消失。
+- **前端把 `set` 返回值当完成信号**：rpcd 的 `file.exec` 在延迟回复路径上存在竞态，同一条 `set` 可能
+  <1s 返回、也可能吃满 30s 超时，返回值不可作为完成信号，按钮因此被锁住约 19s，同时提前认为任务已
+  完成、卡片角色停留在旧模式。现在发出请求后最多等 1.5s 宽限，随后一律回设备读只读状态判定
+  （`switch_started` 前进或 mode 已等于目标才算完成，避免把上一个任务的终态误判为本次完成），
+  轮询收紧到 400ms，并新增 `lock_busy` 的中文提示。
+- **状态快照缓存缺 `switch_*` 字段族**：`h5000m-netmode-status` 的快照缓存未覆盖新状态机的
+  `switch_*` 字段，剥旧值后重放会把这些字段清空。现补齐字段族并为缓存标记代次（`gen:applied_mode`）。
+
+### 修复（构建 / CI）
+
+- **po 目录与源码脱节导致 CI 红**：新视图新增的 19 条 msgid（加载中、正在读取策略…、正在读取出口…等）
+  未同步进 `po/zh_Hans/h5000m-netmode.po`，且残留 1 条 stale（`对齐失败：`），`sync_po.py --check`
+  失败。重新生成目录（179 条）。
+- **后端在 dash 上整体不可用**：`section_status_json` 的 memo key 消毒由 `tr -c` 改写成
+  `${1//[^a-zA-Z0-9]/_}` 模式替换——这是 bashism：dash 在运行时报 `Bad substitution` 并以 rc=2 退出
+  （`sh -n` 看不到），导致 status / switch 全部路径在 CI（dash）上不可用，且要等 po 检查修好后才会
+  暴露。改回 POSIX 的 `tr` 写法，dash 与 BusyBox ash 均兼容。
+
+### 测试
+
+- `tests/run_tests.sh` 410 条断言全绿（含「前导零时钟仍能提交」回归）；`sync_po.py --check`、
+  `check_catalog.py --self-test`、`msgfmt --check`、`svg_audit`、`test_exit_card`、全量 `sh -n`、
+  `node --check`、`jq empty` 全部通过。
+
 ## [v1.7.0] — 2026-09-24
 
 本次把「切换网络」从**重建接口**改成**移动默认路由优先级**，并把切换做成后端后台任务：点击立即返回、
