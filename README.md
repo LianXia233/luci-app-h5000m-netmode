@@ -298,7 +298,7 @@ opkg remove luci-app-h5000m-netmode
 | `h5000m_netmode.settings.reconcile_wait` | 整数（秒） | `reconcile` 等待写锁的上限（默认 `5`） |
 | `h5000m_netmode.settings.gw_required` | `0` / `1` | 是否要求目标出口的 IPv4 网关可达（默认 `0`：蜂窝网关常常不回 ICMP） |
 | `h5000m_netmode.settings.dns_check` | `0` / `1` | 是否在健康轮次里顺带探测 DNS（默认 `0`）。DNS 只作为状态上报，**永远不参与切换判定** |
-| `h5000m_netmode.settings.probe_targets` / `probe_targets6` | 地址列表 | 自定义连通性探测目标（默认 `223.5.5.5 1.1.1.1` / `2400:3200::1 2606:4700:4700::1111`） |
+| `h5000m_netmode.settings.probe_targets` / `probe_targets6` | 地址列表 | 自定义连通性探测目标（默认 `223.5.5.5 119.29.29.29` / `2400:3200::1 2402:4e00::`，均为国内公共解析） |
 
 配置示例：
 
@@ -445,8 +445,8 @@ uci set h5000m_netmode.settings.watcher=0 && uci commit h5000m_netmode   # 停�
 #    注意二：若确实经透明代理承载，两条族的默认路由会落在同一个隧道上（如
 #    singtun0），此时网卡名不同但出口归属相同，split 仍应为 0
 V6SRC=$(ip -6 addr show dev br-lan | grep -m1 'scope global' | awk '{print $2}' | cut -d/ -f1)
-ip -4 route get 1.1.1.1 | head -1
-ip -6 route get 2606:4700:4700::1111 from "$V6SRC" | head -1
+ip -4 route get 223.5.5.5 | head -1
+ip -6 route get 2400:3200::1 from "$V6SRC" | head -1
 
 # 3. 各出口的协议族就绪情况
 /usr/sbin/h5000m-netmode status | grep -E '_ready='

@@ -161,14 +161,15 @@ footer .wrap{border-top:1px solid var(--line2);padding-top:16px}
             ① <code>cmd_switch_worker</code> 锁竞争失败分支：进行中任务存在时不再写入终态 <code>FAILED</code>（修复 F1，探针 A/B 复验）；<br>
             ② <code>show_defaults</code> 路由 dump 缓存导出 + <code>read_live_state</code> 预热（跨命令替换生效）；<br>
             ③ 新增 <code>reconcile_wait()</code> / <code>switch_lock_wait()</code>，hotplug_notify / 两个 worker / reconcile 命令统一走 UCI 参数；<br>
-            ④ <code>notify</code> dispatch 内联 <code>iface_role()</code> 分类（提取公共函数，iface-role 命令同步复用）。
+            ④ <code>notify</code> dispatch 内联 <code>iface_role()</code> 分类（提取公共函数，iface-role 命令同步复用）；<br>
+            ⑤ 探测目标改为国内公共解析（<code>PROBE4/PROBE6</code> 常量与 <code>health_targets/probe_targets</code> 默认回退），移除海外目标以保证大陆上行链路可达性。
           </td>
-          <td>模拟实测：<code>ip route show default</code> 34 → 2 次 / status 进程；热插拔每事件少 1 次后端进程启动。</td>
+          <td>模拟实测：<code>ip route show default</code> 34 → 2 次 / status 进程；热插拔每事件少 1 次后端进程启动；探测目标本地化不影响路径（mock 回归 410/0）。</td>
           <td>修复「锁竞争覆盖进行中任务」；锁等待参数带下限保护；角色语义不变（非参与接口仍跳过）。</td>
         </tr>
         <tr>
           <td><code>root/etc/config/h5000m_netmode</code></td>
-          <td>补充文档化配置项：<code>switch_lock_wait</code>（10）、<code>status_cache</code>（3）、<code>probe_targets</code>（1.1.1.1）、<code>probe_targets6</code>（2606:4700:4700::1111）。</td>
+          <td>补充文档化配置项：<code>switch_lock_wait</code>（10）、<code>status_cache</code>（3）、<code>probe_targets</code>（223.5.5.5 119.29.29.29）、<code>probe_targets6</code>（2400:3200::1 2402:4e00::）。</td>
           <td>参数可见可调（status_cache / 健康检查目标此前代码已支持、缺配置文档）。</td>
           <td>无行为变化：默认值与代码既有常量/回退一致。</td>
         </tr>
@@ -177,6 +178,12 @@ footer .wrap{border-top:1px solid var(--line2);padding-top:16px}
           <td>移除先行的 <code>iface-role</code> 子进程调用，角色分类并入 <code>notify</code> 内部完成。</td>
           <td>每个 hotplug 事件的后端进程启动从 2 次降为 1 次（静态分析）。</td>
           <td>语义不变：<code>notify lan ifup</code> 仍被跳过、<code>wan / 2_1</code> 仍进入事件路径（模拟验证）。</td>
+        </tr>
+        <tr>
+          <td><code>README.md</code>（文档同步）</td>
+          <td>探测目标默认值描述与示例命令同步为国内公共解析；不涉及任何行为逻辑。</td>
+          <td>无。</td>
+          <td>文档与代码默认值一致性。</td>
         </tr>
       </tbody>
     </table>
@@ -470,7 +477,7 @@ footer .wrap{border-top:1px solid var(--line2);padding-top:16px}
         <tr><td>失败回滚（保持）</td><td><code>plan_written</code> 追踪 + <code>rollback_family</code> 按序回滚双栈 + <code>post_failure_converge</code> 收敛分裂；任何阶段失败不留半切换状态。</td></tr>
         <tr><td>热备（保持）</td><td><code>warm_group_route</code> / <code>maintain_warm_routes</code> 维持备用槽位；主出口故障时直接切换路由，不重新拨号/建接口。</td></tr>
         <tr><td>并发（保持）</td><td>mkdir+pid 单写锁串行化所有变更；worker setsid 后台；前端轮询 <code>switch_state</code> 获取进度，RPC 不阻塞。</td></tr>
-        <tr><td>健康检查（保持）</td><td>探测绑定目标接口（<code>-I dev</code>），避免「测 WAN1 包走 WAN2」误判；默认目标 1.1.1.1 / 2606:4700:4700::1111（可配置），全仓库无 114.114.114.114 硬编码。</td></tr>
+        <tr><td>健康检查（保持）</td><td>探测绑定目标接口（<code>-I dev</code>），避免「测 WAN1 包走 WAN2」误判；默认目标改为国内公共解析（223.5.5.5 119.29.29.29 / 2400:3200::1 2402:4e00::，可配置），不再使用海外目标以保证大陆上行链路可达性；全仓库无 114.114.114.114 硬编码。</td></tr>
         <tr><td>不必要操作（保持）</td><td>无 <code>network restart</code>、无 <code>ipv6 disable</code> 机制（<code>test_no_restart_or_ipv6_disable_mechanisms</code> 全绿）；仅目标接口一次 <code>ifup</code> 重试有界触发。</td></tr>
       </tbody>
     </table>
@@ -514,7 +521,7 @@ footer .wrap{border-top:1px solid var(--line2);padding-top:16px}
         <tr><td><code>git diff --check</code> / 行尾</td><td>无空白错误；全部文件强制 LF（0 个 CR）</td></tr>
         <tr><td>前端零改动</td><td><code>git diff --name-only</code> 仅含 3 个后端文件 + 本报告</td></tr>
         <tr><td>凭据安全</td><td>本报告、源码 diff、提交内容均不含任何 GitHub Token / 密码 / API Key；提交经环境变量传递，不落盘不落日志</td></tr>
-        <tr><td>数据脱敏</td><td>本报告出现的网络地址均为「公共解析服务地址」（1.1.1.1、2606:4700:4700::1111、114.114.114.114）或「私有保留地址」（192.168.10.1），不含任何设备、网络或环境的真实公网地址；全部探针与性能数据来自本地 mock 场景，不含真实流量数据。</td></tr>
+        <tr><td>数据脱敏</td><td>本报告出现的网络地址均为「公共解析服务地址」（223.5.5.5、119.29.29.29、2400:3200::1、2402:4e00::、114.114.114.114）或「私有保留地址」（192.168.10.1），不含任何设备、网络或环境的真实公网地址；全部探针与性能数据来自本地 mock 场景，不含真实流量数据。</td></tr>
       </tbody>
     </table>
     </div>

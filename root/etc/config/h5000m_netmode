@@ -34,5 +34,5 @@ config settings 'settings'
 	option status_cache '3'
 
 	# 健康检查探测目标（可选覆盖，默认如下）：探测经 -I 绑定被检查接口发出。
-	option probe_targets '1.1.1.1'
-	option probe_targets6 '2606:4700:4700::1111'
+	option probe_targets '223.5.5.5 119.29.29.29'
+	option probe_targets6 '2400:3200::1 2402:4e00::'

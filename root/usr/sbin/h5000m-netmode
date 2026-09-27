@@ -65,10 +65,11 @@ SELF="${H5000M_SELF:-/usr/sbin/h5000m-netmode}"
 # checkout instead of the installed copy.
 WORKER="${H5000M_WORKER:-$SELF}"
 
-# Probes for the FIB lookup.  Both are anycast resolvers, so a lookup on this
-# router can never be answered by one of its own host routes.
-PROBE4="1.1.1.1"
-PROBE6="2606:4700:4700::1111"
+# Probes for the FIB lookup.  Both are domestic (CN) anycast resolvers, so a
+# lookup on this router can never be answered by one of its own host routes,
+# and the target stays reachable from a China mainland uplink.
+PROBE4="223.5.5.5"
+PROBE6="2400:3200::1"
 
 # Seconds `reconcile` waits for a competing run before giving up.  Hotplug and
 # the watchdog can fire while an `apply` is still running; without a bounded wait
@@ -429,7 +430,7 @@ health_check_enabled() {
 health_targets() {
 	local targets
 	targets="$(uci_get h5000m_netmode.settings.health_targets)"
-	[ -n "$targets" ] || targets="223.5.5.5 1.1.1.1"
+	[ -n "$targets" ] || targets="223.5.5.5 119.29.29.29"
 	printf '%s\n' "$targets"
 }
 
@@ -441,11 +442,11 @@ probe_targets() { # <family>
 	if [ "$1" = "6" ]; then
 		v="$(uci_get h5000m_netmode.settings.probe_targets6)"
 		[ -n "$v" ] || v="$(uci_get h5000m_netmode.settings.health_targets6)"
-		[ -n "$v" ] || v="2400:3200::1 2606:4700:4700::1111"
+		[ -n "$v" ] || v="2400:3200::1 2402:4e00::"
 	else
 		v="$(uci_get h5000m_netmode.settings.probe_targets)"
 		[ -n "$v" ] || v="$(uci_get h5000m_netmode.settings.health_targets)"
-		[ -n "$v" ] || v="223.5.5.5 1.1.1.1"
+		[ -n "$v" ] || v="223.5.5.5 119.29.29.29"
 	fi
 	printf '%s\n' "$v"
 }
