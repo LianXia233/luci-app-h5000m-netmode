@@ -21,10 +21,13 @@ return view.extend({
 		});
 	},
 
+	// First paint must not wait for the backend.  One `status` pass walks
+	// netifd, ubus and the whole routing table; on a router SoC that is most of
+	// a second, and waiting for it here used to hold the entire page blank.
+	// The shell is drawn from an empty snapshot instead and the real numbers
+	// are swapped in by refreshStatus() as soon as they exist.
 	load: function() {
-		return Promise.all([ this.statusCommand(), this.loadDeviceMap() ]).then(L.bind(function(results) {
-			return results[0];
-		}, this));
+		return Promise.resolve({ stdout: '' });
 	},
 
 	loadDeviceMap: function() {
@@ -90,6 +93,18 @@ return view.extend({
 				'--h5-card-border:rgba(51,65,85,0.7);',
 				'--h5-text-main:#f8fafc;--h5-text-sub:#cbd5e1;--h5-text-muted:#64748b;',
 			'}',
+
+			/* ================= 首屏骨架：数据到达前的占位 ================= */
+			/* 首屏不再阻塞等待后端，因此 Hero 区在拿到真实数据前先渲染骨架占位：
+			   结构与正式卡片一致（同网格、同槽位），数据回来后原地替换，无跳动。 */
+			'.h5net .h5net-sk{',
+				'display:inline-block;min-width:56px;height:10px;border-radius:6px;',
+				'background:linear-gradient(90deg,rgba(148,163,184,0.16),rgba(148,163,184,0.30),rgba(148,163,184,0.16));',
+				'background-size:200% 100%;animation:h5net-sk 1.2s ease-in-out infinite;color:transparent;',
+				'user-select:none;-webkit-user-select:none;overflow:hidden;text-indent:-9999px;',
+			'}',
+			'@keyframes h5net-sk{0%{background-position:200% 0}100%{background-position:-200% 0}}',
+			'@media(prefers-reduced-motion:reduce){.h5net .h5net-sk{animation:none}}',
 
 			/* ================= 顶部 Hero 全景出口看板 ================= */
 			'.h5net .h5net-hero{',
@@ -217,7 +232,7 @@ return view.extend({
 			'.h5net-device-row select:focus{border-color:var(--h5-blue);box-shadow:0 0 0 2px var(--h5-blue-glow)}',
 			'.h5net-cardfoot{',
 				'margin-top:12px;padding-top:10px;border-top:1px dashed var(--h5-card-border);',
-				'display:flex;justify-content:flex-end;',
+				'display:flex;flex-wrap:wrap;gap:8px;align-items:center;',
 			'}',
 			'.h5net-link{',
 				'border:0;background:rgba(59,130,246,0.08);padding:5px 12px;color:var(--h5-blue);',
@@ -225,6 +240,18 @@ return view.extend({
 			'}',
 			'.h5net-link:hover{background:var(--h5-blue);color:#fff}',
 			'.h5net-link[disabled]{background:transparent;color:var(--h5-text-muted);cursor:default}',
+			/* 主备选择按钮：卡片上的主要动作，做成实心按钮，一眼可见 */
+			'.h5net-pick{',
+				'flex:1 1 auto;min-width:124px;padding:8px 12px;border-radius:8px;cursor:pointer;',
+				'font:inherit;font-size:12.5px;font-weight:600;text-align:center;',
+				'border:1px solid var(--h5-blue);background:var(--h5-blue-soft);color:var(--h5-blue);',
+				'transition:background .18s,color .18s,border-color .18s;',
+			'}',
+			'.h5net-pick:hover{background:var(--h5-blue);color:#fff}',
+			'.h5net-pick.is-on{',
+				'border-color:var(--h5-green);background:var(--h5-green-soft);color:var(--h5-green);cursor:default;',
+			'}',
+			'.h5net-pick[disabled]{opacity:.75;cursor:default}',
 
 			/* ================= 底部状态栏与控制按钮 ================= */
 			'.h5net-foot{',
@@ -443,6 +470,40 @@ return view.extend({
 
 		return { tone: tone, idle: idle, kind: kind, title: title, live: live,
 			liveCls: liveCls, badge: badge, iface: iface, role: role };
+	},
+
+	// 数据还没到之前的占位骨架。它复用与正式卡片完全相同的容器结构（同一套类名、
+	// 同一套网格），所以数据到达后是"原地填值"而不是"换掉一块"，页面不会有跳动，
+	// 也不会先闪一下代表"无出口"的红色告警。
+	loadingHeroSlot: function(cls, iconSvg, title, lines) {
+		var slot = E('div', { 'class': 'hero-slot ' + cls });
+		var box = E('div', { 'class': 'hero-svgbox tone-off' });
+		box.innerHTML = iconSvg;
+		slot.appendChild(box);
+
+		var info = E('div', { 'class': 'hero-info' });
+		info.appendChild(E('div', { 'class': 'hero-topline' }, [
+			E('div', { 'class': 'hero-title' }, title),
+			E('div', { 'class': 'hero-badge is-off' }, [
+				E('i', { 'class': 'hero-pulse-dot' }),
+				E('span', {}, _('加载中'))
+			])
+		]));
+		info.appendChild(E('div', { 'class': 'hero-meta' }, lines.map(function(line) {
+			return E('span', { 'class': 'h5net-sk' }, line);
+		})));
+		slot.appendChild(info);
+		return slot;
+	},
+
+	loadingHero: function() {
+		var card = E('article', { 'class': 'h5net-hero is-idle' });
+		card.appendChild(this.loadingHeroSlot('hero-egress', this.egressIconSvg(),
+			_('多出口调度策略'), [ _('正在读取策略…'), '•', _('正在读取出口…') ]));
+		card.appendChild(E('span', { 'class': 'hero-div' }));
+		card.appendChild(this.loadingHeroSlot('hero-exit', this.exitIconSvg('none'),
+			_('正在读取出口状态…'), [ _('正在读取链路…') ]));
+		return card;
 	},
 
 	exitCard: function(data) {
@@ -769,6 +830,45 @@ return view.extend({
 		this.repaint();
 	},
 
+	// 卡片上的"设为首选出口"。它和"点整张卡片"不是一回事：点卡片只是把选择
+	// 暂存在页面上（接口映射这类改动要按底部的应用设置才下发），而这个按钮写着
+	// 一个动作，就要把它做完——选中 + 立即下发，一步到位。两步动作配一步文案，
+	// 用户只会认为它坏了，这也正是本轮要修的那个"手动设置失效"。
+	//
+	// 事件要阻止冒泡，否则按钮上的点击会被卡片自己的 click 再处理一次；按钮也
+	// 比卡片边缘好点，小屏上不容易误触到旁边的下拉框。
+	pickPrimary: function(kind, ev) {
+		if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+		if (this.guardReady()) return;
+
+		// 忙碌时也要说话。按钮虽然是禁用的，竞态下点击仍可能落到这里，而"点了
+		// 什么都没发生"正是本轮要消灭的那件事。
+		if (this.applying || this.switchRunning()) {
+			ui.addNotification(null, E('p', _('切换任务正在执行，请稍候再试。')), 'info');
+			return;
+		}
+
+		var want = kind === 'modem' ? 'modem_first' : 'wan_first';
+		var self = this;
+
+		// 先给出即时反馈（卡片立刻反转），再问设备要一个准数：页面记住的 mode 可能
+		// 落后于路由器最近一次任务，用它来判断"要不要下发"会得出错误结论 —— 要么
+		// 重复下发一次同模式，要么什么都不做。读回来的 mode 才是判据。
+		this.selecting = true;
+		this.pendingMode = want;
+		this.repaint();
+
+		return this.refreshStatus().then(function() {
+			if (self.pendingMode === ((self.liveData || {}).mode || 'wan_first')) {
+				ui.addNotification(null, E('p', _('当前已经是该出口组合，无需切换。')), 'info');
+				self.selecting = false;
+				self.repaint();
+				return;
+			}
+			return self.applySelection();
+		});
+	},
+
 	selectOnly: function(kind, ev) {
 		if (ev) { ev.preventDefault(); ev.stopPropagation(); }
 		if (this.applying || this.switchRunning()) return;
@@ -833,6 +933,9 @@ return view.extend({
 		var order = this.modeOrder(this.pendingMode);
 		var selected = order.indexOf(kind) > -1;
 		var isOnly = order.length === 1 && selected;
+		// selected 表示"在链路上"，两种 first_* 模式下两条链路都为真；主选的判据是
+		// 排序里的第一位，卡片上的主备按钮用这个。
+		var primary = order[0] === kind;
 		var active4 = data.active4 === kind;
 		var active6 = data.active6 === kind;
 		var state = this.connectionState(data, kind);
@@ -870,6 +973,16 @@ return view.extend({
 			]),
 			this.deviceDropdown(kind),
 			E('div', { 'class': 'h5net-cardfoot' }, [
+				// 主备是一个明确的选择，不该只能靠"点整张卡片"完成：卡片上直接给出
+				// 按钮。点了就是把这条链路设为首选，另一条自动降为热备用，与点击卡片
+				// 等价，但把"这里可以选主备"写在了脸上。
+				E('button', {
+					'class': 'h5net-pick' + (primary ? ' is-on' : ''),
+					'type': 'button',
+					'title': _('将这条链路设为首选出口并立即生效，另一条链路作为热备用'),
+					'disabled': (primary || this.applying || this.switchBusy(data)) ? 'disabled' : null,
+					'click': L.bind(this.pickPrimary, this, kind)
+				}, primary ? (isOnly ? _('★ 当前唯一出口') : _('★ 当前首选出口')) : _('设为首选出口')),
 				E('button', {
 					'class': 'h5net-link',
 					'type': 'button',
@@ -950,6 +1063,7 @@ return view.extend({
 	},
 
 	// `set` 在已有任务运行时会以 rc=3 返回（请求已排队），两者都不是错误。
+	// 注意：execStatus() 的返回值**不是**完成信号，原因见 requestSwitch()。
 	execStatus: function(args) {
 		return fs.exec('/usr/sbin/h5000m-netmode', args).then(function(res) {
 			return { code: (res && res.code) || 0, stdout: (res && res.stdout) || '' };
@@ -959,6 +1073,58 @@ return view.extend({
 				stdout: (err && (err.stdout || '')) || ''
 			};
 		});
+	},
+
+	// 下发请求的返回值不能当作完成信号 —— 这是实机测出来的，不是推测：
+	//
+	//   * rpcd 是以 `-t 30` 启动的（/sbin/rpcd -s /var/run/ubus/ubus.sock -t 30）；
+	//   * rpcd 的 file.exec 只有在它交给子进程的 stdout 与 stderr 两条管道都
+	//     EOF 之后才回复，否则等到 exec 超时，SIGKILL 子进程并以 rc=249
+	//     （Request timed out）回给调用方；
+	//   * `set` 的本职就是 fork 一个游离的切换工作进程后立刻返回，于是同一个
+	//     调用有时 0 秒成功、有时整 30 秒后失败 —— 重复跑同一条命令即可复现；
+	//   * 而命令本身并不慢：CLI 形态 0.0 秒退出并建好任务，设备 1.5 秒内提交。
+	//
+	// 页面此前把"响应丢了"当成"下发失败"，于是弹红色错误、跳过切换轮询，并在
+	// 整整 20~30 秒里把两个主备按钮按死 —— 而路由器上的切换其实已经完成了。
+	// 修法：请求发出去后最多再等 grace 毫秒，之后一律回到设备上读只读状态判定。
+	requestGraceMs: function() {
+		return 1500;
+	},
+
+	// 切换进行中的 status 轮询间隔（毫秒）。留一点间隔是为了让出 CPU：每次
+	// status 都要在路由器上跑一遍完整的 shell 解析。
+	switchPollMs: function() {
+		return 400;
+	},
+
+	// 谁先回来用谁。迟到的 fired 不会抛错（execStatus 自带兜底），此时判定已经
+	// 由设备状态那一侧完成，所以它被丢弃是安全的。
+	fireRequest: function(args) {
+		var fired = this.execStatus(args);
+		var patience = new Promise(function(resolve) {
+			window.setTimeout(function() { resolve(null); }, this.requestGraceMs());
+		}.bind(this));
+		return Promise.race([ fired, patience ]);
+	},
+
+	// 只承诺"任务已建好"或"设备上没有对应任务"，不承诺切换完成 —— 切换进度交给
+	// waitForSwitch() 的只读轮询。
+	requestSwitch: function(mode, genBefore, startedBefore) {
+		var guard = { gen: genBefore, mode: mode, started: startedBefore || '0' };
+
+		return this.fireRequest([ 'set', mode ]).then(L.bind(function(res) {
+			if (res && res.code === 3) {
+				ui.addNotification(null, E('p', _('已有切换任务在执行，本次请求已排队，稍后自动执行。')), 'info');
+				return this.waitForSwitch(90, guard);
+			}
+			if (res && res.code === 0) {
+				ui.addNotification(null, E('p', _('切换任务已启动，正在后台切换出口…')));
+				return this.waitForSwitch(90, guard);
+			}
+			// 响应丢了，或者真的报错：两者都不能说明成功或失败，去设备上要准数。
+			return this.confirmRequestAccepted(genBefore, guard);
+		}, this));
 	},
 
 	phaseList: function(data) {
@@ -1073,7 +1239,8 @@ return view.extend({
 			priority_verify_failed_after_settle: _('静置后出口优先级校验失败'),
 			target_unreachable_after_settle: _('静置后目标出口不可达'),
 			policy_write_failed: _('策略写入失败'),
-			prepare_failed: _('目标出口准备失败')
+			prepare_failed: _('目标出口准备失败'),
+			lock_busy: _('另一个配置操作正在执行，切换请求未能启动（未被静默丢弃）')
 		};
 		var reason = data.switch_reason || '';
 		if (!reason)
@@ -1083,8 +1250,19 @@ return view.extend({
 
 	// 轮询直到后台任务结束。总时长有上限，到期后不阻塞页面，只在通知里说明仍在
 	// 后台执行 —— 切换的正确性由后端的状态机与回滚保证，与页面是否停留无关。
-	waitForSwitch: function(maxSeconds) {
+	// 判据必须能区分"本次任务的结果"和"上一个任务留下的终态"。状态文件里的
+	// state/applied 是上一个任务的遗留，而 gen/started 会先被本次请求改动，于是
+	// 存在一个窗口：gen 已经前进、state 还是旧的 COMMITTED、pid 为空。只看
+	// COMMITTED 就会在这个窗口里提前宣布完成 —— 实测中页面在点击后 0.8 秒就放开
+	// 了两个按钮，而路由器连 PREPARING 都还没到；因为空闲轮询是 30 秒，界面还会
+	// 一直停在一个路由器并不处于的模式上。
+	//
+	// 所以这里要求：没有任务在跑、状态机停在终态，并且至少满足其一 ——
+	//   * 任务开始时间戳变了（task_begin 写入的 started），说明本次任务确实开始过；
+	//   * 或者设备当前模式已经是目标模式（切换快到整个落在两次采样之间）。
+	waitForSwitch: function(maxSeconds, guard) {
 		var deadline = Date.now() + (maxSeconds || 90) * 1000;
+		guard = guard || {};
 
 		return new Promise(L.bind(function(resolve) {
 			var tick = L.bind(function() {
@@ -1094,13 +1272,20 @@ return view.extend({
 					this.repaint();
 
 					var state = this.switchState(this.liveData);
-					var done = !this.switchBusy(this.liveData) &&
-						(state === 'COMMITTED' || state === 'FAILED' || state === 'IDLE' || state === '');
+					var settled = state === 'COMMITTED' || state === 'FAILED' ||
+						state === 'IDLE' || state === '';
+					var began = ((this.liveData.switch_started) || '0') !== (guard.started || '0');
+					var reached = !!guard.mode && ((this.liveData.mode) || '') === guard.mode;
+					var done = !this.switchBusy(this.liveData) && settled && (began || reached);
 					if (done) {
 						this.applying = false;
+						this.selecting = false;
 						this.syncPollInterval();
 						this.repaint();
 						this.notifySwitchOutcome(this.liveData);
+						// 任务一结束就按设备重新对齐：pendingMode 与卡片上的主备标记必须
+						// 跟着真正生效的模式走，不能等到下一个空闲轮询（30 秒）才纠正。
+						this.refreshStatus();
 						resolve(this.liveData);
 						return;
 					}
@@ -1113,10 +1298,35 @@ return view.extend({
 						resolve(this.liveData);
 						return;
 					}
-					window.setTimeout(tick, 1000);
+					// 切换期间进度要跟得上：一次 status 自己就要 1~2 秒，
+					// 这里再等 1 秒等于把反馈周期拉成 3 秒。空闲轮询仍是 30 秒，
+					// 这个加密只作用在切换进行中的那几秒。
+					window.setTimeout(tick, this.switchPollMs());
 				}, this));
 			}, this);
-			window.setTimeout(tick, 300);
+			window.setTimeout(tick, 0);
+		}, this));
+	},
+
+	// 等"不再分流"这个条件，而不是等固定时长。对齐（reconcile）是同步命令，
+	// 返回时工作已经做完，只是路由与 netifd 的可见性还差一点点，所以按条件收敛：
+	// 条件成立就立刻收工，不再白等 1.5 秒。
+	waitForAlign: function(maxSeconds) {
+		var deadline = Date.now() + (maxSeconds || 12) * 1000;
+
+		return new Promise(L.bind(function(resolve) {
+			var tick = L.bind(function() {
+				this.statusCommand().then(L.bind(function(res) {
+					this.liveData = this.parseStatus(res);
+					this.repaint();
+					if (this.liveData.split !== '1' || Date.now() >= deadline) {
+						resolve(this.liveData);
+						return;
+					}
+					window.setTimeout(tick, 700);
+				}, this));
+			}, this);
+			window.setTimeout(tick, 0);
 		}, this));
 	},
 
@@ -1133,15 +1343,46 @@ return view.extend({
 		}
 	},
 
-	// 切换进行中把轮询间隔收紧到 1 秒（阶段变化要立刻可见），结束后回到 5 秒。
+	// 空闲刷新间隔。页面上的状态只有两个来源：用户自己的操作，以及链路事件；
+	// 后者由后端秒级的看门狗在后台维护，页面没有必要用同样的频率去问。以前固定
+	// 5 秒一次，每一次都要在后端跑一遍完整的 status（路由器上约 1~2 秒 CPU），
+	// 等于让一个没人看的时间段长期占用 CPU。现在空闲 30 秒，切换中收紧到 1 秒。
+	idlePollInterval: function() {
+		return 30;
+	},
+
+	// 定时器回调统一走这里：标签页在后台时不刷新，没人看的时候不该消耗路由器。
+	scheduledRefresh: function() {
+		if (typeof document !== 'undefined' && document.hidden) return;
+		// 切换进行中由 waitForSwitch() 的 1 秒轮询负责刷新；这里再跑一遍，等于
+		// 同一份 status 每秒被算两次，路由器上的开销直接翻倍。
+		if (this.applying) return;
+		return this.refreshStatus();
+	},
+
+	// 轮询在后台是停摆的，回到前台若还要等下一个 30 秒周期才更新，用户会先看到
+	// 一段过期状态。补一次刷新即可，仍是事件驱动而非高频轮询。
+	bindVisibilityRefresh: function() {
+		if (this.visBound || typeof document === 'undefined' ||
+		    typeof document.addEventListener !== 'function')
+			return;
+		this.visBound = true;
+		document.addEventListener('visibilitychange', L.bind(function() {
+			if (document.hidden) return;
+			if (!this.statusReady || !this.liveData || this.applying) return;
+			this.refreshStatus();
+		}, this));
+	},
+
+	// 切换进行中把轮询间隔收紧到 1 秒（阶段变化要立刻可见），结束后回到空闲间隔。
 	syncPollInterval: function() {
-		var want = this.switchRunning() ? 1 : 5;
+		var want = this.switchRunning() ? 1 : this.idlePollInterval();
 		if (want === this.pollInterval)
 			return;
 		try {
 			if (this.pollHandle != null && typeof poll.remove === 'function')
 				poll.remove(this.pollHandle);
-			this.pollHandle = poll.add(L.bind(this.refreshStatus, this), want);
+			this.pollHandle = poll.add(L.bind(this.scheduledRefresh, this), want);
 			this.pollInterval = want;
 		}
 		catch (e) {
@@ -1150,7 +1391,14 @@ return view.extend({
 		}
 	},
 
+	// 数据未加载完成之前一律禁用：这些按钮的含义取决于当前出口是谁，而在出口未知
+	// 时点下去可能基于过期状态发起一次切换。
+	guardReady: function() {
+		return !this.statusReady;
+	},
+
 	applySelection: function() {
+		if (this.guardReady()) return;
 		if (this.applying || this.switchRunning()) return;
 
 		var curWanDev = (this.deviceMap || {}).wan || '';
@@ -1160,7 +1408,17 @@ return view.extend({
 		var modeChanged = this.pendingMode !== ((this.liveData || {}).mode || 'wan_first');
 		var deviceChanged = curWanDev !== newWanDev || curModemDev !== newModemDev;
 
-		if (!modeChanged && !deviceChanged) return;
+		if (!modeChanged && !deviceChanged) {
+			// 这里以前是静默 return，而且没有清掉 selecting —— selecting 会一直为真，
+			// refreshStatus() 从此不再把 pendingMode 拉回设备的真实模式，页面就永久
+			// 停在一个路由器并不处于的状态上：之后每次点击都被判成"无需变化"，
+			// 一次都不下发，只能刷新页面才能恢复。这就是"手动设置主备失效"。
+			this.selecting = false;
+			this.repaint();
+			return this.refreshStatus().then(function() {
+				ui.addNotification(null, E('p', _('当前已经是该出口组合，无需切换。')), 'info');
+			});
+		}
 
 		// 接口绑定是两次 UCI 写入，会立即返回；出口策略 `set` 只负责创建后台
 		// 任务后立刻返回，真正的切换在后台进行。所以这里先写接口映射，再发起切换
@@ -1195,15 +1453,9 @@ return view.extend({
 				}, this));
 			}
 
-			return this.execStatus([ 'set', this.pendingMode ]).then(L.bind(function(res) {
-				if (res.code !== 0 && res.code !== 3)
-					throw new Error(_('出口策略下发失败') + ' (rc=' + res.code + ')');
-				if (res.code === 3)
-					ui.addNotification(null, E('p', _('已有切换任务在执行，本次请求已排队，稍后自动执行。')), 'info');
-				else
-					ui.addNotification(null, E('p', _('切换任务已启动，正在后台切换出口…')));
-				return this.waitForSwitch(90);
-			}, this));
+			var genBefore = ((this.liveData || {}).switch_gen) || '0';
+			var startedBefore = ((this.liveData || {}).switch_started) || '0';
+			return this.requestSwitch(this.pendingMode, genBefore, startedBefore);
 		}, this)).catch(L.bind(function(err) {
 			this.applying = false;
 			this.repaint();
@@ -1211,19 +1463,53 @@ return view.extend({
 		}, this));
 	},
 
+	// `set` 是异步契约，本来就是因为它跑在"正在被切换的那条出口"上：调用方不能
+	// 依赖响应一定回来。实测中确有条目的 HTTP 响应被掐断（ERR_ABORTED），而路由器
+	// 上的切换照常执行并提交。把"响应丢了"直接当成"下发失败"，就会一边弹红色错误、
+	// 一边跳过 waitForSwitch()，页面停在禁用状态直到下一次轮询。
+	//
+	// 所以这里改问设备：请求计数器有没有前进、有没有任务在跑、模式是不是已经是目标。
+	// 三者都不成立才判失败。
+	confirmRequestAccepted: function(genBefore, guard) {
+		var target = this.pendingMode;
+		guard = guard || { gen: genBefore, mode: target, started: '0' };
+
+		return this.statusCommand().then(L.bind(function(results) {
+			var data = this.parseStatus(results);
+			var genNow = data.switch_gen || '0';
+			var accepted = (Number(genNow) > Number(genBefore)) ||
+				data.switch_busy === '1' || data.mode === target;
+
+			if (!accepted)
+				throw new Error(_('出口策略下发失败') + _('（响应丢失，且设备上没有对应的切换任务）'));
+
+			this.liveData = data;
+			this.switchDismissed = null;
+			this.repaint();
+			ui.addNotification(null, E('p', _('切换任务已启动，正在后台切换出口…')));
+			return this.waitForSwitch(90, guard);
+		}, this));
+	},
+
 	reconcileExits: function() {
+		if (this.guardReady()) return;
 		if (this.applying || this.switchRunning()) return;
 
 		this.applying = true;
 		this.repaint();
 
-		return fs.exec('/usr/sbin/h5000m-netmode', [ 'reconcile' ]).then(function() {
+		// `reconcile` 与 `set` 不同：它在调用进程里同步执行（持有写锁直到对齐
+		// 完成），不 fork 游离工作进程，所以它的返回是可用的。返回之后再等一个
+		// 固定的 1.5 秒纯属浪费 —— 改成等"分流已消失"这个条件。
+		return this.execStatus([ 'reconcile' ]).then(L.bind(function(res) {
+			if (res.code !== 0) {
+				ui.addNotification(null, E('p',
+					_('对齐失败（返回码 %d）').format(res.code)), 'danger');
+				return null;
+			}
 			ui.addNotification(null, E('p', _('已发送重对齐信令，IPv6 正在对齐 IPv4 出口。')));
-		}).catch(function(err) {
-			ui.addNotification(null, E('p', _('对齐失败：') + ' ' + (err.message || _('未知错误'))), 'danger');
-		}).then(function() {
-			return new Promise(function(resolve) { window.setTimeout(resolve, 1500); });
-		}).then(L.bind(function() {
+			return this.waitForAlign(12);
+		}, this)).then(L.bind(function() {
 			this.applying = false;
 			return this.refreshStatus();
 		}, this));
@@ -1246,19 +1532,21 @@ return view.extend({
 		var deviceChanged = curWanDev !== newWanDev || curModemDev !== newModemDev;
 		var dirty = changed || deviceChanged;
 
+		var loading = this.guardReady();
 		var buttons = [];
 		if (split) {
 			buttons.push(E('button', {
 				'class': 'cbi-button cbi-button-action',
-				'disabled': (this.applying || busy) ? 'disabled' : null,
+				'disabled': (loading || this.applying || busy) ? 'disabled' : null,
 				'click': L.bind(this.reconcileExits, this)
 			}, _('⚡ 一键对齐双栈出口')));
 		}
 		buttons.push(E('button', {
 			'class': 'cbi-button cbi-button-apply',
-			'disabled': (!dirty || this.applying || busy) ? 'disabled' : null,
+			'disabled': (loading || !dirty || this.applying || busy) ? 'disabled' : null,
 			'click': L.bind(this.applySelection, this)
-		}, busy ? _('切换执行中…') : (this.applying ? _('策略部署中…') : _('保存并应用策略'))));
+		}, busy ? _('切换执行中…') : (this.applying ? _('策略部署中…')
+			: (loading ? _('加载中…') : _('保存并应用策略')))));
 
 		// 切换进度卡片只在任务进行中或上次失败时出现。null 子节点在 LuCI 的 E() 里
 		// 会被忽略，但显式过滤掉更清楚，也让离线的渲染检查工具不必特判。
@@ -1305,21 +1593,33 @@ return view.extend({
 		].join('\u0001');
 	},
 
-	repaint: function() {
+	repaint: function(force) {
 		var old = document.getElementById('h5net-status');
-		if (!old || !this.liveData) return;
+		if (!old) {
+			// 数据比挂载还快（缓存命中时可能发生）：骨架还没进文档，先清掉渲染标记，
+			// 下一次刷新会重新尝试替换，避免页面被永久留在骨架屏上。
+			this.renderedKey = null;
+			return;
+		}
+		// 骨架屏期间不换：此时字段还是空的，画正式面板会闪一下"无出口"红告警。
+		if (!this.liveData || !this.statusReady) return;
 
 		var key = this.renderKey(this.liveData);
-		if (key === this.renderedKey) return;
+		if (key === this.renderedKey && !force) return;
 
+		// 骨架屏 -> 正式面板：结构不同但容器 id 相同，替换即可。
+		// 数据来了却还在骨架上，说明上一次是空快照画的，必须强换。
 		this.renderedKey = key;
 		old.parentNode.replaceChild(this.statusPanel(this.liveData), old);
 	},
 
+	// 只读 `status`。设备列表常年不变，没必要每 5 秒重新 exec 两个进程去取，
+	// 它由 loadDeviceMapOnce() 在开局读一次、改动后再读。轮询因此从每次三个
+	// 子进程降到一个，路由器 CPU 上的常驻开销明显下降。
 	refreshStatus: function() {
-		return Promise.all([ this.statusCommand(), this.loadDeviceMap() ]).then(L.bind(function(results) {
+		return this.statusCommand().then(L.bind(function(results) {
 			var previous = (this.liveData || {}).switch_state;
-			this.liveData = this.parseStatus(results[0]);
+			this.liveData = this.parseStatus(results);
 			if (previous !== this.liveData.switch_state)
 				this.switchDismissed = null;
 			this.syncPollInterval();
@@ -1331,11 +1631,89 @@ return view.extend({
 					this.pendingDeviceMap = { wan: dm.wan || '', modem: dm.modem || '' };
 				}
 			}
-			this.repaint();
+			this.statusReady = true;
+			this.repaint(true);
+		}, this)).catch(L.bind(function() {
+			// 也把页面放出来：一次失败不该让用户永远停在骨架屏上。
+			this.statusReady = true;
+			this.repaint(true);
 		}, this));
 	},
 
+	// 设备列表只在开局、以及接口映射写完之后读一次。
+	loadDeviceMapOnce: function() {
+		return this.loadDeviceMap().then(L.bind(function() {
+			if (!this.applying && !this.deviceDirty) {
+				var dm = this.deviceMap || {};
+				this.pendingDeviceMap = { wan: dm.wan || '', modem: dm.modem || '' };
+			}
+			this.repaint();
+		}, this)).catch(function() {});
+	},
+
+	// 数据到达前的占位面板。
+	//
+	// 结构与正式面板保持一致（同一个容器 id、同一套 hero 布局），这样
+	// refreshStatus() 拿到真实数据后可以直接整块替换，视觉上是“同一个页面填上了
+	// 数值”，而不是跳转到另一张页面。之所以不直接渲染正式面板：空快照下 active4
+	// 取默认值 'none'，卡片会先闪一下“无可用网络出口”的红色告警，属于误导。
+	// 首屏骨架：在数据到达前把 Hero、状态格、出口卡片的高度都先占住，这样数据
+	// 回来后只是"原地显示数值"，不会出现整页跳动。容器 id 与正式面板相同，
+	// repaint() 因此可以直接整块替换。
+	loadingTiles: function() {
+		var items = [];
+		for (var i = 0; i < 8; i++) {
+			var icon = E('div', { 'class': 'h5net-stat-icon tone-gray is-idle' });
+			icon.innerHTML = '<svg viewBox="0 0 64 64"></svg>';
+			items.push(E('div', { 'class': 'h5net-stat-item' }, [
+				icon,
+				E('b', {}, E('span', { 'class': 'h5net-sk' }, _('读取中…'))),
+				E('span', { 'class': 'h5net-stat-value' },
+					E('span', { 'class': 'h5net-sk' }, _('正在读取状态…'))),
+				E('span', { 'class': 'h5net-stat-hint' },
+					E('span', { 'class': 'h5net-sk' }, _('正在读取链路信息…')))
+			]));
+		}
+		return E('section', { 'class': 'h5net-stat' }, [
+			E('div', { 'class': 'h5net-stat-grid' }, items)
+		]);
+	},
+
+	loadingCard: function(name) {
+		return E('article', { 'class': 'h5net-card' }, [
+			E('div', { 'class': 'h5net-card-head' }, [
+				E('b', {}, name),
+				E('span', { 'class': 'h5net-sk' }, _('读取中…'))
+			]),
+			E('div', { 'class': 'h5net-card-body' },
+				E('span', { 'class': 'h5net-sk' }, _('正在读取链路状态…')))
+		]);
+	},
+
+	loadingPanel: function() {
+		// 数据未到之前不允许操作：这些按钮的含义取决于当前出口是谁，在出口未知时
+		// 放行会让用户基于过期状态发起一次切换。
+		var wait = E('button', {
+			'class': 'cbi-button cbi-button-apply',
+			'disabled': 'disabled'
+		}, _('加载中…'));
+
+		return E('div', { 'class': 'h5net', id: 'h5net-status' }, [
+			this.styleNode(),
+			this.loadingHero(),
+			this.loadingTiles(),
+			E('div', { 'class': 'h5net-grid' }, [
+				this.loadingCard(_('有线以太网 WAN')),
+				this.loadingCard(_('5G 移动蜂窝模组'))
+			]),
+			E('div', { 'class': 'h5net-foot' }, [
+				E('div', { 'class': 'h5net-buttons' }, [ wait ])
+			])
+		]);
+	},
+
 	render: function(res) {
+		this.statusReady = false;
 		this.liveData = this.parseStatus(res);
 		this.liveData.mode = this.liveData.mode || 'wan_first';
 		this.pendingMode = this.liveData.mode;
@@ -1349,8 +1727,17 @@ return view.extend({
 		this.switchDismissed = null;
 		this.renderedKey = this.renderKey(this.liveData);
 
-		this.pollInterval = 5;
-		this.pollHandle = poll.add(L.bind(this.refreshStatus, this), this.pollInterval);
-		return this.statusPanel(this.liveData);
+		this.pollInterval = this.idlePollInterval();
+		this.pollHandle = poll.add(L.bind(this.scheduledRefresh, this), this.pollInterval);
+		this.bindVisibilityRefresh();
+
+		// 骨架屏先上屏，数据随后到。两条请求并行：状态决定主卡片，设备映射只影响
+		// 接口下拉框，谁先回来谁先刷新，互不等待。
+		this.refreshStatus();
+		this.loadDeviceMapOnce();
+
+		// 第一次进页面时数据还没回来：先给骨架屏，等 refreshStatus() 拿到数据后
+		// 由 repaint() 整块换成正式面板。后续轮询不会再走这个分支。
+		return this.statusReady ? this.statusPanel(this.liveData) : this.loadingPanel();
 	}
 });

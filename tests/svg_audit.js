@@ -48,7 +48,8 @@ const flat = literals.join('\n');
 const svgs = [ ...flat.matchAll(/<svg[^>]*>[\s\S]*?<\/svg>/g) ].map(m => m[0]);
 
 console.log('\nSVG fragments found: ' + svgs.length +
-	' (2 uplink card icons + 8 tiles + 3 exit-card variants + 1 egress glyph expected)');
+	' (2 uplink card icons + 8 tiles + 3 exit-card variants + 1 egress glyph' +
+	' + 1 skeleton tile placeholder expected)');
 svgs.forEach((svg, i) => {
 	const viewBox = (svg.match(/viewBox="([^"]+)"/) || [])[1];
 	const classes = [ ...svg.matchAll(/class="([^"]+)"/g) ].map(m => m[1]).sort();
@@ -56,9 +57,19 @@ svgs.forEach((svg, i) => {
 	console.log('  #' + (i + 1) + '  viewBox=' + viewBox + '  len=' + svg.length +
 		'  balanced=' + balanced + '  classes=[' + classes.join(', ') + ']');
 });
-report(svgs.length === 14, 'SVG count is 14', 'found ' + svgs.length);
+report(svgs.length === 15, 'SVG count is 15', 'found ' + svgs.length);
 report(svgs.every(s => (s.match(/<svg/g) || []).length === (s.match(/<\/svg>/g) || []).length),
 	'every SVG is balanced');
+
+// The skeleton panel draws 8 tiles before the status arrives. Their icon box has
+// to exist so the tile is the same height as the real one, but it must stay an
+// empty frame: a placeholder that carried any drawing would be read as a frozen
+// icon - an uplink that looks up before the data is in.
+const emptyFrames = svgs.filter(s => /^<svg[^>]*><\/svg>$/.test(s));
+report(emptyFrames.length === 1,
+	'the skeleton tile icon is one empty frame', 'found ' + emptyFrames.length);
+report(emptyFrames.every(s => !/class="/.test(s)),
+	'the skeleton tile icon draws nothing and animates nothing');
 
 // ---------------------------------------------------------------------------
 // CSS: keyframes, animation classes, tone and state classes
