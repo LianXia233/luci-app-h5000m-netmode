@@ -176,8 +176,14 @@ case "${1:-} ${2:-}" in
 			END { if (found) print line }
 		' "$table")"
 		[ -n "$line" ] || exit 1
-		printf '%s via %s dev %s metric %s\n' "$probe" "$(mock_field "$line" via)" \
-			"$(mock_field "$line" dev)" "$(mock_metric "$line")"
+		gw="$(mock_field "$line" via)"
+		dev="$(mock_field "$line" dev)"
+		met="$(mock_metric "$line")"
+		if [ -n "$gw" ]; then
+			printf '%s via %s dev %s metric %s\n' "$probe" "$gw" "$dev" "$met"
+		else
+			printf '%s dev %s metric %s\n' "$probe" "$dev" "$met"
+		fi
 		exit 0
 		;;
 	"route add"|"route replace")

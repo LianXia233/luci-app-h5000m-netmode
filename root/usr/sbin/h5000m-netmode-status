@@ -1,2 +1,167 @@
 #!/bin/sh
-exec /usr/sbin/h5000m-netmode status
+#
+# Thin front end to `h5000m-netmode status`.
+#
+# One `status` pass walks netifd through ubus and reads the whole IPv4/IPv6
+# routing table to describe the live exit.  Every primitive in it is fast (20
+# ubus calls cost less than a second here) - what costs ~1.5s is the shell work
+# around them: parsing the backend and forking thousands of times.  LuCI asks for
+# status both to build the page and on every poll, and during a switch it polls
+# once a second, so paying full price each time saturated a router CPU for the
+# whole duration of every switch: the page stopped responding exactly when the
+# user was watching it.
+#
+# This splits `status` into two halves with very different refresh needs:
+#
+#   * the volatile part is only ever the progress of one task - the phase list,
+#     elapsed time and message, all of which the worker writes to its own state
+#     file.  Those lines are rebuilt from that file on every request, which costs
+#     one small read, so a running switch stays live to the second.
+#   * everything else - which group owns each family, addresses, health verdicts,
+#     the route slots - changes slowly and is served from a short snapshot.
+#
+# The two halves are stitched back together so the caller still receives one
+# `key=value` document in exactly the shape `status` prints it.
+#
+# `h5000m-netmode status` itself stays uncached: that is what the test suite runs,
+# and what anything needing a synchronous answer should call.
+#
+# Snapshot lifetime is UCI: h5000m_netmode.settings.status_cache seconds
+# (default 3, 0 disables caching).
+
+BACKEND=/usr/sbin/h5000m-netmode
+CACHE=/var/run/h5000m-netmode-status.cache
+STATE=/var/run/h5000m-netmode.state
+TMP="$CACHE.$$"
+
+TTL=$(uci -q get h5000m_netmode.settings.status_cache 2>/dev/null)
+case "$TTL" in
+	''|*[!0-9]*) TTL=3 ;;
+esac
+
+# The task lines, straight from the worker's state file: one read of a ~30 line
+# file instead of a full status pass.  Deliberately no subshell in the loop.
+emit_task() {
+	local now
+	now=$(date +%s 2>/dev/null)
+	case "$now" in ''|*[!0-9]*) now=0 ;; esac
+	local line key value pid="" started="" align_reason="" align_target=""
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		key="${line%%=*}"
+		value="${line#*=}"
+		case "$key" in
+			state) printf 'switch_state=%s\n' "$value" ;;
+			kind) printf 'switch_kind=%s\n' "$value" ;;
+			target) printf 'switch_target=%s\n' "$value" ;;
+			target_mode) printf 'switch_target_mode=%s\n' "$value" ;;
+			result) printf 'switch_result=%s\n' "$value" ;;
+			reason) printf 'switch_reason=%s\n' "$value" ;;
+			message) printf 'switch_message=%s\n' "$value" ;;
+			elapsed) printf 'switch_elapsed=%s\n' "$value" ;;
+			phases) printf 'switch_phases=%s\n' "$value" ;;
+			gen) printf 'switch_gen=%s\n' "$value" ;;
+			requested_mode) printf 'requested_mode=%s\n' "$value" ;;
+			last_align_reason) align_reason="$value" ;;
+			last_align_target) align_target="$value" ;;
+			started) started="$value"; printf 'switch_started=%s\n' "$value" ;;
+			pid) pid="$value" ;;
+		esac
+	done < "$STATE"
+	printf 'last_align_reason=%s\n' "$align_reason"
+	printf 'last_align_target=%s\n' "$align_target"
+	case "$started" in ''|*[!0-9]*) started=0 ;; esac
+	if [ "$now" -gt 0 ] && [ "$started" -gt 0 ]; then
+		printf 'switch_age=%s\n' "$((now - started))"
+	else
+		printf 'switch_age=0\n'
+	fi
+	# A pid left behind by a worker that died cannot claim to be busy: /proc
+	# decides, which is why this stays correct after a crash.
+	if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
+		printf 'switch_busy=1\n'
+	else
+		printf 'switch_busy=0\n'
+	fi
+}
+
+# Serve the snapshot with the task lines replaced.  Everything the caller reads
+# during a switch lives in those lines, so this is both current and cheap.
+#
+# The removal list is spelled out key by key rather than as `^switch_`, because
+# `switch_wait_ipv4`, `switch_wait_ipv6`, `switch_budget`, `switch_settle` and
+# `switch_cooldown` also begin with `switch_` but come from configuration: they
+# are not rebuilt below, so a prefix match silently dropped them from every warm
+# answer.  `cache_mark` is the snapshot's own bookkeeping and never passed on.
+serve_cached() {
+	grep -v \
+		-e '^switch_state=' -e '^switch_kind=' -e '^switch_target=' \
+		-e '^switch_target_mode=' -e '^switch_result=' -e '^switch_reason=' \
+		-e '^switch_message=' -e '^switch_elapsed=' -e '^switch_phases=' \
+		-e '^switch_gen=' -e '^switch_started=' -e '^switch_age=' \
+		-e '^switch_busy=' -e '^requested_mode=' \
+		-e '^last_align_reason=' -e '^last_align_target=' \
+		-e '^cache_mark=' "$1" 2>/dev/null
+	emit_task
+}
+
+# What the snapshot was taken against: the request counter and the last committed
+# mode.  Both are single-line reads of a file this script already opens.
+state_mark() {
+	printf '%s:%s\n' \
+		"$(sed -n 's/^gen=//p' "$STATE" 2>/dev/null | head -n 1)" \
+		"$(sed -n 's/^applied_mode=//p' "$STATE" 2>/dev/null | head -n 1)"
+}
+
+snapshot_mark() { # <snapshot file>
+	sed -n 's/^cache_mark=//p' "$1" 2>/dev/null | head -n 1
+}
+
+serve=0
+if [ "$TTL" -gt 0 ] 2>/dev/null && [ -f "$CACHE" ]; then
+	# Content first: a snapshot taken against a different request counter or a
+	# different committed mode is not a snapshot of this moment, whatever its
+	# timestamp says.  A switch that begins and ends inside one second used to
+	# slip past the mtime test and hand the caller a pre-switch `mode`.
+	if [ "$(snapshot_mark "$CACHE")" = "$(state_mark)" ]; then
+		pid=$(sed -n 's/^pid=//p' "$STATE" 2>/dev/null)
+		busy=0
+		[ -n "$pid" ] && [ -d "/proc/$pid" ] && busy=1
+
+		# A switch in flight is served from the snapshot - precisely so it does
+		# not pay for a full pass on top of the worker already running.
+		if [ "$busy" = "1" ]; then
+			serve=1
+		else
+			now=$(date +%s 2>/dev/null)
+			mt=$(date -r "$CACHE" +%s 2>/dev/null)
+			case "$now" in ''|*[!0-9]*) now=0 ;; esac
+			case "$mt" in ''|*[!0-9]*) mt=0 ;; esac
+			if [ "$now" -gt 0 ] && [ "$mt" -gt 0 ] && [ $((now - mt)) -lt "$TTL" ]; then
+				serve=1
+			fi
+		fi
+	fi
+elif [ "$TTL" -le 0 ] 2>/dev/null; then
+	exec "$BACKEND" status
+fi
+
+if [ "$serve" = "1" ]; then
+	serve_cached "$CACHE"
+	exit 0
+fi
+
+# Cold path: answer this caller and remember the answer for the next one inside
+# the window.  An empty result is never cached - it would only poison the window.
+"$BACKEND" status > "$TMP" 2>/dev/null
+if [ -s "$TMP" ]; then
+	cat "$TMP"
+	# Stamp the snapshot with what it was taken against.  The mark goes only into
+	# the stored copy: the caller receives the same key=value document `status`
+	# would have printed.
+	printf 'cache_mark=%s\n' "$(state_mark)" >> "$TMP"
+	mv -f "$TMP" "$CACHE" 2>/dev/null
+else
+	rm -f "$TMP" 2>/dev/null
+	exec "$BACKEND" status
+fi

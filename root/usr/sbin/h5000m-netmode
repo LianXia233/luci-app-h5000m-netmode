@@ -75,10 +75,29 @@ PROBE6="2606:4700:4700::1111"
 # the event would be dropped and the state would stay stale until the next one.
 DEFAULT_RECONCILE_WAIT=5
 
+# Seconds a *user initiated* switch waits for the write lock before giving up.
+# It is deliberately longer than a reconcile's wait: a switch generates the very
+# hotplug events that make the hotplug path grab this lock, so a second click
+# used to arrive exactly while a debounced reconcile held it and was dropped
+# with nothing but a log line.
+DEFAULT_SWITCH_LOCK_WAIT=10
+
 # ubus is called with a connection timeout so a wedged daemon cannot hang a
 # switch.  The flag is probed once per process because a build without it would
 # turn every call into a failure.
+#
+# The probe must run in the parent shell.  Called as `ubus $(ubus_opts) ...` it
+# ran in the command substitution's subshell, whose assignment never reached the
+# caller: the probe then repeated on every single call (measured on an
+# AP3000M: 25 `ubus -t 1 list` per status poll, ~2.4s of the 2.7s LuCI spends
+# waiting for each poll).  The result is exported, so subshells inherit it too.
+# ubus is called with a connection timeout so a wedged daemon cannot hang a
+# switch.  The flag is probed once per process because a build without it would
+# turn every call into a failure; see ubus_opts() for why that probe must not
+# live inside a command substitution.
 UBUS_TIMEOUT=5
+UBUS_OPTS=""
+UBUS_OPTS_READY=""
 
 # Logging is disabled for `status`, which LuCI polls every 5 seconds.
 LOGGING=1
@@ -169,48 +188,83 @@ bool_value() {
 UCI_GEN=0
 uci_gen_bump() { UCI_GEN=$((UCI_GEN + 1)); }
 
-uci_dump() { # <config>
-	local config="$1" var flag
+# The newline that separates entries of a dump.  A literal is required: `$(printf
+# '\n')` is a command substitution and therefore strips exactly the character it
+# is supposed to hold.
+UCI_NL='
+'
+
+# Load `uci show <config>` into UCI_DUMP_<config>, once per generation, *in the
+# current shell*.  The old reader did this inside `$(uci_dump ...)` from a
+# here-document, i.e. in a subshell whose cache died with it: every single read
+# paid for its own `uci show` and re-parsed every line of the dump.
+uci_dump_refresh() { # <config>
+	local config="$1" var flag value
 	var="UCI_DUMP_$config"
 	eval "flag=\${${var}_gen:-x}"
-	if [ "$flag" != "$UCI_GEN" ]; then
-		eval "${var}=\"\$(uci -q show \"$config\" 2>/dev/null || true)\""
-		eval "${var}_gen=$UCI_GEN"
-	fi
-	eval "printf '%s\\n' \"\${$var:-}\""
-}
-
-uci_get() { # <config[.section[.option]]>
-	local key="$1" line quote="'"
-	[ -n "$key" ] || return 0
-	# Built in variables rather than written inline: dash mis-parses a literal
-	# quote inside a ${...} expansion, and a config reader that fails to parse is
-	# exactly the kind of silent breakage this program must not have.  Both the
-	# quoted (`key='value'`) and unquoted (`key=value`) shapes are accepted, so a
-	# dump from any uci build reads the same.
-	prefix="$key=$quote"
-	while IFS= read -r line; do
-		case "$line" in
-			"$key="*)
-				line="${line#"$key="}"
-				case "$line" in
-					"$quote"*) line="${line#"$quote"}" ;;
-				esac
-				case "$line" in
-					*"$quote") line="${line%$quote}" ;;
-				esac
-				printf '%s\n' "$line"
-				return 0
-				;;
-		esac
-	done <<EOF7
-$(uci_dump "${key%%.*}")
-EOF7
+	[ "$flag" = "$UCI_GEN" ] && return 0
+	value="$(uci -q show "$config" 2>/dev/null || true)"
+	eval "${var}=\"\${UCI_NL}\${value}\""
+	eval "${var}_gen=$UCI_GEN"
 	return 0
 }
 
+uci_dump() { # <config>
+	local var
+	uci_dump_refresh "$1"
+	var="UCI_DUMP_$1"
+	eval "printf '%s\\n' \"\${$var:-}\""
+}
+
+# The dump is stored newline-prefixed, so one key is read by two pattern
+# expansions - no fork, no per-line loop, no subshell - and the quoting that uci
+# applies to every value (`key='value'`) is stripped exactly as before.  A list
+# option (`dns`) appears once per element; the first element wins, which is what
+# the previous line-by-line reader returned.
+uci_get() { # <config[.section[.option]]>
+	local key="$1" config var dump rest
+	[ -n "$key" ] || return 0
+	config="${key%%.*}"
+	uci_dump_refresh "$config"
+	var="UCI_DUMP_$config"
+	eval "dump=\${$var:-}"
+	case "$dump" in
+		*"$UCI_NL$key="*) rest="${dump#*"$UCI_NL$key="}" ;;
+		*) return 0 ;;
+	esac
+	rest="${rest%%"$UCI_NL"*}"
+	case "$rest" in
+		"'"*"'")
+			rest="${rest#\'}"
+			rest="${rest%\'}"
+			;;
+		'"'*'"')
+			rest="${rest#\"}"
+			rest="${rest%\"}"
+			;;
+	esac
+	printf '%s\n' "$rest"
+}
+
+uci_has_key() { # <config[.section[.option]]>  -> 0 when the key is present
+	local key="$1" config var dump
+	[ -n "$key" ] || return 1
+	config="${key%%.*}"
+	uci_dump_refresh "$config"
+	var="UCI_DUMP_$config"
+	eval "dump=\${$var:-}"
+	case "$dump" in
+		*"$UCI_NL$key="*) return 0 ;;
+	esac
+	return 1
+}
+
+# A network section exists when `uci show` names it; that is one pattern match
+# against the dump instead of another `uci` fork - and this is asked for several
+# times per readiness decision.
 interface_exists() {
-	uci -q get "network.$1" >/dev/null 2>&1
+	[ -n "$1" ] || return 1
+	uci_has_key "network.$1"
 }
 
 number_or() {
@@ -629,20 +683,28 @@ group_family_capable() { # <group> <4|6>
 # switch.  The timeout flag is probed once per process (a build without it would
 # make every call fail, which is worse than no timeout at all).
 ubus_opts() {
-	if [ -z "${UBUS_OPTS_READY:-}" ]; then
+	if [ -z "$UBUS_OPTS_READY" ]; then
 		if ubus -t 1 list >/dev/null 2>&1; then
 			UBUS_OPTS="-t $UBUS_TIMEOUT"
 		else
 			UBUS_OPTS=""
 		fi
 		UBUS_OPTS_READY=1
+		export UBUS_OPTS UBUS_OPTS_READY
 	fi
 	printf '%s' "$UBUS_OPTS"
+	return 0
 }
 
+# The timeout flag comes from the (exported) variable rather than from another
+# command substitution: `ubus $(ubus_opts) call ...` ran the probe inside a
+# subshell whose assignment never reached the caller, so *every* ubus call paid
+# for a second `ubus -t 1 list`.  Measured on an AP3000M status poll: 25 probes
+# per poll, most of that poll's 2.7s.
 ubus_call() {
+	ubus_opts >/dev/null 2>&1 || true
 	# shellcheck disable=SC2086
-	ubus $(ubus_opts) call "$@" 2>/dev/null || true
+	ubus $UBUS_OPTS call "$@" 2>/dev/null || true
 }
 
 # Does a device hold a usable address of one family?  The kernel is the oracle:
@@ -688,12 +750,17 @@ group_family_has_address() { # <group> <4|6>
 # and the status output, and `status` is polled every five seconds.
 section_status_json() { # <section>
 	local key var cached flag
-	key="$(printf '%s' "$1" | tr -c 'a-zA-Z0-9' '_')"
+	# The sanitise replaces a `tr` pipe (two forks) with one pattern expansion.
+	key="${1//[^a-zA-Z0-9]/_}"
 	var="SECJSON_$key"
 	eval "flag=\${${var}_set:-0}"
 	if [ "$flag" != "1" ]; then
 		eval "${var}=\"\$(ubus_call \"network.interface.$1\" status)\""
 		eval "${var}_set=1"
+		# Exported, because nearly every reader of this memo runs inside a command
+		# substitution: without the export each subshell re-queried the section
+		# (measured: the same four interfaces queried 5-6 times per status poll).
+		eval "export ${var} ${var}_set"
 		SECJSON_KEYS="$(add_word "$SECJSON_KEYS" "$key")"
 	fi
 	eval "cached=\${$var:-}"
@@ -781,6 +848,7 @@ route_dev() { route_field "$1" dev; }
 route_gateway() { route_field "$1" via; }
 route_proto() { route_field "$1" proto; }
 route_pref() { route_field "$1" pref; }
+route_src() { route_field "$1" from; }
 
 # Kernel default metric when a route line carries none: IPv4 routes default to
 # metric 0, IPv6 routes to 1024 (the kernel's own default for RA routes).
@@ -823,19 +891,36 @@ show_defaults() { # <4|6>
 
 # Lowest-metric default route.  Deterministic selection instead of relying on
 # dump order, which is not part of any kernel interface contract.
+# Lowest-metric default route that ordinary traffic uses.  Two refinements over
+# a naive "first line of the dump": it is deterministic (the lowest metric wins,
+# not the print order) and a source-restricted route loses against an
+# unrestricted one of the same metric, because `default from <pfx> ...` is only
+# reachable for packets sourced inside <pfx> - which is exactly how netifd
+# installs IPv6 defaults on top of the route this program manages.
 winning_default() { # <4|6>
 	local family="$1"
 	show_defaults "$family" | awk -v fam="$family" '
 		function metric_of(line,   n, i, a, m) {
 			n = split(line, a, /[ \t]+/)
-			for (i = 1; i < n; i++)
+			m = (fam == "6") ? 1024 : 0
+			for (i = 1; i <= n; i++)
 				if (a[i] == "metric")
 					return a[i + 1] + 0
-			return (fam == "6") ? 1024 : 0
+			return m
+		}
+		function source_restricted(line,   n, i, a) {
+			n = split(line, a, /[ \t]+/)
+			for (i = 1; i <= n; i++)
+				if (a[i] == "from")
+					return 1
+			return 0
 		}
 		{
 			m = metric_of($0)
-			if (!found || m < best) { found = 1; best = m; line = $0 }
+			s = source_restricted($0)
+			if (!found || m < best || (m == best && bests && !s)) {
+				found = 1; best = m; bests = s; line = $0
+			}
 		}
 		END { if (found) print line }
 	'
@@ -849,19 +934,36 @@ winner_metric() { # <4|6>
 	route_metric "$1" "$(winning_default "$1")"
 }
 
-# How many default routes share the winning metric?  Two routes at the same
-# metric (a multipath entry or a leftover from another manager) make "which exit
-# is active" ambiguous, and `ip route show` order is not an answer.
-equal_metric_count() { # <4|6> <metric>
-	show_defaults "$1" | awk -v m="$2" -v fam="$1" '
-		function metric_of(line,   n, i, a) {
+# How many default routes compete with the given route?  Routes of different
+# source restriction never compete: the kernel consults `default from <pfx>`
+# only for packets sourced in that prefix, and a plain `default` only for the
+# rest.  Without that distinction every IPv6 switch is refused on hardware
+# where netifd installs its own source-restricted default at the same metric as
+# ours - two routes on the same device, looking like a multipath pair that is
+# not there.  Two unrestricted routes at one metric are still counted as the
+# ambiguity they really are, and `ip route show` order is still not an answer.
+equal_metric_count() { # <4|6> <metric> <reference route line>
+	show_defaults "$1" | awk -v m="$2" -v fam="$1" -v ref="$3" '
+		function field_of(line, f,   n, i, a) {
 			n = split(line, a, /[ \t]+/)
-			for (i = 1; i < n; i++)
+			for (i = 1; i <= n; i++)
+				if (a[i] == f)
+					return a[i + 1]
+			return ""
+		}
+		function metric_of(line,   n, i, a, m) {
+			n = split(line, a, /[ \t]+/)
+			m = (fam == "6") ? 1024 : 0
+			for (i = 1; i <= n; i++)
 				if (a[i] == "metric")
 					return a[i + 1] + 0
-			return (fam == "6") ? 1024 : 0
+			return m
 		}
-		{ if (metric_of($0) == m) c++ }
+		BEGIN { refsrc = field_of(ref, "from") }
+		{
+			if (metric_of($0) == m && field_of($0, "from") == refsrc)
+				c++
+		}
 		END { print c + 0 }
 	'
 }
@@ -871,13 +973,24 @@ equal_metric_count() { # <4|6> <metric>
 # standby slot while a switch is in flight, so the metric is not part of the
 # selection here.)
 group_default_route() { # <4|6> <group>
-	local family="$1" group="$2" devs line best="" bestm=""
+	local family="$1" group="$2" devs line best="" bestm="" any="" anym=""
 	devs="$(group_devs "$group" "$family")"
 	[ -n "$devs" ] || return 0
 	while IFS= read -r line; do
 		[ -n "$line" ] || continue
 		word_in_list "$(route_dev "$line")" "$devs" || continue
 		m="$(route_metric "$family" "$line")"
+		if [ -z "$any" ] || [ "$m" -lt "$anym" ]; then
+			any="$line"
+			anym="$m"
+		fi
+		# Operable routes first.  A `default from <pfx>` line belongs to netifd:
+		# it only applies to packets sourced inside that prefix and `ip route
+		# replace`, which is keyed on (destination, metric), cannot move it.  Slot
+		# surgery that "demoted" such a line would add a second route instead and
+		# leave the real slot occupant where it was, which reads back as a
+		# standby that refuses to be demoted and fails every IPv6 switch.
+		[ -n "$(route_src "$line")" ] && continue
 		if [ -z "$best" ] || [ "$m" -lt "$bestm" ]; then
 			best="$line"
 			bestm="$m"
@@ -885,7 +998,7 @@ group_default_route() { # <4|6> <group>
 	done <<EOF2
 $(show_defaults "$family")
 EOF2
-	printf '%s\n' "$best"
+	printf '%s\n' "${best:-$any}"
 }
 
 has_default_route() { # <4|6> <dev>   (kept for the diagnostic output)
@@ -1071,6 +1184,17 @@ read_live_state() {
 
 	discover_groups
 
+	# Warm the per-section ubus memo here, in the *current* shell.  Nearly every
+	# reader of it runs inside a command substitution, so a cache that was first
+	# built in one of those subshells never reaches them; priming it here and
+	# letting the exported values propagate turns six queries per section per
+	# pass into one.
+	for __sec in "$WAN4_SEC" "$WAN6_SEC" "$MODEM4_SEC" "$MODEM6_SEC"; do
+		[ -n "$__sec" ] || continue
+		section_status_json "$__sec" >/dev/null 2>&1 || true
+	done
+	unset __sec
+
 	read_role_state WAN "$WAN4_SEC" "$WAN6_SEC"
 	read_role_state MODEM "${MODEM4_SEC:-__missing_modem__}" "${MODEM6_SEC:-__missing_modem6__}"
 
@@ -1130,8 +1254,8 @@ read_live_state() {
 	WIN6_METRIC="$(route_metric 6 "$DEFAULT6")"
 	WIN4_OWNER="$(route_owner "$WIN4_DEV" "$ACTIVE4")"
 	WIN6_OWNER="$(route_owner "$WIN6_DEV" "$ACTIVE6")"
-	WIN4_ECMP="$(equal_metric_count 4 "$WIN4_METRIC")"
-	WIN6_ECMP="$(equal_metric_count 6 "$WIN6_METRIC")"
+	WIN4_ECMP="$(equal_metric_count 4 "$WIN4_METRIC" "$DEFAULT4")"
+	WIN6_ECMP="$(equal_metric_count 6 "$WIN6_METRIC" "$DEFAULT6")"
 	[ -n "$WIN4_DEV" ] || WIN4_ECMP=0
 	[ -n "$WIN6_DEV" ] || WIN6_ECMP=0
 
@@ -1713,11 +1837,20 @@ apply_policy() { # <mode>
 # slots safe.
 # ---------------------------------------------------------------------------
 
+# One metric slot, one atomic replace.  A gateway is optional on purpose: a
+# point-to-point or 3GPP uplink announces its default route without a next hop
+# (`default dev eth2 metric 2048` is what the FM350 hands out), and inventing a
+# `via` for it - or refusing to promote it - strands the family on the old exit.
 route_replace_slot() { # <4|6> <gateway> <dev> <metric>
 	local family="$1" gw="$2" dev="$3" metric="$4" rc
-	[ -n "$gw" ] && [ -n "$dev" ] && [ -n "$metric" ] || return 1
-	log_note "ip -$family route replace default via $gw dev $dev metric $metric"
-	ip "-$family" route replace default via "$gw" dev "$dev" metric "$metric" >/dev/null 2>&1
+	[ -n "$dev" ] && [ -n "$metric" ] || return 1
+	if [ -n "$gw" ]; then
+		log_note "ip -$family route replace default via $gw dev $dev metric $metric"
+		ip "-$family" route replace default via "$gw" dev "$dev" metric "$metric" >/dev/null 2>&1
+	else
+		log_note "ip -$family route replace default dev $dev metric $metric"
+		ip "-$family" route replace default dev "$dev" metric "$metric" >/dev/null 2>&1
+	fi
 	rc=$?
 	route_gen_bump
 	return "$rc"
@@ -1793,7 +1926,7 @@ warm_group_route() { # <group>
 # ---------------------------------------------------------------------------
 
 verify_group_priority() { # <group>  -> 0 ok, 1 not ok (reason in VERIFY_REASON)
-	local group="$1" family dev owner fib4_owner ecmp metric odev ocount
+	local group="$1" family dev owner fib4_owner ecmp metric wline odev ocount
 
 	VERIFY_REASON=""
 	for family in 4 6; do
@@ -1821,8 +1954,9 @@ verify_group_priority() { # <group>  -> 0 ok, 1 not ok (reason in VERIFY_REASON)
 					;;
 			esac
 		fi
-		metric="$(route_metric "$family" "$(winning_default "$family")")"
-		ecmp="$(equal_metric_count "$family" "$metric")"
+		wline="$(winning_default "$family")"
+		metric="$(route_metric "$family" "$wline")"
+		ecmp="$(equal_metric_count "$family" "$metric" "$wline")"
 		if [ "$ecmp" -gt 1 ]; then
 			VERIFY_REASON="ipv${family}_ambiguous_metric_${metric}"
 			return 1
@@ -2057,14 +2191,19 @@ commit_family() { # <4|6> <group> <previous owner group>
 	tline="$(group_default_route "$family" "$group")"
 	tgw="$(route_gateway "$tline")"
 	tdev="$(route_dev "$tline")"
-	if [ -z "$tgw" ] || [ -z "$tdev" ]; then
+	if [ -n "$tdev" ] && [ -z "$tgw" ]; then
+		# The group announces a device-scoped default route (no next hop) - normal
+		# for a cellular uplink.  Promote exactly that shape; a `via` is not ours
+		# to invent and adding one breaks the route.
+		:
+	elif [ -z "$tgw" ] || [ -z "$tdev" ]; then
 		# Last resort for a group that is up with an address but whose proto has
 		# not announced a next hop: the remembered one (verified afterwards).
 		set -- $(recall_group_route "$group" "$family")
 		tgw="${1:-}"
 		tdev="${2:-}"
 	fi
-	[ -n "$tgw" ] && [ -n "$tdev" ] || return 1
+	[ -n "$tdev" ] || return 1
 
 	if [ "$previous" = "$group" ] || [ -z "$previous" ] || [ "$previous" = "none" ]; then
 		route_replace_slot "$family" "$tgw" "$tdev" "$ACTIVE_METRIC" || return 1
@@ -2081,9 +2220,13 @@ commit_family() { # <4|6> <group> <previous owner group>
 
 	# 2. demote the previous owner into the standby slot, so a later failure of
 	#    the new exit still fails over to a warm route instead of a blackhole.
-	if [ -n "$ogw" ] && [ -n "$odev" ]; then
+	if [ -n "$odev" ]; then
 		route_replace_slot "$family" "$ogw" "$odev" "$STANDBY_METRIC" || true
-		log_note "ipv$family standby -> $previous (via $ogw dev $odev metric $STANDBY_METRIC)"
+		if [ -n "$ogw" ]; then
+			log_note "ipv$family standby -> $previous (via $ogw dev $odev metric $STANDBY_METRIC)"
+		else
+			log_note "ipv$family standby -> $previous (dev $odev metric $STANDBY_METRIC)"
+		fi
 	else
 		log_note "ipv$family: $previous has no usable route; the standby slot keeps the target's warm route"
 	fi
@@ -2144,7 +2287,7 @@ rollback_family() { # <4|6> <previous group> <target group>
 	tline="$(group_default_route "$family" "$target")"
 	tgw="$(route_gateway "$tline")"
 	tdev="$(route_dev "$tline")"
-	if [ -n "$tgw" ] && [ -n "$tdev" ] && [ "$pgw $pdev" != "$tgw $tdev" ]; then
+	if [ -n "$tdev" ] && [ "$pdev" != "$tdev" ]; then
 		route_replace_slot "$family" "$tgw" "$tdev" "$STANDBY_METRIC" || true
 	fi
 	return 0
@@ -2239,6 +2382,25 @@ switch_run() { # <target_mode> [kind] [target_group]
 	# happen inside a command substitution.
 	read_and_snapshot
 	previous="$(slot_owner)"
+
+	# Setting the mode that already governs the routing table must not move
+	# anything: no route surgery, no metric rewrite, no ifup, no probe.  All five
+	# predicates below are pure reads of the snapshot above - `verify_group_priority`
+	# is a routing-table inspection and never sends traffic - so this costs one
+	# route dump instead of a whole switch pipeline.  A mode whose routes are wrong
+	# (previous != target) is *not* short-circuited: that exit still has to be
+	# moved, which is what the rest of this function does.
+	if [ "$previous_mode" = "$target_mode" ] && [ "$previous" = "$target" ] &&
+		group_complete "$target" && verify_group_priority "$target" &&
+		verify_excluded_families "$target"; then
+		log_note "mode $target_mode already governs $target; nothing to move"
+		task_begin "$kind" "$target" "$target_mode"
+		task_phase "$SM_PREPARING" "policy already in effect on $target"
+		task_finish "$SM_COMMITTED" "ok" "" \
+			"$kind committed: already on $target (mode=$target_mode)"
+		refresh_health
+		return 0
+	fi
 
 	budget_start
 	target_warm=0
@@ -3102,8 +3264,19 @@ cmd_set() { # <mode> [--wait]
 cmd_switch_worker() { # <mode> <gen>
 	local applied="$1" my_gen="$2" runs=0 pending pending_gen applied_mode rc=0
 
-	if ! acquire_lock 2; then
-		log_note "switch worker skipped: another writer holds the lock"
+	if ! acquire_lock "$DEFAULT_SWITCH_LOCK_WAIT"; then
+		# The request must not vanish.  `gen` already moved and the state file
+		# still holds the previous task's terminal state, so a silent return
+		# here makes the UI report a switch that never happened.  Leave a
+		# terminal failure instead - `started` is what lets the page tell this
+		# outcome apart from the previous task's.
+		log_note "switch worker could not start: another writer holds the lock"
+		state_write "state=$SM_FAILED" "kind=switch" "result=failed" \
+			"reason=lock_busy" "target=$(mode_primary_group "$applied")" \
+			"target_mode=$applied" "pid=" "gen=$my_gen" \
+			"started=$(date +%s 2>/dev/null || echo 0)" \
+			"elapsed=0.00s" "phases=" \
+			"message=switch request dropped: another writer holds the lock"
 		return 2
 	fi
 	trap release_lock EXIT INT TERM
@@ -3164,7 +3337,7 @@ cmd_align() { # [--wait]
 
 cmd_align_worker() {
 	H5000M_FORCE_ALIGN=1
-	if ! acquire_lock 2; then
+	if ! acquire_lock "$DEFAULT_SWITCH_LOCK_WAIT"; then
 		log_note "align worker skipped: another writer holds the lock"
 		return 2
 	fi
