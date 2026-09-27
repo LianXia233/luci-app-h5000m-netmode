@@ -514,6 +514,7 @@ footer .wrap{border-top:1px solid var(--line2);padding-top:16px}
         <tr><td><code>git diff --check</code> / 行尾</td><td>无空白错误；全部文件强制 LF（0 个 CR）</td></tr>
         <tr><td>前端零改动</td><td><code>git diff --name-only</code> 仅含 3 个后端文件 + 本报告</td></tr>
         <tr><td>凭据安全</td><td>本报告、源码 diff、提交内容均不含任何 GitHub Token / 密码 / API Key；提交经环境变量传递，不落盘不落日志</td></tr>
+        <tr><td>数据脱敏</td><td>本报告出现的网络地址均为「公共解析服务地址」（1.1.1.1、2606:4700:4700::1111、114.114.114.114）或「私有保留地址」（192.168.10.1），不含任何设备、网络或环境的真实公网地址；全部探针与性能数据来自本地 mock 场景，不含真实流量数据。</td></tr>
       </tbody>
     </table>
     </div>
