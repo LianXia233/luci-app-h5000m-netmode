@@ -24,6 +24,15 @@ config settings 'settings'
 	option switch_cooldown '20'
 	option align_confirm '2'
 
-	# Hotplug 事件合并窗口与 reconcile 抢锁等待上限。
+	# Hotplug 事件合并窗口与抢锁等待上限：reconcile 短等让位给切换，
+	# 切换/对齐等待较长，避免请求被锁竞争丢弃。
 	option hotplug_debounce '2'
 	option reconcile_wait '5'
+	option switch_lock_wait '10'
+
+	# status 快照 TTL（秒，0 关闭）：前端轮询经快照缓存，减少 ubus/uci 压力。
+	option status_cache '3'
+
+	# 健康检查探测目标（可选覆盖，默认如下）：探测经 -I 绑定被检查接口发出。
+	option probe_targets '1.1.1.1'
+	option probe_targets6 '2606:4700:4700::1111'

@@ -404,6 +404,12 @@ switch_cooldown() { cfg_int switch_cooldown 20 0; }
 align_confirm() { cfg_int align_confirm 2 1; }
 hotplug_debounce() { cfg_int hotplug_debounce 2 0; }
 
+# Writer-lock wait ceilings.  Kept apart on purpose: reconcile yields quickly so
+# a running switch is not starved, while switch/align waits long enough for the
+# in-flight task to commit or roll back instead of dropping the request.
+reconcile_wait() { cfg_int reconcile_wait 5 1; }
+switch_lock_wait() { cfg_int switch_lock_wait 10 1; }
+
 probe_ok_threshold() {
 	local ok attempts
 	attempts="$(probe_attempts)"
@@ -536,6 +542,28 @@ discover_modem_interfaces() {
 		append_modem_section "$section"
 		[ -n "$MODEM6_PRIMARY" ] || MODEM6_PRIMARY="$section"
 	done
+}
+
+# Classify a network section the same way the state reader does.  Single source
+# of truth for both the `iface-role` command and the hotplug `notify` path, so a
+# modem whose section lacks the qmodem `modem_config` marker still triggers a
+# reconcile and unrelated interfaces never do.
+iface_role() { # <section> -> wan|modem|other
+	local section="${1:-}"
+	case "$section" in
+		''|*[!a-zA-Z0-9_.@-]*) echo other; return 0 ;;
+	esac
+	discover_modem_interfaces
+	case "$section" in
+		wan|wan6) echo wan ;;
+		loopback|lan) echo other ;;
+		*)
+			case " $MODEM_SECTIONS " in
+				*" $section "*) echo modem ;;
+				*) echo other ;;
+			esac
+			;;
+	esac
 }
 
 # discover_groups - fill in the exit-group membership.
@@ -879,6 +907,7 @@ route_metric() { # <4|6> <route line>
 # and those bump the generation, so the dump is memoised per generation.  Every
 # mutation therefore has to call route_gen_bump() - see the route surgery above.
 ROUTE_GEN=0
+export ROUTE_GEN
 route_gen_bump() { ROUTE_GEN=$((ROUTE_GEN + 1)); }
 show_defaults() { # <4|6>
 	local key var flag cached
@@ -888,6 +917,11 @@ show_defaults() { # <4|6>
 	if [ "$flag" != "$ROUTE_GEN" ]; then
 		eval "${var}=\"\$(ip \"-$1\" route show default 2>/dev/null | grep -vE '^(prohibit|blackhole|unreachable|throw)\\b' | grep -v 'linkdown')\""
 		eval "${var}_gen=$ROUTE_GEN"
+		# The dump is read through command substitution almost everywhere, and a
+		# cache first built inside one of those subshells dies with it.  Export
+		# the memo so every later subshell sees it; only a route_gen_bump()
+		# forces a refresh.
+		eval "export ${var} ${var}_gen"
 	fi
 	eval "cached=\${$var:-}"
 	printf '%s\n' "$cached"
@@ -1198,6 +1232,14 @@ read_live_state() {
 		section_status_json "$__sec" >/dev/null 2>&1 || true
 	done
 	unset __sec
+
+	# Same reasoning for the default-route dump memo: show_defaults() is read
+	# through command substitution almost everywhere, so a cache first built in a
+	# subshell never reaches the rest of the pass.  Priming both families in the
+	# current shell (the export in show_defaults propagates the memo) turns
+	# several `ip route show default` runs per pass into one per family.
+	show_defaults 4 >/dev/null 2>&1 || true
+	show_defaults 6 >/dev/null 2>&1 || true
 
 	read_role_state WAN "$WAN4_SEC" "$WAN6_SEC"
 	read_role_state MODEM "${MODEM4_SEC:-__missing_modem__}" "${MODEM6_SEC:-__missing_modem6__}"
@@ -2888,7 +2930,7 @@ hotplug_notify() { # <section> [action]
 	sleep "$(hotplug_debounce)" 2>/dev/null || true
 	rmdir "$marker" 2>/dev/null || rm -rf "$marker" 2>/dev/null
 
-	if ! acquire_lock "$DEFAULT_RECONCILE_WAIT"; then
+	if ! acquire_lock "$(reconcile_wait)"; then
 		return 0
 	fi
 	trap release_lock EXIT INT TERM
@@ -3268,7 +3310,20 @@ cmd_set() { # <mode> [--wait]
 cmd_switch_worker() { # <mode> <gen>
 	local applied="$1" my_gen="$2" runs=0 pending pending_gen applied_mode rc=0
 
-	if ! acquire_lock "$DEFAULT_SWITCH_LOCK_WAIT"; then
+	if ! acquire_lock "$(switch_lock_wait)"; then
+		# Another writer holds the lock.  If it is a switch worker that is still
+		# running, this request's `gen` is picked up by that worker's
+		# pending-request loop, so writing a terminal FAILED here would clobber
+		# the in-flight task's state and make the UI report a failure for a
+		# switch that is still converging (the state would flip back when the
+		# first worker writes its next phase).  Leave the in-progress state
+		# alone in that case.  Only write a terminal failure when no switch is
+		# running (e.g. the lock is held by reconcile), so the request cannot
+		# silently vanish.
+		if switch_in_progress; then
+			log_note "switch worker deferred: a switch is already running and will pick up request gen=$my_gen"
+			return 2
+		fi
 		# The request must not vanish.  `gen` already moved and the state file
 		# still holds the previous task's terminal state, so a silent return
 		# here makes the UI report a switch that never happened.  Leave a
@@ -3341,7 +3396,7 @@ cmd_align() { # [--wait]
 
 cmd_align_worker() {
 	H5000M_FORCE_ALIGN=1
-	if ! acquire_lock "$DEFAULT_SWITCH_LOCK_WAIT"; then
+	if ! acquire_lock "$(switch_lock_wait)"; then
 		log_note "align worker skipped: another writer holds the lock"
 		return 2
 	fi
@@ -3408,17 +3463,7 @@ case "$action" in
 		case "${2:-}" in
 			''|*[!a-zA-Z0-9_.@-]*) exit 64 ;;
 		esac
-		discover_modem_interfaces
-		case "$2" in
-			wan|wan6) echo wan ;;
-			loopback|lan) echo other ;;
-			*)
-				case " $MODEM_SECTIONS " in
-					*" $2 "*) echo modem ;;
-					*) echo other ;;
-				esac
-				;;
-		esac
+		iface_role "$2"
 		exit 0
 		;;
 	list-devices)
@@ -3484,6 +3529,15 @@ case "$action" in
 		exit $?
 		;;
 	notify)
+		# Hotplug used to classify the section in a separate backend run and only
+		# then call notify.  The classification is folded in here so a single
+		# backend process serves the whole event path: unrelated interfaces are
+		# skipped before any marker or reconcile work, which also removes one
+		# backend process launch per hotplug event.
+		case "$(iface_role "${2:-unknown}")" in
+			wan|modem) ;;
+			*) exit 0 ;;
+		esac
 		hotplug_notify "${2:-unknown}" "${3:-event}"
 		exit 0
 		;;
@@ -3502,7 +3556,7 @@ case "$action" in
 		[ -n "${3:-}" ] || { echo "Usage: $0 set-device-map {wan|modem} <device>" >&2; exit 64; }
 		;;
 	reconcile)
-		LOCK_WAIT="$(number_or "$(uci_get h5000m_netmode.settings.reconcile_wait)" "$DEFAULT_RECONCILE_WAIT")"
+		LOCK_WAIT="$(reconcile_wait)"
 		;;
 	apply|'')
 		;;

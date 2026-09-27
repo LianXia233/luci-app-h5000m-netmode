@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>H5000M NetMode 后端网络主备切换优化报告 · Backend Network Failover Optimization</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230E7490'/%3E%3Cpath d='M8 10h16v3H8zM8 16h16v3H8zM8 22h10v3H8z' fill='%23F2F4F7'/%3E%3C/svg%3E">
+<style>
+:root{
+  --paper:#F2F4F7; --paper2:#E9EDF2; --ink:#101828; --ink2:#475467; --ink3:#667085;
+  --line:#D6DCE4; --line2:#C4CDD8;
+  --cy:#0E7490; --cy2:#E0F2F8; --amber:#B45309; --amber2:#FDF0E3; --green:#177245; --green2:#E4F3EC;
+  --red:#B42318; --red2:#FCEBEA;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.65;font-size:15px}
+.wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+code{font-family:var(--mono);font-size:.86em;background:var(--paper2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:#0B3B50}
+pre{font-family:var(--mono);font-size:12px;line-height:1.55;background:#101828;color:#D7E3EA;border-radius:10px;padding:14px 16px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+pre b{color:#FBBF24;font-weight:600}
+
+header{padding:48px 0 28px;border-bottom:1px solid var(--line2)}
+.kicker{font-family:var(--mono);font-size:12.5px;letter-spacing:.08em;color:var(--cy);font-weight:600}
+h1{font-size:clamp(23px,4vw,33px);line-height:1.25;font-weight:900;margin:10px 0 6px}
+.sub{color:var(--ink2);font-size:15px;max-width:860px}
+.meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+.chip{font-family:var(--mono);font-size:12px;color:var(--ink2);background:#fff;border:1px solid var(--line);border-radius:999px;padding:4px 11px;display:inline-flex;align-items:center;gap:6px}
+.chip .dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.dot.pass{background:var(--green)}.dot.warn{background:var(--amber)}.dot.info{background:var(--cy)}
+
+section{padding:38px 0;border-bottom:1px solid var(--line2)}
+section:last-of-type{border-bottom:none}
+h2{font-size:20px;font-weight:900;margin-bottom:4px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+h2 .no{font-family:var(--mono);font-size:13px;color:var(--cy);background:var(--cy2);border:1px solid #B7E1EC;border-radius:6px;padding:2px 8px}
+.lede{color:var(--ink2);font-size:14px;margin-bottom:16px;max-width:900px}
+h3{font-size:15.5px;font-weight:700;margin:22px 0 10px}
+p{margin:8px 0}
+ul,ol{margin:8px 0 8px 22px}
+li{margin:5px 0}
+.note{background:var(--amber2);border:1px solid #EBCB9C;border-left:4px solid var(--amber);border-radius:8px;padding:12px 16px;font-size:13.5px;color:#5B3A00;margin:14px 0}
+.note b{color:var(--amber)}
+
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.card .t{font-weight:700;font-size:14px;margin-bottom:6px;display:flex;align-items:center;gap:8px}
+.card p{font-size:13.5px;color:var(--ink2);margin:4px 0}
+.card .num{font-family:var(--mono);font-size:22px;font-weight:700;color:var(--cy)}
+.ok{color:var(--green);font-weight:700}
+.no2{color:var(--red);font-weight:700}
+.warn2{color:var(--amber);font-weight:700}
+
+.flow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:16px 0 6px}
+.stage{background:#fff;border:1px solid var(--line);border-radius:9px;padding:8px 12px;text-align:center;min-width:118px;flex:1 1 auto}
+.stage .n{font-family:var(--mono);font-size:10.5px;color:var(--ink3);letter-spacing:.05em}
+.stage .t{font-size:13px;font-weight:700}
+.stage.goal{background:var(--green2);border-color:#9ED3B4}
+.stage.goal .t{color:var(--green)}
+.stage.fail{background:var(--red2);border-color:#EFBFBB}
+.stage.fail .t{color:var(--red)}
+.stage.cur{background:var(--cy2);border-color:#8CCFE3}
+.stage.cur .t{color:#0B3B50}
+.arrow{color:var(--ink3);font-size:15px;flex:none;font-weight:700}
+.flow-note{font-size:12.5px;color:var(--ink3);margin:4px 0 0}
+
+.tbl-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse;font-size:13.5px;margin:12px 0;background:#fff;border:1px solid var(--line)}
+.tbl-scroll table{min-width:720px}
+th{background:var(--paper2);color:#0B3B50;text-align:left;font-weight:700;padding:9px 12px;border:1px solid var(--line2);vertical-align:top}
+td{padding:8px 12px;border:1px solid var(--line2);vertical-align:top}
+td code,th code{white-space:nowrap}
+tr:nth-child(even) td{background:#FAFBFD}
+.fig{border:1px solid var(--line);border-radius:12px;background:#fff;padding:14px;margin:14px 0;overflow-x:auto}
+.fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+.cap{font-size:12.5px;color:var(--ink3);text-align:center;margin-top:8px}
+
+footer{padding:26px 0 60px;color:var(--ink3);font-size:12.5px}
+footer .wrap{border-top:1px solid var(--line2);padding-top:16px}
+
+@media (max-width:760px){
+  .grid2,.grid3{grid-template-columns:1fr}
+  body{font-size:14.5px}
+  .wrap{padding:0 14px}
+  .flow{gap:6px}
+  .stage{min-width:100px}
+  h2{font-size:18px}
+}
+@media print{
+  body{background:#fff;font-size:12px}
+  .wrap{max-width:100%;padding:0}
+  section{page-break-inside:avoid;border-bottom:1px solid var(--line2);padding:20px 0}
+  .fig{page-break-inside:avoid}
+  header{padding:24px 0 16px}
+  .chip{background:#fff}
+  .note{page-break-inside:avoid}
+  footer{padding:12px 0}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="kicker">BACKEND NETWORK FAILOVER OPTIMIZATION · luci-app-h5000m-netmode</div>
+    <h1>H5000M NetMode 后端网络主备切换优化报告</h1>
+    <div class="sub">Backend Network Failover Optimization · 本报告仅描述后端改动：前端代码、页面结构、菜单、中文文案与 RPC 调用方式全部保持不变。</div>
+    <div class="meta">
+      <span class="chip"><span class="dot pass"></span>后端优化 ✓</span>
+      <span class="chip"><span class="dot info"></span>前端修改 0</span>
+      <span class="chip"><span class="dot warn"></span>实机测试 未执行</span>
+      <span class="chip"><span class="dot pass"></span>RPC API 保持兼容</span>
+      <span class="chip"><span class="dot pass"></span>IPv4 / IPv6 后端一致性优化</span>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <h2><span class="no">01</span>优化摘要</h2>
+    <p class="lede">在不动一行前端代码的前提下，对后端主备网络切换逻辑做了 5 处最小必要修改：修复上一轮审查确认的 P2 锁竞争缺陷（F1）、让默认路由 dump 缓存真正跨命令替换生效、把两处锁等待超时参数化并与既有 UCI 配置对齐、把热插拔路径的角色分类并入 <code>notify</code>（每事件少一次后端进程启动）、补齐配置项文档。</p>
+    <div class="grid2">
+      <div class="card">
+        <div class="t">后端优化</div>
+        <div class="num">3</div>
+        <p>文件修改（config / hotplug / 主脚本），净增 83 行、删 23 行；其余两个后端文件分析后无需修改。</p>
+      </div>
+      <div class="card">
+        <div class="t">前端修改</div>
+        <div class="num">0</div>
+        <p><code>htdocs/luci-static/resources/</code> 全部未动，<code>git diff --name-only</code> 中不存在任何前端文件。</p>
+      </div>
+      <div class="card">
+        <div class="t">实机测试</div>
+        <div class="num">未执行</div>
+        <p>未连接 OpenWrt 实机（192.168.10.1），所有数据来自代码分析、静态检查与 mock 环境模拟测试。</p>
+      </div>
+      <div class="card">
+        <div class="t">RPC API</div>
+        <div class="num">兼容</div>
+        <p>方法名、参数格式、返回字段（<code>switch_state</code> / <code>switch_gen</code> / <code>switch_reason</code> 等）均未改变。</p>
+      </div>
+    </div>
+    <div class="note"><b>验证声明：</b>本次优化未进行 OpenWrt 实机验证，性能数据仅基于代码分析或模拟测试，不代表真实设备实测结果。实机切换耗时、成功率、网络中断时间均为「未测量」。</div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2><span class="no">02</span>修改文件</h2>
+    <p class="lede">按真实 <code>git diff</code> 生成，仅列实际修改文件。提交范围：3 个后端文件 + 本报告（<code>docs/</code>）。</p>
+    <div class="tbl-scroll">
+    <table>
+      <colgroup><col style="width:30%"><col style="width:40%"><col style="width:15%"><col style="width:15%"></colgroup>
+      <thead><tr><th>文件</th><th>修改内容</th><th>性能影响</th><th>稳定性影响</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>root/usr/sbin/h5000m-netmode</code></td>
+          <td>
+            ① <code>cmd_switch_worker</code> 锁竞争失败分支：进行中任务存在时不再写入终态 <code>FAILED</code>（修复 F1，探针 A/B 复验）；<br>
+            ② <code>show_defaults</code> 路由 dump 缓存导出 + <code>read_live_state</code> 预热（跨命令替换生效）；<br>
+            ③ 新增 <code>reconcile_wait()</code> / <code>switch_lock_wait()</code>，hotplug_notify / 两个 worker / reconcile 命令统一走 UCI 参数；<br>
+            ④ <code>notify</code> dispatch 内联 <code>iface_role()</code> 分类（提取公共函数，iface-role 命令同步复用）。
+          </td>
+          <td>模拟实测：<code>ip route show default</code> 34 → 2 次 / status 进程；热插拔每事件少 1 次后端进程启动。</td>
+          <td>修复「锁竞争覆盖进行中任务」；锁等待参数带下限保护；角色语义不变（非参与接口仍跳过）。</td>
+        </tr>
+        <tr>
+          <td><code>root/etc/config/h5000m_netmode</code></td>
+          <td>补充文档化配置项：<code>switch_lock_wait</code>（10）、<code>status_cache</code>（3）、<code>probe_targets</code>（1.1.1.1）、<code>probe_targets6</code>（2606:4700:4700::1111）。</td>
+          <td>参数可见可调（status_cache / 健康检查目标此前代码已支持、缺配置文档）。</td>
+          <td>无行为变化：默认值与代码既有常量/回退一致。</td>
+        </tr>
+        <tr>
+          <td><code>root/etc/hotplug.d/iface/95-h5000m-netmode</code></td>
+          <td>移除先行的 <code>iface-role</code> 子进程调用，角色分类并入 <code>notify</code> 内部完成。</td>
+          <td>每个 hotplug 事件的后端进程启动从 2 次降为 1 次（静态分析）。</td>
+          <td>语义不变：<code>notify lan ifup</code> 仍被跳过、<code>wan / 2_1</code> 仍进入事件路径（模拟验证）。</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+    <h3>分析后未修改的文件（如实说明）</h3>
+    <ul>
+      <li><code>root/usr/sbin/h5000m-netmode-status</code>：<code>status_cache</code> TTL 已从 UCI 读取，快照按 <code>(gen, applied_mode)</code> 标记失效，无重复查询可减；无需修改。</li>
+      <li><code>root/etc/init.d/h5000m-netmode</code>：procd 看门狗、respawn、日志重定向正常，watch 周期本就可配置；无需修改。</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2><span class="no">03</span>优化前 / 优化后对比</h2>
+    <p class="lede">全部基于真实代码与 mock 模拟测试；无法精确计数的项如实标注「静态分析」。</p>
+
+    <h3>固定等待审计（全部有语义，未简单删除）</h3>
+    <div class="tbl-scroll">
+    <table>
+      <colgroup><col style="width:22%"><col style="width:18%"><col style="width:13%"><col style="width:47%"></colgroup>
+      <thead><tr><th>位置</th><th>等待</th><th>判定</th><th>依据</th></tr></thead>
+      <tbody>
+        <tr><td><code>acquire_lock</code></td><td><code>sleep 1</code> 有界重试</td><td>保留</td><td>锁等待采用「短间隔检查 → 超时失败」；等待上限来自 <code>switch_lock_wait</code> / <code>reconcile_wait</code>（本轮参数化）。</td></tr>
+        <tr><td><code>wait_group_family</code></td><td><code>bounded_sleep 1</code></td><td>保留</td><td>条件轮询：目标 READY → 立即继续；仅未就绪时每 1s 重查一次，受 <code>switch_budget</code> 双重约束。</td></tr>
+        <tr><td><code>switch_run</code> 提交后</td><td><code>bounded_sleep settle</code>（默认 1s）</td><td>保留</td><td>netifd 宣布路由的复验窗口（warm 场景可配置为 0 跳过）；超预算立即退出。</td></tr>
+        <tr><td><code>hotplug_notify</code></td><td><code>sleep hotplug_debounce</code>（默认 2s）</td><td>保留</td><td>事件合并窗口：modem 重注册会连发多个 ifup/ifdown，逐条评估会触发重复切换；marker 目录 + 有界睡眠去重。</td></tr>
+        <tr><td><code>run_watch</code></td><td><code>sleep watch_interval</code>（10s）</td><td>保留</td><td>周期看门狗轮询间隔，可配置。</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3>调用次数对比</h3>
+    <div class="tbl-scroll">
+    <table>
+      <colgroup><col style="width:26%"><col style="width:14%"><col style="width:14%"><col style="width:46%"></colgroup>
+      <thead><tr><th>指标</th><th>优化前</th><th>优化后</th><th>减少原因</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>ip route show default</code>（单次 status 进程，模拟实测）</td>
+          <td><b>34</b></td>
+          <td><b>2</b></td>
+          <td><code>show_defaults</code> 缓存原本在命令替换子 shell 内构建即丢失；改为缓存变量导出 + <code>read_live_state</code> 预热后，每族每次进程只真正查询一次，后续全部命中缓存（<code>ROUTE_GEN</code> 失效语义保留）。</td>
+        </tr>
+        <tr>
+          <td>后端进程启动 / 热插拔事件</td>
+          <td>2</td>
+          <td>1</td>
+          <td>hotplug 原先先跑一次 <code>iface-role</code>（一次后端进程）再跑 <code>notify</code>（第二次）；角色分类并入 <code>notify</code> 后单进程完成（静态分析）。</td>
+        </tr>
+        <tr>
+          <td><code>ubus call</code></td>
+          <td>—</td>
+          <td>—</td>
+          <td>既有 <code>section_status_json</code> 进程内 memo（每 section 每进程一次）+ <code>status_cache</code> 快照 TTL 已消除重复查询；本轮未引入新 ubus 调用，静态分析确认切换热路径无重复调用。</td>
+        </tr>
+        <tr>
+          <td><code>uci get</code> / <code>uci set</code></td>
+          <td>—</td>
+          <td>—</td>
+          <td>既有 <code>uci_dump_refresh</code> 进程内缓存 + 写路径 <code>uci_gen_bump</code>；本轮新增的两个参数函数复用同一缓存，无新增重复操作。</td>
+        </tr>
+        <tr>
+          <td>路由变更操作（replace / del）</td>
+          <td>—</td>
+          <td>—</td>
+          <td>未增删：切换仍是每地址族一次原子 <code>route replace</code>，回滚顺序不变（<code>route_ops</code> 断言 0 项未变）。</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+    <p>无法得到精确调用次数处，按「静态分析发现重复调用路径已合并 / 确认无重复」表述，不编造数字。</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2><span class="no">04</span>后端架构</h2>
+    <p class="lede">LuCI 前端 → RPC → 后端入口 → 校验 → 快照 → 目标检查 → 后台 worker → 双栈切换 → 验证 → 提交/回滚。本轮未改变该架构，仅在其上做局部优化。</p>
+    <div class="fig">
+      <svg viewBox="0 0 980 470" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="后端主备切换架构图">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#8C9BA8"/>
+          </marker>
+        </defs>
+        <g font-family="ui-monospace,Menlo,Consolas,monospace" font-size="12">
+          <rect x="30" y="20" width="140" height="44" rx="8" fill="#E0F2F8" stroke="#0E7490"/>
+          <text x="100" y="38" text-anchor="middle" fill="#0B3B50" font-weight="700">LuCI 前端</text>
+          <text x="100" y="54" text-anchor="middle" fill="#0B3B50">netmode.js（未改）</text>
+          <line x1="100" y1="64" x2="100" y2="104" stroke="#8C9BA8" marker-end="url(#arr)"/>
+          <text x="112" y="92" fill="#475467">RPC · ubus / rpcd</text>
+
+          <rect x="30" y="106" width="140" height="44" rx="8" fill="#fff" stroke="#C4CDD8"/>
+          <text x="100" y="124" text-anchor="middle" fill="#101828" font-weight="700">参数验证</text>
+          <text x="100" y="140" text-anchor="middle" fill="#475467">mode 白名单 · gen</text>
+          <line x1="100" y1="150" x2="100" y2="190" stroke="#8C9BA8" marker-end="url(#arr)"/>
+
+          <rect x="30" y="192" width="140" height="44" rx="8" fill="#fff" stroke="#C4CDD8"/>
+          <text x="100" y="210" text-anchor="middle" fill="#101828" font-weight="700">状态快照</text>
+          <text x="100" y="226" text-anchor="middle" fill="#475467">read_live_state · 缓存预热</text>
+          <line x1="100" y1="236" x2="100" y2="276" stroke="#8C9BA8" marker-end="url(#arr)"/>
+
+          <rect x="30" y="278" width="140" height="44" rx="8" fill="#fff" stroke="#C4CDD8"/>
+          <text x="100" y="296" text-anchor="middle" fill="#101828" font-weight="700">目标 WAN 检查</text>
+          <text x="100" y="312" text-anchor="middle" fill="#475467">capable · carrier · 地址</text>
+          <line x1="100" y1="322" x2="100" y2="362" stroke="#8C9BA8" marker-end="url(#arr)"/>
+
+          <rect x="30" y="364" width="140" height="44" rx="8" fill="#0E7490"/>
+          <text x="100" y="382" text-anchor="middle" fill="#fff" font-weight="700">切换 Worker</text>
+          <text x="100" y="398" text-anchor="middle" fill="#BDE3EF">setsid 后台 · 单写锁</text>
+          <line x1="170" y1="386" x2="226" y2="386" stroke="#8C9BA8" marker-end="url(#arr)"/>
+
+          <rect x="230" y="364" width="160" height="44" rx="8" fill="#fff" stroke="#C4CDD8"/>
+          <text x="310" y="382" text-anchor="middle" fill="#101828" font-weight="700">IPv4 槽位</text>
+          <text x="310" y="398" text-anchor="middle" fill="#475467">metric 10 / 50</text>
+          <line x1="390" y1="386" x2="446" y2="386" stroke="#8C9BA8" marker-end="url(#arr)"/>
+
+          <rect x="450" y="364" width="160" height="44" rx="8" fill="#fff" stroke="#C4CDD8"/>
+          <text x="530" y="382" text-anchor="middle" fill="#101828" font-weight="700">IPv6 槽位</text>
+          <text x="530" y="398" text-anchor="middle" fill="#475467">metric 10 / 50</text>
+          <line x1="610" y1="386" x2="666" y2="386" stroke="#8C9BA8" marker-end="url(#arr)"/>
+
+          <rect x="670" y="364" width="170" height="44" rx="8" fill="#fff" stroke="#C4CDD8"/>
+          <text x="755" y="382" text-anchor="middle" fill="#101828" font-weight="700">路由切换 + 业务验证</text>
+          <text x="755" y="398" text-anchor="middle" fill="#475467">replace · ping 绑定接口</text>
+
+          <rect x="230" y="240" width="240" height="40" rx="8" fill="#E4F3EC" stroke="#177245"/>
+          <text x="350" y="256" text-anchor="middle" fill="#177245" font-weight="700">SUCCESS → COMMIT</text>
+          <text x="350" y="275" text-anchor="middle" fill="#177245">双栈同事务提交</text>
+          <rect x="560" y="240" width="240" height="40" rx="8" fill="#FCEBEA" stroke="#B42318"/>
+          <text x="680" y="256" text-anchor="middle" fill="#B42318" font-weight="700">FAILURE → ROLLBACK</text>
+          <text x="680" y="275" text-anchor="middle" fill="#B42318">按序回滚双栈 → 原出口</text>
+          <line x1="755" y1="408" x2="755" y2="330" stroke="#8C9BA8" marker-end="url(#arr)"/>
+          <line x1="350" y1="280" x2="350" y2="330" stroke="#8C9BA8" marker-end="url(#arr)"/>
+          <line x1="680" y1="280" x2="680" y2="330" stroke="#8C9BA8" marker-end="url(#arr)"/>
+        </g>
+      </svg>
+      <div class="cap">图 1 · 后端主备切换架构（示意；与代码路径一一对应）</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2><span class="no">05</span>状态机</h2>
+    <p class="lede">状态名以代码真实常量为准（<code>SM_PREPARING</code> … <code>SM_COMMITTED</code> / <code>SM_ROLLBACK</code> / <code>SM_FAILED</code>）；前端读取的 <code>switch_state</code> 字段语义未变。</p>
+    <div class="flow">
+      <div class="stage"><div class="n">PHASE 1</div><div class="t">PREPARING_TARGET</div></div>
+      <div class="arrow">→</div>
+      <div class="stage"><div class="n">PHASE 2</div><div class="t">WAIT_IPV4</div></div>
+      <div class="arrow">→</div>
+      <div class="stage"><div class="n">PHASE 3</div><div class="t">WAIT_IPV6</div></div>
+      <div class="arrow">→</div>
+      <div class="stage"><div class="n">PHASE 4</div><div class="t">VERIFY_IPV4</div></div>
+      <div class="arrow">→</div>
+      <div class="stage"><div class="n">PHASE 5</div><div class="t">VERIFY_IPV6</div></div>
+      <div class="arrow">→</div>
+      <div class="stage"><div class="n">PHASE 6</div><div class="t">SWITCHING</div></div>
+      <div class="arrow">→</div>
+      <div class="stage"><div class="n">PHASE 7</div><div class="t">VERIFY_TARGET</div></div>
+      <div class="arrow">→</div>
+      <div class="stage goal"><div class="n">PHASE 8</div><div class="t">COMMITTED</div></div>
+      <div class="arrow">→</div>
+      <div class="stage fail"><div class="n">任何失败</div><div class="t">ROLLBACK → FAILED</div></div>
+    </div>
+    <p class="flow-note">等待阶段是「条件满足立即继续、未满足短间隔重查、超时按序退出」的有界轮询；<code>ROUTE_GEN</code> 只在路由变更后失效缓存，提交/回滚均为顺序原子操作。</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2><span class="no">06</span>性能优化</h2>
+    <p class="lede">按「有则写、无则不编」原则，仅列有代码依据或模拟实测数据的优化点。</p>
+
+    <h3>固定等待：已是「条件检测」模式</h3>
+    <pre>旧形态（不存在于当前代码）：操作 → sleep → 查询 → sleep → 操作
+
+当前形态（保持不变）：操作 → 条件检测
+                              ├─ READY → 立即继续
+                              └─ NOT READY → 短间隔重查（受 budget 双重约束）
+                                                ├─ READY → 继续
+                                                └─ 超时 → 按序退出 / 回滚</pre>
+    <p>审查结论：仓库内不存在无条件的固定 <code>sleep</code>；所有等待均有界且有语义（见第 03 节审计表），因此没有可安全删除的固定等待。</p>
+
+    <h3>路由 dump 缓存（本轮核心，模拟实测）</h3>
+    <div class="grid2">
+      <div class="card">
+        <div class="t">优化前</div>
+        <p><code>show_defaults</code> 通过 <code>$(...) </code> 调用时在命令替换子 shell 中构建缓存，缓存随子 shell 消亡 → 每次读取都重新执行 <code>ip route show default</code>。单次 status 进程实测 34 次（v4=17、v6=17）。</p>
+      </div>
+      <div class="card">
+        <div class="t">优化后</div>
+        <p>缓存变量 <code>export</code> + <code>read_live_state</code> 主 shell 预热 → 子 shell 继承缓存命中。<b>单次 status 进程实测 2 次</b>（每族 1 次）；<code>ROUTE_GEN</code> 变更后失效重查，语义不变。</p>
+      </div>
+    </div>
+    <p>减少原因：同一进程内同一 <code>ROUTE_GEN</code> 下，多次命令替换读取改为一次真实内核查询；真实收益（秒级切换耗时）需在目标 OpenWrt 设备上实测，此处不宣称。</p>
+
+    <h3>热插拔路径 fork 减少</h3>
+    <p>角色分类（<code>iface_role</code>）从 hotplug 的独立子进程移入 <code>notify</code>，每事件后端进程启动 2 → 1 次；非参与接口（lan/loopback/未知）在进入 marker / reconcile 工作前即被跳过（模拟验证通过）。</p>
+
+    <h3>Shell 高频路径</h3>
+    <ul>
+      <li>未新增 <code>awk</code>/<code>sed</code>/<code>grep</code>/<code>cat</code> 重复调用；新增的两个参数函数复用既有 <code>uci_get</code> 进程内缓存。</li>
+      <li>全部改动保持 POSIX sh / BusyBox ash 兼容，未引入 bash / Python / Node 等额外运行时。</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2><span class="no">07</span>IPv4 / IPv6</h2>
+    <p class="lede">切换始终是「一个事务、两个地址族、同一个物理 WAN」，本轮未改变该保证，仅报告现状并确认后端一致性优化点。</p>
+    <div class="fig">
+      <svg viewBox="0 0 900 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="IPv4 IPv6 同物理 WAN 示意图">
+        <defs>
+          <marker id="arr7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#8C9BA8"/>
+          </marker>
+        </defs>
+        <g font-family="ui-monospace,Menlo,Consolas,monospace" font-size="12">
+          <rect x="40" y="130" width="170" height="56" rx="8" fill="#0E7490"/>
+          <text x="125" y="154" text-anchor="middle" fill="#fff" font-weight="700">切换事务</text>
+          <text x="125" y="172" text-anchor="middle" fill="#BDE3EF">单写锁 · 单 gen</text>
+          <line x1="210" y1="158" x2="276" y2="158" stroke="#8C9BA8" marker-end="url(#arr7)"/>
+          <line x1="210" y1="158" x2="276" y2="208" stroke="#8C9BA8" marker-end="url(#arr7)"/>
+          <line x1="210" y1="158" x2="276" y2="258" stroke="#8C9BA8" marker-end="url(#arr7)"/>
+
+          <rect x="280" y="118" width="150" height="44" rx="8" fill="#fff" stroke="#C4CDD8"/>
+          <text x="355" y="136" text-anchor="middle" fill="#101828" font-weight="700">IPv4 默认路由</text>
+          <text x="355" y="152" text-anchor="middle" fill="#475467">metric 10 / 50</text>
+          <rect x="280" y="186" width="150" height="44" rx="8" fill="#fff" stroke="#C4CDD8"/>
+          <text x="355" y="204" text-anchor="middle" fill="#101828" font-weight="700">IPv6 默认路由</text>
+          <text x="355" y="220" text-anchor="middle" fill="#475467">metric 10 / 50</text>
+          <rect x="280" y="236" width="150" height="44" rx="8" fill="#fff" stroke="#C4CDD8"/>
+          <text x="355" y="254" text-anchor="middle" fill="#101828" font-weight="700">policy / source</text>
+          <text x="355" y="270" text-anchor="middle" fill="#475467">netifd restricted</text>
+
+          <line x1="430" y1="140" x2="496" y2="140" stroke="#8C9BA8" marker-end="url(#arr7)"/>
+          <line x1="430" y1="208" x2="496" y2="208" stroke="#8C9BA8" marker-end="url(#arr7)"/>
+          <line x1="430" y1="258" x2="496" y2="258" stroke="#8C9BA8" marker-end="url(#arr7)"/>
+
+          <rect x="500" y="128" width="330" height="150" rx="12" fill="#E4F3EC" stroke="#177245"/>
+          <text x="665" y="150" text-anchor="middle" fill="#177245" font-weight="700">同一物理 WAN（目标出口）</text>
+          <text x="665" y="170" text-anchor="middle" fill="#177245">wan / modem 组 · 双栈门禁 strict_dual_stack</text>
+          <text x="665" y="196" text-anchor="middle" fill="#177245" font-size="11">IPv4 与 IPv6 的活跃/备用槽位由同一组管理，</text>
+          <text x="665" y="214" text-anchor="middle" fill="#177245" font-size="11">replace 一次一族、顺序原子提交；任一失败按序</text>
+          <text x="665" y="232" text-anchor="middle" fill="#177245" font-size="11">回滚双栈并收敛回原出口，禁止半切换（分裂）。</text>
+          <text x="665" y="258" text-anchor="middle" fill="#177245" font-size="11">探测经 <code>-I dev</code> 绑定被检查接口发出。</text>
+        </g>
+      </svg>
+      <div class="cap">图 2 · IPv4 + IPv6 同一物理 WAN（示意）</div>
+    </div>
+    <ul>
+      <li><b>route</b>：每地址族一个活跃槽位（metric 10）与备用槽位（metric 50），切换 = 原子 <code>replace</code>，无「无默认路由」瞬间。</li>
+      <li><b>metric</b>：<code>ACTIVE_METRIC=10</code> / <code>STANDBY_METRIC=50</code>，双栈对称。</li>
+      <li><b>policy / interface</b>：<code>ipv6_owner=follow_active_group</code>，IPv6 默认路由始终跟随活跃组；来源受限路由（netifd 安装）与程序管理的 plain 路由同 metric 时 tie-break 优先 plain。</li>
+      <li>一致性保障未因本轮修改而变化：<code>test_align_command_repairs_a_split</code> / <code>test_half_committed_switch_is_rolled_back</code> 等用例持续全绿。</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2><span class="no">08</span>可靠性</h2>
+    <p class="lede">本轮最核心的可靠性改动是修复锁竞争覆盖（F1）；回滚、热备、健康看门狗机制保持原样并验证通过。</p>
+    <div class="flow">
+      <div class="stage"><div class="t">参数校验</div></div>
+      <div class="arrow">→</div>
+      <div class="stage"><div class="t">目标检查</div></div>
+      <div class="arrow">→</div>
+      <div class="stage"><div class="t">超时/有限重试</div></div>
+      <div class="arrow">→</div>
+      <div class="stage"><div class="t">切换</div></div>
+      <div class="arrow">→</div>
+      <div class="stage"><div class="t">验证</div></div>
+      <div class="arrow">→</div>
+      <div class="stage goal"><div class="t">COMMITTED</div></div>
+      <div class="arrow">→</div>
+      <div class="stage fail"><div class="t">ROLLBACK</div></div>
+    </div>
+    <div class="tbl-scroll">
+    <table>
+      <colgroup><col style="width:26%"><col style="width:74%"></colgroup>
+      <thead><tr><th>项</th><th>内容</th></tr></thead>
+      <tbody>
+        <tr><td><b>F1 修复（本轮）</b></td><td><code>cmd_switch_worker</code> 锁竞争超时：若 <code>switch_in_progress</code>（另一 worker 正在切换），不再写入终态 <code>FAILED</code>，只记录并让出——该请求的 <code>gen</code> 会被在跑 worker 的 pending 循环拾取；仅当无进行中任务（锁被 reconcile 等占用）时保留 v1.7.1 的 FAILED 写入，保证「请求不消失」。</td></tr>
+        <tr><td>探针 A（锁忙 + 任务转为进行中）</td><td>状态保持 <code>PREPARING_TARGET</code>、pid 字段保留、worker 返回 2 —— 通过。</td></tr>
+        <tr><td>探针 B（锁忙 + 无进行中任务）</td><td>写入 <code>FAILED</code> + <code>reason=lock_busy</code> + gen 前进 —— 通过（保持原语义）。</td></tr>
+        <tr><td>锁等待参数化（本轮）</td><td><code>reconcile_wait</code>（默认 5s，下限 1）与 <code>switch_lock_wait</code>（默认 10s，下限 1）改为 UCI 可配，<code>cfg_int</code> 下限保护防误配 0；reconcile 短等让位给切换。</td></tr>
+        <tr><td>失败回滚（保持）</td><td><code>plan_written</code> 追踪 + <code>rollback_family</code> 按序回滚双栈 + <code>post_failure_converge</code> 收敛分裂；任何阶段失败不留半切换状态。</td></tr>
+        <tr><td>热备（保持）</td><td><code>warm_group_route</code> / <code>maintain_warm_routes</code> 维持备用槽位；主出口故障时直接切换路由，不重新拨号/建接口。</td></tr>
+        <tr><td>并发（保持）</td><td>mkdir+pid 单写锁串行化所有变更；worker setsid 后台；前端轮询 <code>switch_state</code> 获取进度，RPC 不阻塞。</td></tr>
+        <tr><td>健康检查（保持）</td><td>探测绑定目标接口（<code>-I dev</code>），避免「测 WAN1 包走 WAN2」误判；默认目标 1.1.1.1 / 2606:4700:4700::1111（可配置），全仓库无 114.114.114.114 硬编码。</td></tr>
+        <tr><td>不必要操作（保持）</td><td>无 <code>network restart</code>、无 <code>ipv6 disable</code> 机制（<code>test_no_restart_or_ipv6_disable_mechanisms</code> 全绿）；仅目标接口一次 <code>ifup</code> 重试有界触发。</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2><span class="no">09</span>前端兼容性</h2>
+    <p class="lede">以下数字由 <code>git diff --name-only</code> 与仓库文件核对得出。</p>
+    <div class="tbl-scroll">
+    <table>
+      <colgroup><col style="width:40%"><col style="width:60%"></colgroup>
+      <thead><tr><th>项</th><th>结果</th></tr></thead>
+      <tbody>
+        <tr><td>前端代码修改</td><td class="ok">0（htdocs/luci-static/resources/ 未出现在 diff）</td></tr>
+        <tr><td>页面结构修改</td><td class="ok">0</td></tr>
+        <tr><td>菜单修改</td><td class="ok">0</td></tr>
+        <tr><td>中文文案修改</td><td class="ok">0</td></tr>
+        <tr><td>RPC 接口修改</td><td class="ok">0（方法名 / 参数 / 返回字段 / 错误字段不变）</td></tr>
+        <tr><td>前端可见行为</td><td class="ok">不变；F1 修复仅消除「先报失败、后翻成功」的误报窗口</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2><span class="no">10</span>验证与安全</h2>
+    <div class="tbl-scroll">
+    <table>
+      <colgroup><col style="width:26%"><col style="width:74%"></colgroup>
+      <thead><tr><th>检查</th><th>结果</th></tr></thead>
+      <tbody>
+        <tr><td><code>sh -n</code> 全部后端脚本</td><td>4/4 通过（主脚本 / status / hotplug / init.d）</td></tr>
+        <tr><td>测试套件 <code>tests/run_tests.sh</code></td><td>410 checks / 0 failure（含切换、锁串行化、热插拔合并、回滚、双栈分裂收敛）</td></tr>
+        <tr><td>前端回归 <code>tests/test_exit_card.js</code></td><td>149 checks / 0 failure</td></tr>
+        <tr><td>定向探针（F1 锁竞争 A/B、路由缓存 34→2、notify 角色过滤）</td><td>全部通过（mock 环境，过程脚本保留于本地）</td></tr>
+        <tr><td><code>git diff --check</code> / 行尾</td><td>无空白错误；全部文件强制 LF（0 个 CR）</td></tr>
+        <tr><td>前端零改动</td><td><code>git diff --name-only</code> 仅含 3 个后端文件 + 本报告</td></tr>
+        <tr><td>凭据安全</td><td>本报告、源码 diff、提交内容均不含任何 GitHub Token / 密码 / API Key；提交经环境变量传递，不落盘不落日志</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="note"><b>验证缺口：</b>未连接 OpenWrt 实机（192.168.10.1），切换耗时、成功率、中断时间均未测量；性能结论为「静态代码分析 + mock 模拟」，真实收益需在目标设备上测试确认。</div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    仓库：github.com/LianXia233/luci-app-h5000m-netmode · 本次提交范围：后端优化（3 文件）+ 本报告（docs/） · 前端保持完全不变
+  </div>
+</footer>
+
+</body>
+</html>
