@@ -750,8 +750,12 @@ group_family_has_address() { # <group> <4|6>
 # and the status output, and `status` is polled every five seconds.
 section_status_json() { # <section>
 	local key var cached flag
-	# The sanitise replaces a `tr` pipe (two forks) with one pattern expansion.
-	key="${1//[^a-zA-Z0-9]/_}"
+	# Section names are user-controllable, so the memo key is sanitised before it
+	# becomes part of an eval'd variable name.  The one-pattern-expansion form
+	# `${1//[^a-zA-Z0-9]/_}` is a bashism: dash rejects it with "Bad substitution"
+	# at run time (sh -n cannot see it), which made every status/switch path exit
+	# rc=2 in CI.  The tr pipe is POSIX and works on both dash and BusyBox ash.
+	key="$(printf '%s' "$1" | tr -c 'a-zA-Z0-9' '_')"
 	var="SECJSON_$key"
 	eval "flag=\${${var}_set:-0}"
 	if [ "$flag" != "1" ]; then
