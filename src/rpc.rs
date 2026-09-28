@@ -423,7 +423,7 @@ fn cmd_eth_fallback(args: &[String]) -> i32 {
 }
 
 /// `set-device-map <role> <dev>`.
-fn cmd_set_device_map(role: &str, dev: &str) -> i32 {
+fn cmd_set_device_map(cfg: &AppConfig, role: &str, dev: &str) -> i32 {
     if !matches!(role, "wan" | "modem") || dev.is_empty() {
         eprintln!("Usage: h5000m-netmode set-device-map {{wan|modem}} <device>");
         return 64;
@@ -433,6 +433,27 @@ fn cmd_set_device_map(role: &str, dev: &str) -> i32 {
             "config",
             &format!("warning: {dev} is not present in /sys/class/net"),
         );
+    }
+    // A device mapped to both exits makes every ownership verdict ambiguous.
+    // The snapshot would silently arbitrate (wired wins); a *manual* conflict
+    // is rejected outright instead - the user asked for an impossible layout.
+    let snap = network::read_live_state();
+    let (other_devs, other_name): (&[String], &str) = if role == "wan" {
+        (&snap.modem_devs, "modem")
+    } else {
+        (&snap.wan_devs, "wan")
+    };
+    if other_devs.iter().any(|d| d == dev) {
+        eprintln!(
+            "device conflict: {dev} already carries the {other_name} exit; \
+             pick a different device or clear the {other_name} mapping first"
+        );
+        log::log_warn(
+            "config",
+            &format!("rejected manual map {role}={dev}: conflicts with {other_name}"),
+        );
+        let _ = cfg;
+        return 64;
     }
     let key = format!("h5000m_netmode.settings.{role}_device");
     if uci::uci_set_commit("h5000m_netmode", &key, dev).is_err() {
@@ -546,6 +567,7 @@ pub fn dispatch(args: &[String]) -> i32 {
                 return 2;
             }
             let rc = cmd_set_device_map(
+                &cfg,
                 args.get(1).map(|s| s.as_str()).unwrap_or(""),
                 args.get(2).map(|s| s.as_str()).unwrap_or(""),
             );

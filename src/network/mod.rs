@@ -82,6 +82,22 @@ pub struct LiveSnapshot {
     pub win4_ecmp: u32,
     pub win6_ecmp: u32,
 
+    /// External (virtual) routing detected on the FIB winner: a TUN device or
+    /// a policy-routing engine owning the default route. `1` does NOT mean the
+    /// plugin stops managing the WAN/5G physical uplinks - the physical owner
+    /// is reported separately and the reconciler keeps working underneath.
+    pub external_route: u8,
+    /// "tun" (TUN/TAP device on the FIB winner) or the detected policy engine
+    /// (mwan3/daed/sing-box/openclash/clash/passwall/homeproxy), else
+    /// "unknown" when the winner is simply unmapped. Empty when
+    /// external_route=0.
+    pub external_route_source: String,
+    /// The physical uplink behind any virtual egress: the best default route
+    /// on a non-tunnel device (IPv4 preferred, IPv6 fallback). This stays a
+    /// "wan"/"modem" name even while a VPN/TUN owns the FIB, so the UI can
+    /// show what the tunnel actually rides on.
+    pub external_physical_owner: String,
+
     pub slot_owner: String,
 }
 
@@ -495,8 +511,92 @@ pub fn read_live_state() -> LiveSnapshot {
         snap.win6_ecmp = 0;
     }
 
+    // External (virtual) routing detection. A "other" FIB winner used to make
+    // the whole page report "external takeover" with no detail; now the
+    // physical carrier behind the virtual egress is resolved and the
+    // reconciler keeps managing the physical uplinks underneath.
+    let ext4 = !snap.win4_dev.is_empty() && snap.win4_owner == "other";
+    let ext6 = !snap.win6_dev.is_empty() && snap.win6_owner == "other";
+    snap.external_route = if ext4 || ext6 { 1 } else { 0 };
+    if ext4 || ext6 {
+        let dev = if ext4 {
+            snap.win4_dev.clone()
+        } else {
+            snap.win6_dev.clone()
+        };
+        let tun = sysfs::dev_type(&dev)
+            .map(sysfs::is_tunnel_type)
+            .unwrap_or(false);
+        if tun {
+            snap.external_route_source = "tun".into();
+        } else {
+            let engine = detect_policy_engine();
+            snap.external_route_source = if engine.is_empty() {
+                "unknown".into()
+            } else {
+                engine
+            };
+        }
+    }
+    snap.external_physical_owner = external_physical_owner(&mut snap);
+
     snap.slot_owner = slot_owner(&snap);
     snap
+}
+
+/// Policy-routing engines detectable without forking: a bounded /proc scan.
+/// `mwan3` has no resident daemon (hotplug driven), so a miss there degrades
+/// to "unknown" rather than a false "no external routing".
+fn detect_policy_engine() -> String {
+    const ENGINES: [&str; 7] = [
+        "mwan3",
+        "daed",
+        "sing-box",
+        "openclash",
+        "clash",
+        "passwall",
+        "homeproxy",
+    ];
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return String::new();
+    };
+    for e in entries.flatten() {
+        let Ok(name) = e.file_name().into_string() else {
+            continue;
+        };
+        if !name.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(cmdline) = std::fs::read(format!("/proc/{name}/cmdline")) else {
+            continue;
+        };
+        let cmd = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+        if cmd.contains("h5000m-netmode") {
+            continue; // never match ourselves
+        }
+        for eng in ENGINES {
+            if cmd.contains(eng) {
+                return eng.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// The physical uplink behind whatever owns the FIB: the best default route
+/// whose device is not a tunnel (IPv4 preferred, IPv6 fallback).
+fn external_physical_owner(snap: &mut LiveSnapshot) -> String {
+    for fam in [Family::V4, Family::V6] {
+        if let Some(r) = routes::winning_default(fam) {
+            let tun = sysfs::dev_type(&r.dev)
+                .map(sysfs::is_tunnel_type)
+                .unwrap_or(false);
+            if !tun {
+                return route_owner(snap, &r.dev, "");
+            }
+        }
+    }
+    "none".into()
 }
 
 fn dedup(a: &[String], b: &[String]) -> Vec<String> {

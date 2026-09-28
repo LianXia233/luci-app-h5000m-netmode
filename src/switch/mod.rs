@@ -213,8 +213,7 @@ pub fn switch_run(
     if previous_mode == target_mode
         && previous == target.as_str()
         && network::group_complete(snap, target, cfg.strict_dual_stack)
-        && transaction::verify_group_priority(snap, target, cfg).is_ok()
-        && transaction::verify_excluded_families(snap, target, cfg).is_ok()
+        && transaction::verify_commit(snap, target, cfg).is_ok()
     {
         log::log_info(
             "switch",
@@ -417,15 +416,9 @@ pub fn switch_run(
     // ---- VERIFY_TARGET ----
     if failure.is_none() {
         task_phase(SmState::VerifyTarget, "verifying the committed exit");
-        let mut reason = String::new();
-        let ok_priority = transaction::verify_group_priority(snap, target, cfg)
-            .map_err(|r| {
-                reason = r;
-            })
-            .is_ok();
-        if !ok_priority {
-            failure = Some(reason);
-        } else if let Err(r) = transaction::verify_excluded_families(snap, target, cfg) {
+        // verify_commit: ipv6_* failures degrade to warnings under
+        // strict_dual_stack=0 so a committed IPv4 exit is never rolled back.
+        if let Err(r) = transaction::verify_commit(snap, target, cfg) {
             failure = Some(r);
         } else {
             // One settle window, then the same verification again; a target
@@ -439,7 +432,7 @@ pub fn switch_run(
                 budget::bounded_sleep(settle);
             }
             let fresh = network::read_live_state();
-            if let Err(r) = transaction::verify_group_priority(&fresh, target, cfg) {
+            if let Err(r) = transaction::verify_commit(&fresh, target, cfg) {
                 failure = Some(r);
             } else if verify_group_online_after_settle(&fresh, cfg, target).is_err() {
                 failure = Some(DEFAULT_VERIFY_REASON.to_string());

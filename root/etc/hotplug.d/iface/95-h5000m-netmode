@@ -27,10 +27,13 @@ esac
 
 [ -n "$INTERFACE" ] || exit 0
 
-# Detached and silent: the hotplug helper must not hold netifd waiting on a
-# debounce window, and its output must not keep an rpcd pipe open.
+# Detached: the hotplug helper must not hold netifd waiting on a debounce
+# window, and its stdout must not keep an rpcd pipe open. stderr carries the
+# [netmode]-prefixed log lines and is pushed into syslog via logger, so a
+# coalesced or skipped event is still visible in `logread`.
 (
-	/usr/sbin/h5000m-netmode notify "$INTERFACE" "$ACTION" >/dev/null 2>&1
+	/usr/sbin/h5000m-netmode notify "$INTERFACE" "$ACTION" 2>&1 >/dev/null \
+		| logger -t h5000m-netmode -p user.info
 ) &
 
 exit 0

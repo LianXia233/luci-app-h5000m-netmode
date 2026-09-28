@@ -34,7 +34,11 @@ start_service() {
 	procd_set_param command /usr/sbin/h5000m-netmode watch
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 0
-	procd_set_param stderr 0
+	# stderr carries the [netmode]-prefixed log lines (see system/log.rs);
+	# forwarding it to syslog is what makes `logread | grep netmode` work.
+	# stdout stays off: the watch loop prints nothing on stdout, and the
+	# status snapshot must never leak into syslog.
+	procd_set_param stderr 1
 	procd_set_param nice 10
 	procd_close_instance
 }

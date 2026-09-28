@@ -223,6 +223,20 @@ pub fn print_status(cfg: &AppConfig, snap: &LiveSnapshot) {
     line(&mut out, "win6_metric", snap.win6_metric);
     line(&mut out, "win4_ecmp", snap.win4_ecmp);
     line(&mut out, "win6_ecmp", snap.win6_ecmp);
+    // External (virtual) routing on the FIB winner. external_route=1 is
+    // informational: the plugin keeps managing the physical WAN/5G uplinks
+    // underneath, and external_physical_owner names the carrier they ride.
+    line(&mut out, "external_route", snap.external_route);
+    line(
+        &mut out,
+        "external_route_source",
+        &snap.external_route_source,
+    );
+    line(
+        &mut out,
+        "external_physical_owner",
+        &snap.external_physical_owner,
+    );
 
     line(
         &mut out,

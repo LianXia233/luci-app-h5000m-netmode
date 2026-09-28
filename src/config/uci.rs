@@ -187,12 +187,44 @@ pub fn uci_has_key(dotted: &str) -> bool {
     }
 }
 
+/// Section type as written in the `config <type> ['<name>']` header.
+///
+/// `parse_uci` only stores *options*; the section type lives in the header and
+/// is lost there. Role discovery needs it, so this walks the header lines
+/// directly (same comment/quote handling as `parse_uci`). Anonymous sections
+/// are skipped: netifd requires named interfaces, and `parse_uci`'s synthetic
+/// `__anonN` names would not match anything downstream either.
+fn section_types(path: &str) -> Vec<(String, String)> {
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<(String, String)> = Vec::new();
+    for raw in text.lines() {
+        let line = strip_comment(raw.trim());
+        if line.is_empty() {
+            continue;
+        }
+        let toks = tokenize(&line);
+        if toks.len() >= 2 && toks[0] == "config" && toks.len() >= 3 {
+            out.push((toks[2].clone(), toks[1].clone()));
+        }
+    }
+    out
+}
+
 /// List every `interface` section in the network config
 /// (`all_interface_sections`).
+///
+/// The type check is against the section *header* (`config interface 'wan'`),
+/// not an option: earlier this matched `opts.get("type") == "interface"`,
+/// which no standard network file ever satisfies (the `option type 'bridge'`
+/// lines belong to anonymous `config device` sections), so this returned an
+/// empty list on every real device and the modem group was never discovered.
 pub fn interface_sections() -> Vec<String> {
-    let doc = parse_uci(NETWORK_CFG);
-    doc.into_iter()
-        .filter(|(_, (opts, _))| opts.get("type").map(|t| t == "interface").unwrap_or(false))
+    section_types(NETWORK_CFG)
+        .into_iter()
+        .filter(|(_, t)| t == "interface")
         .map(|(name, _)| name)
         .collect()
 }
@@ -292,6 +324,36 @@ mod tests {
         let (opts, lists) = &doc["settings"];
         assert_eq!(opts["mode"], "modem_first");
         assert_eq!(lists["probe_targets"], vec!["223.5.5.5", "119.29.29.29"]);
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn section_types_skips_devices_and_anonymous() {
+        let dir = std::env::temp_dir();
+        let p = dir.join("h5_test_sections.cfg");
+        // Mirrors a real OpenWrt network file: anonymous `config device`
+        // sections (one carrying `option type 'bridge'`) interleaved with
+        // named `config interface` sections.
+        fs::write(
+            &p,
+            "config interface 'loopback'\n\toption device 'lo'\n\n\
+             config device\n\toption name 'br-lan'\n\toption type 'bridge'\n\tlist ports 'eth1'\n\n\
+             config interface 'wan'\n\toption device 'eth0'\n\toption proto 'dhcp'\n\n\
+             config device\n\toption name 'eth0'\n\n\
+             config interface 'fm350'\n\toption device 'eth2'\n\n\
+             # config interface 'ghost'\n",
+        )
+        .unwrap();
+        let types = section_types(p.to_str().unwrap());
+        let interfaces: Vec<String> = types
+            .iter()
+            .filter(|(_, t)| t == "interface")
+            .map(|(n, _)| n.clone())
+            .collect();
+        assert_eq!(interfaces, vec!["loopback", "wan", "fm350"]);
+        // The bridge device section must not leak into interface discovery
+        // (the regression behind "5G hardware not configured").
+        assert!(!interfaces.iter().any(|n| n == "br-lan"));
         fs::remove_file(&p).ok();
     }
 }

@@ -39,8 +39,13 @@ return view.extend({
 					devices.push(name);
 			});
 			this.availableDevices = devices;
+			this.deviceSourceError = false;
 		}, this)).catch(L.bind(function() {
-			this.availableDevices = [ 'eth0', 'eth1', 'eth2' ];
+			// 后端不可达时禁止前端捏造设备名：本地猜测的 eth0/eth1/eth2 会把用户
+			// 引向错误的接口映射（这正是"前端自己猜状态"要消灭的行为）。空列表
+			// 加显式错误标记，让下拉框如实反映"后端没有给出任何可用接口"。
+			this.availableDevices = [];
+			this.deviceSourceError = true;
 		}, this)).then(L.bind(function() {
 			return fs.exec('/usr/sbin/h5000m-netmode', [ 'get-device-map' ]);
 		}, this)).then(L.bind(function(res) {
@@ -52,7 +57,9 @@ return view.extend({
 			});
 			this.deviceMap = map;
 		}, this)).catch(L.bind(function() {
-			this.deviceMap = { wan: 'eth1', modem: 'eth2' };
+			// 同上：映射读取失败时保持空对象，不伪造 wan/modem 绑定。空映射在
+			// 下拉框里表现为"未绑定"，与后端 get-device-map 失败的事实一致。
+			this.deviceMap = {};
 		}, this));
 	},
 
@@ -152,6 +159,7 @@ return view.extend({
 			'.h5net-note{background:var(--h5-blue-soft);color:var(--h5-blue);border-color:rgba(59,130,246,0.2)}',
 			'.h5net-note.alert{background:var(--h5-red-soft);color:var(--h5-red);border-color:rgba(239,68,68,0.25);font-weight:600}',
 			'.h5net-note.warn{background:var(--h5-amber-soft);color:var(--h5-amber);border-color:rgba(245,158,11,0.25)}',
+			'.h5net-note.multi{flex-direction:column;align-items:flex-start;gap:3px}',
 
 			/* ================= 8大核心指标卡片矩阵 ================= */
 			'.h5net-stat{margin:0 0 18px}',
@@ -224,6 +232,7 @@ return view.extend({
 				'border-top:1px dashed var(--h5-card-border);',
 			'}',
 			'.h5net-device-row label{font-size:12px;font-weight:600;color:var(--h5-text-sub);white-space:nowrap}',
+			'.h5net-device-empty{font-size:12px;color:var(--h5-text-muted);font-style:italic}',
 			'.h5net-device-row select{',
 				'flex:1;padding:7px 10px;border:1px solid var(--h5-card-border);border-radius:8px;',
 				'background:var(--h5-card-bg);font-size:12.5px;font-weight:600;color:var(--h5-text-main);',
@@ -890,9 +899,18 @@ return view.extend({
 		var dev = ev.target.value;
 		if (!dev || this.applying || this.switchRunning()) return;
 
+		// 后端 set-device-map 对双角色冲突（wan 与 modem 绑到同一物理口）直接
+		// 拒绝并返回 64。前端在这里做同一判定并提前拦截：不弹令人生畏的失败
+		// 通知，而是把下拉框弹回原值，就地说明原因。旧版会悄悄把另一角色"顶"
+		// 成别的接口——那是一次用户没有批准的写操作，且顶出来的值可能是空，
+		// 留下 half-configured 的映射。
 		var otherRole = role === 'wan' ? 'modem' : 'wan';
-		if (this.pendingDeviceMap[otherRole] === dev)
-			this.pendingDeviceMap[otherRole] = this.pendingDeviceMap[role];
+		if ((this.pendingDeviceMap || {})[otherRole] === dev) {
+			ui.addNotification(null, E('p',
+				_('接口 %s 已绑定到另一角色。WAN 与 5G 必须使用不同的物理接口。').format(dev)), 'warning');
+			ev.target.value = this.pendingDeviceMap[role] || '';
+			return;
+		}
 
 		this.pendingDeviceMap[role] = dev;
 		this.deviceDirty = true;
@@ -902,6 +920,16 @@ return view.extend({
 	deviceDropdown: function(kind) {
 		var devices = this.availableDevices || [];
 		var currentDev = (this.pendingDeviceMap || {})[kind] || '';
+
+		// 后端 list-devices 不可达或返回空时不渲染一个空下拉框（用户会误以为
+		// 没得选是自己的问题），而是明确说明列表为什么是空的。
+		if (!devices.length) {
+			return E('div', { 'class': 'h5net-device-row' }, [
+				E('label', {}, _('绑定物理接口')),
+				E('span', { 'class': 'h5net-device-empty' },
+					this.deviceSourceError ? _('后端未响应，物理接口列表不可用') : _('后端未报告任何可用物理接口'))
+			]);
+		}
 
 		return E('div', {
 			'class': 'h5net-device-row',
@@ -1023,7 +1051,38 @@ return view.extend({
 		if (active === preferred) {
 			return { text: _('✔ 双栈网络畅通：IPv4 与 IPv6 均稳定经由首选出口 %s 发送，热备链路就绪。').format(this.exitLabel(preferred)), cls: 'h5net-note' };
 		}
-		return { text: _('当前数据流量由外部系统路由（例如 mwan3、VPN 或 daed）接管调度。'), cls: 'h5net-note warn' };
+		// 走到这里 active 只能是 'other'：FIB 上的默认路由由插件之外的对象持有。
+		// 旧文案只甩一句"被外部系统接管"，无法回答用户最关心的问题——流量实际
+		// 从哪个物理口出去。后端现在给出三个独立字段（external_route_source：
+		// 谁在调度；external_physical_owner：哪个物理口承载），前端如实拆开
+		// 展示，不猜测、不替代后端判断。外部路由只享有调度权，物理出口的主备
+		// 监管仍归本插件，文案里要把这一点说清楚。
+		var SOURCE_LABELS = {
+			'tun': _('VPN/TUN 隧道'),
+			'mwan3': 'mwan3',
+			'daed': 'daed (eBPF)',
+			'sing-box': 'sing-box',
+			'openclash': 'OpenClash',
+			'clash': 'Clash',
+			'passwall': 'PassWall',
+			'homeproxy': 'HomeProxy'
+		};
+		var src = data.external_route_source || 'unknown';
+		var srcLabel = SOURCE_LABELS[src] || _('未识别的外部路由来源');
+		var owner = data.external_physical_owner || 'none';
+		var ownerLabel = (owner === 'wan') ? _('有线 WAN')
+			: (owner === 'modem') ? _('5G 模组')
+			: (owner === 'other') ? _('未映射接口')
+			: _('无法定位');
+		var carrierDev = (this.deviceMap || {})[owner] || '';
+		return {
+			text: [
+				E('span', {}, _('检测到外部路由正在上层调度数据流量（来源：%s）。本插件继续监管物理出口与主备切换，不会改动外部路由自身的路由表。').format(srcLabel)),
+				E('span', {}, _('当前路由来源：%s').format(srcLabel)),
+				E('span', {}, _('当前实际物理承载：%s%s').format(ownerLabel, carrierDev ? ' (' + carrierDev + ')' : ''))
+			],
+			cls: 'h5net-note warn multi'
+		};
 	},
 
 	metaBar: function(data) {
@@ -1437,7 +1496,10 @@ return view.extend({
 		steps.forEach(function(step) {
 			chain = chain.then(function() {
 				return fs.exec('/usr/sbin/h5000m-netmode', step.args).catch(function(err) {
-					throw new Error(step.label + '：' + (err.message || _('未知错误')));
+					// 后端拒绝（如双角色冲突返回 64）时把 stderr 里的原因带出来，
+					// 不能只报一个"Command failed"让用户猜。
+					var detail = (err.stderr || '').trim();
+					throw new Error(step.label + '：' + (detail || err.message || _('未知错误')));
 				});
 			});
 		});

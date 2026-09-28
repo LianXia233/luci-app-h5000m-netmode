@@ -26,10 +26,15 @@ fn emit(level: &str, module: &str, msg: &str) {
     if !enabled() {
         return;
     }
-    // `date +%s` style wall timestamp, then [LEVEL] module: message.
-    // stderr keeps the LuCI `fs.exec` stdout contract untouched.
-    eprintln!("[{}] {}: {}", unix_ts(), level, msg);
-    let _ = module;
+    // `[netmode] <ts> LEVEL <module>: <message>`.
+    //
+    // The `[netmode]` prefix is the contract that makes `logread | grep
+    // netmode` usable on the device: stderr of the procd watchdog and of the
+    // hotplug helper is forwarded into syslog, so every switch phase, probe
+    // round and rollback lands there. The module tag is kept (dropping it
+    // cost us the only signal that separated route surgery from health
+    // probes); stderr keeps the LuCI `fs.exec` stdout contract untouched.
+    eprintln!("[netmode] [{}] {} {}: {}", unix_ts(), level, module, msg);
 }
 
 /// INFO-level log with a module tag: `log_info("health", "wan=wwan0 icmp=ok")`.

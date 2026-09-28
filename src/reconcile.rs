@@ -143,10 +143,9 @@ pub fn align_to(
         ("state", SmState::VERIFY_TARGET),
         ("message", &format!("verifying {}", group.as_str())),
     ]);
-    if ok
-        && transaction::verify_group_priority(snap, group, cfg).is_ok()
-        && transaction::verify_excluded_families(snap, group, cfg).is_ok()
-    {
+    // verify_commit keeps an IPv4-only commit alive when IPv6 verification
+    // fails under strict_dual_stack=0 (IPv6 is an enhancement, not a gate).
+    if ok && transaction::verify_commit(snap, group, cfg).is_ok() {
         mark_align(reason, group.as_str());
         let _ = state::state_write(&[
             ("state", SmState::COMMITTED),

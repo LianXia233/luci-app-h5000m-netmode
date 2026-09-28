@@ -263,6 +263,38 @@ pub fn verify_excluded_families(
     Ok(())
 }
 
+/// `verify_commit`: post-commit verification with the IPv6 soft-failure rule.
+///
+/// A `strict_dual_stack=0` deployment must never let an IPv6 verification
+/// problem roll back a switch whose IPv4 commit already succeeded: IPv6 is an
+/// enhancement, never a dependency of the state machine. Every verify error
+/// prefixed with `ipv6_` therefore degrades to a logged warning under
+/// strict=0; IPv4 errors (`ipv4_*`) and structural errors still fail.
+pub fn verify_commit(
+    snap: &LiveSnapshot,
+    g: Group,
+    cfg: &AppConfig,
+) -> std::result::Result<(), String> {
+    let check = || -> std::result::Result<(), String> {
+        verify_group_priority(snap, g, cfg)?;
+        verify_excluded_families(snap, g, cfg)
+    };
+    match check() {
+        Ok(()) => Ok(()),
+        Err(e) if !cfg.strict_dual_stack && e.starts_with("ipv6_") => {
+            log::log_warn(
+                "switch",
+                &format!(
+                    "warning: {e} on {} degraded to a warning (strict_dual_stack=0); keeping the committed exit",
+                    g.as_str()
+                ),
+            );
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// `verify_group_online`: bounded reachability probes for every required
 /// family (used by align; a switch probes before committing too).
 pub fn verify_group_online(
