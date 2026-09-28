@@ -2,6 +2,20 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.8.1] — 2026-09-28
+
+版本号提升并触发 CI 编译：GitHub Actions 由 shell 检查改造为 Rust 编译工作流。
+
+### 构建 / CI
+
+- **CI 改为 Rust 编译工作流**：`cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` /
+  `cargo test` / `cargo build --release --target aarch64-unknown-linux-musl`，并断言产物为
+  `statically linked` 的 aarch64 ELF、`root/usr/sbin/*` 保持 100755。
+- 保留前端检查：`node --check`、`jq empty`、`msgfmt`、目录同步检查、exit-card 测试；
+  `svg_audit` 的字段契约核对对象由 shell 后端改为 `src/status.rs`。
+- 剩余 shell 文件（init.d / hotplug.d / uci-defaults）继续 `sh -n` 检查。
+- `PKG_VERSION` 与 Cargo 版本同步升至 1.8.1。
+
 ## [v1.8.0] — 2026-09-28
 
 后端整体 **Rust 化重构**：`root/usr/sbin/h5000m-netmode` 与 `h5000m-netmode-status` 由 shell

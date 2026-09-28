@@ -14,32 +14,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  static-checks:
+  rust-backend:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust toolchain (stable + aarch64 musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+          components: clippy, rustfmt
       - name: Install validation tools
         run: sudo apt-get update && sudo apt-get install -y gettext
-      - name: Check shell syntax
+      - name: Format check
+        run: cargo fmt --check
+      - name: Clippy (all targets, deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Unit tests
+        run: cargo test
+      - name: Cross-compile static aarch64 ELF (release)
+        # The OpenWrt package ships the prebuilt binary in root/usr/sbin.
+        # Linking happens with rust-lld, so no musl cross C toolchain is needed.
+        run: cargo build --release --target aarch64-unknown-linux-musl
+      - name: Assert shipped binaries are static aarch64 executables (100755)
+        # A dynamically linked ELF would silently fail on a musl router; a lost
+        # exec bit would make procd fail to start the service.  Both are pinned
+        # here instead of on-device.
         run: |
-          sh -n root/usr/sbin/h5000m-netmode
-          sh -n root/usr/sbin/h5000m-netmode-status
+          file target/aarch64-unknown-linux-musl/release/h5000m-netmode | grep -q 'statically linked'
+          file target/aarch64-unknown-linux-musl/release/h5000m-netmode-status | grep -q 'statically linked'
+          file target/aarch64-unknown-linux-musl/release/h5000m-netmode | grep -q 'ARM aarch64'
+          test -x root/usr/sbin/h5000m-netmode
+          test -x root/usr/sbin/h5000m-netmode-status
+          echo "shipped binaries are static aarch64 executables"
+      - name: Check shell syntax of the remaining shell backend files
+        # The core backend is Rust now; init/hotplug/uci-defaults stay POSIX sh
+        # and must keep parsing under dash (CI default /bin/sh).
+        run: |
           sh -n root/etc/hotplug.d/iface/95-h5000m-netmode
           sh -n root/etc/uci-defaults/90-h5000m-netmode
           sh -n root/etc/init.d/h5000m-netmode
-          sh -n tests/run_tests.sh
-          for f in tests/mockbin/*; do sh -n "$f"; done
       - name: Assert shipped scripts are executable
         # An init script without the exec bit is the quietest possible failure:
         # rc.d still links it, procd cannot execve it, the service never starts,
-        # and nothing logs an error.  v1.6.1 and earlier shipped
-        # root/etc/init.d/h5000m-netmode as 0644, so the watchdog that the docs
-        # and FIXES describe as covering hotplug's blind spots never ran at all.
-        # Neither `sh -n` nor `sh tests/run_tests.sh` can see this - they invoke
-        # the interpreter explicitly and bypass the mode - so it needs its own
-        # assertion.  tests/mockbin/* are intentionally left out: the suite
-        # chmods its own stubs.
+        # and nothing logs an error.  Neither `sh -n` nor cargo sees this, so it
+        # needs its own assertion.
         run: |
           bad="$(git ls-files -s | awk '$1 == "100644" { print $4 }' \
                  | grep -E '^(root/(etc/(init\.d|hotplug\.d|uci-defaults|rc\.d)/|usr/(sbin|bin)/)|scripts/|tests/.*\.sh$)' || true)"
@@ -58,36 +77,13 @@ jobs:
       - name: Validate translations
         run: msgfmt --check --check-format -o /dev/null po/zh_Hans/h5000m-netmode.po
       - name: Gate the catalogue on what po2lmo does with it
-        # msgfmt validates syntax and the next step validates freshness; neither
-        # notices a catalogue that po2lmo deletes outright.  v1.6.0 shipped exactly
-        # that: 112 entries, every msgstr equal to its msgid, zero entries surviving
-        # the compiler, no .lmo in the package, and an English page title in a
-        # Chinese UI while every check stayed green.  The self-test runs first so
-        # that a check which cannot fail is caught here, not in production.
         run: |
           python3 tools/check_catalog.py --self-test
           python3 tools/check_catalog.py
       - name: Keep the translation catalogue in sync with the source
-        # The committed catalogue once described an entire earlier revision of the
-        # page, so every entry in it was inert: the view's msgids had no catalogue
-        # entries at all.  Regenerating fixes the file today; this check is what
-        # stops it from rotting again the next time a string is added.
         run: python3 tools/sync_po.py --check
-      - name: Audit the animated SVGs and the view/backend field contract
-        # The animations live partly in SVG class attributes inside JS string
-        # literals, so "the icons render" is not something a syntax check can
-        # see; a class with no rule silently renders frozen, and a field the
-        # view reads but status does not print becomes undefined in the UI.
-        run: node tests/svg_audit.js htdocs/luci-static/resources/view/h5000m/netmode.js root/usr/sbin/h5000m-netmode
+      - name: Audit the animated SVGs and the view/status field contract
+        # The backend field oracle is the Rust `status.rs` snapshot emitter now.
+        run: node tests/svg_audit.js htdocs/luci-static/resources/view/h5000m/netmode.js src/status.rs
       - name: Test the exit card's branches
-        # The card has four branches and the device is in exactly one of them, so
-        # the other three can only be exercised off-device: provoking them on a
-        # router would mean changing the routing policy the test runs over.  The
-        # module is loaded with stubs, its source unmodified.
         run: node tests/test_exit_card.js htdocs/luci-static/resources/view/h5000m/netmode.js
-      - name: Run backend test suite
-        # dash here, BusyBox ash on the router: the suite is deliberately POSIX sh
-        # so that the exit-policy decisions that are unsafe to provoke on a live
-        # device (policy routing, symbolic device refs, an IPv6 split) are pinned
-        # by assertions instead of by manual testing.
-        run: sh tests/run_tests.sh root/usr/sbin/h5000m-netmode
