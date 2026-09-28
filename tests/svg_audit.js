@@ -241,12 +241,22 @@ report(!unscoped.length, 'every responsive selector carries the .h5net scope it 
 
 const emitted = (function() {
 	// Only the status branch is the contract; other echo statements in the script
-	// belong to other subcommands.
+	// belong to other subcommands.  The backend may be the legacy POSIX script
+	// (`echo "key=...`) or the Rust snapshot emitter (`line(&mut out, "key", ...`)
+	// in src/status.rs); both are accepted so the audit keeps working after the
+	// Rust rewrite.
 	const start = backendSrc.indexOf('print_status() {');
-	if (start < 0) throw new Error('print_status() not found in ' + backend);
-	const end = backendSrc.indexOf('\n}\n', start);
-	return new Set([ ...backendSrc.slice(start, end < 0 ? backendSrc.length : end)
-		.matchAll(/echo\s+"([a-z0-9_]+)=/g) ].map(m => m[1]));
+	if (start >= 0) {
+		const end = backendSrc.indexOf('\n}\n', start);
+		return new Set([ ...backendSrc.slice(start, end < 0 ? backendSrc.length : end)
+			.matchAll(/echo\s+"([a-z0-9_]+)=/g) ].map(m => m[1]));
+	}
+	const fstart = backendSrc.indexOf('fn print_status(');
+	if (fstart < 0) throw new Error('print_status() not found in ' + backend);
+	// Rust functions cannot be delimited by a `\n}\n` search (inner blocks end
+	// the same way), so harvest the emitter pattern across the whole file.
+	// rustfmt may fold the call onto one line or split it; `\s*` covers both.
+	return new Set([ ...backendSrc.matchAll(/line\(\s*&mut out,\s*"([a-z0-9_]+)"/g) ].map(m => m[1]));
 })();
 
 const consumed = new Set([ ...src.matchAll(/\bdata\.([a-z][a-z0-9_]*)/g) ].map(m => m[1]));
