@@ -214,20 +214,18 @@ pub fn settings_section() -> (BTreeMap<String, String>, BTreeMap<String, Vec<Str
 
 /// External `uci` invocation with a hard timeout. Used only for mutations.
 /// Returns Ok(()) when the command exited 0.
+///
+/// The timeout is not cosmetic: `uci commit` takes the UCI file lock, and a
+/// writer that never returns would park a switch worker holding the state lock
+/// forever. The previous implementation used `output()` with no bound at all,
+/// which contradicts what this function promises.
 pub fn uci_exec(args: &[&str]) -> Result<()> {
-    let mut cmd = std::process::Command::new("/sbin/uci");
-    cmd.args(args);
-    let out = cmd
-        .output()
-        .map_err(|e| crate::types::Error::system(format!("uci {} failed: {e}", args.join(" "))))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(crate::types::Error::system(format!(
-            "uci {} failed rc={}",
-            args.join(" "),
-            out.status.code().unwrap_or(-1)
-        )))
+    match crate::system::command::run_bounded("/sbin/uci", args, bounded_timeout()) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(crate::types::Error::system(format!(
+            "uci {} failed: {e}",
+            args.join(" ")
+        ))),
     }
 }
 

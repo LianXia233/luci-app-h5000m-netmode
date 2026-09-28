@@ -36,6 +36,13 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Unit tests
         run: cargo test
+      - name: Pin the netlink layout against a real kernel
+        # Unit tests assert the bytes we build, not what the kernel does with
+        # them: both bugs this module shipped with produced plausible buffers
+        # and a silent -EINVAL, and no unit test can see that. This replays the
+        # same wire image inside a throwaway network namespace. It exits 0
+        # (skipped) where namespaces are unavailable, so it never blocks CI.
+        run: python3 tests/netlink_netns.py
       - name: Cross-compile static aarch64 ELF (release)
         # The OpenWrt package ships the prebuilt binary in root/usr/sbin.
         # Linking happens with rust-lld (RUSTFLAGS), so no musl cross C
@@ -52,6 +59,30 @@ jobs:
           test -x root/usr/sbin/h5000m-netmode
           test -x root/usr/sbin/h5000m-netmode-status
           echo "shipped binaries are static aarch64 executables"
+      - name: Report drift between src/ and the committed binaries
+        # root/usr/sbin/* is a prebuilt artefact that lives in git, so src/ can
+        # move without the package binary ever changing.  Nothing in the build
+        # catches that: the ipk installs, the service starts, and only the
+        # behaviour is old.  Compare byte-for-byte and publish what src/ builds
+        # today, so the drift is visible in the run and fixable in one command
+        # (scripts/build-rust.sh).
+        run: |
+          rel="target/aarch64-unknown-linux-musl/release"
+          mkdir -p dist-artifacts
+          for b in h5000m-netmode h5000m-netmode-status; do
+            cp -f "$rel/$b" "dist-artifacts/$b"
+            if cmp -s "$rel/$b" "root/usr/sbin/$b"; then
+              echo "$b: matches src/"
+            else
+              echo "::warning::root/usr/sbin/$b is stale - it does not match src/. Run scripts/build-rust.sh and commit the result."
+            fi
+          done
+      - name: Upload the binaries built from src/
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h5000m-netmode-aarch64-musl
+          path: dist-artifacts/
       - name: Check shell syntax of the remaining shell backend files
         # The core backend is Rust now; init/hotplug/uci-defaults stay POSIX sh
         # and must keep parsing under dash (CI default /bin/sh).

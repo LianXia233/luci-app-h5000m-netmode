@@ -72,9 +72,15 @@ pub fn remember_routes(snap: &LiveSnapshot) {
 
 /// `align_to <group> <reason>`: probe, commit both families, verify; on any
 /// failure restore the previous owner.
-pub fn align_to(cfg: &AppConfig, group: Group, reason: &str, snap: &LiveSnapshot) -> Result<()> {
+pub fn align_to(
+    cfg: &AppConfig,
+    group: Group,
+    reason: &str,
+    snap: &LiveSnapshot,
+    force: bool,
+) -> Result<()> {
     let previous = group.other();
-    if !align_cooldown_ok(cfg, false) {
+    if !align_cooldown_ok(cfg, force) {
         log::log_info(
             "reconcile",
             &format!("alignment to {} deferred (cooldown)", group.as_str()),
@@ -238,14 +244,14 @@ pub fn reconcile_align(cfg: &AppConfig, snap: &LiveSnapshot, force: bool) -> Res
                                 standby.as_str()
                             ),
                         );
-                        if align_to(cfg, standby, "exit_degraded", snap).is_ok() {
+                        if align_to(cfg, standby, "exit_degraded", snap, false).is_ok() {
                             owner = standby.as_str().to_string();
                         }
                     } else if active != primary.as_str()
                         && network::group_complete_online(snap, primary, cfg.strict_dual_stack)
                     {
                         if (force || confirm_candidate(cfg, primary))
-                            && align_to(cfg, primary, "failback", snap).is_ok()
+                            && align_to(cfg, primary, "failback", snap, force).is_ok()
                         {
                             owner = primary.as_str().to_string();
                         }
@@ -258,11 +264,11 @@ pub fn reconcile_align(cfg: &AppConfig, snap: &LiveSnapshot, force: bool) -> Res
                 // No usable default route: rescue onto whichever group is
                 // complete, preferring the policy primary.
                 if network::group_complete_online(snap, primary, cfg.strict_dual_stack) {
-                    if align_to(cfg, primary, "rescue", snap).is_ok() {
+                    if align_to(cfg, primary, "rescue", snap, force).is_ok() {
                         owner = primary.as_str().to_string();
                     }
                 } else if network::group_complete_online(snap, backup, cfg.strict_dual_stack)
-                    && align_to(cfg, backup, "rescue", snap).is_ok()
+                    && align_to(cfg, backup, "rescue", snap, force).is_ok()
                 {
                     owner = backup.as_str().to_string();
                 }
@@ -299,7 +305,7 @@ pub fn reconcile_align(cfg: &AppConfig, snap: &LiveSnapshot, force: bool) -> Res
                 chosen.as_str()
             ),
         );
-        if align_to(cfg, chosen, "split_repair", snap).is_ok() {
+        if align_to(cfg, chosen, "split_repair", snap, force).is_ok() {
             owner = chosen.as_str().to_string();
         }
     } else {

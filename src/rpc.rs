@@ -47,7 +47,7 @@ fn netdev_exists(dev: &str) -> bool {
 /// `ip link show | sed -n 's/^[0-9]*: \([eu][ths][b0-9a-zA-Z.]*\):.*/\1/p' | sort -V`.
 fn list_devices() {
     let mut devs: Vec<String> = Vec::new();
-    let Ok(entries) = std::fs::read_dir("/sys/class/net") else {
+    let Ok(entries) = std::fs::read_dir(crate::network::sysfs::sys_net()) else {
         return;
     };
     for e in entries.flatten() {
@@ -289,10 +289,21 @@ pub fn hotplug_notify(cfg: &AppConfig, section: &str, action: &str) {
         ("hotplug_last_ts", &unix_ts().to_string()),
         ("health_force", "1"),
     ]);
+    // A marker whose owner died (SIGKILL, OOM, a reboot that kept /var/run on
+    // a persistent overlay) or that outlived any plausible debounce window
+    // would swallow every later event: the interface goes down, hotplug fires,
+    // and nothing ever evaluates the exit again. Reap it before trusting it.
+    let max_age = (cfg.hotplug_debounce as u64)
+        .saturating_mul(4)
+        .saturating_add(10);
+    if clear_stale_marker(&marker, max_age) {
+        log::log_warn("hotplug", "dropped a stale debounce marker");
+    }
     if std::fs::create_dir(&marker).is_err() {
         // Coalesced into the run that is already scheduled.
         return;
     }
+    let _ = std::fs::write(marker.join("pid"), std::process::id().to_string());
     let runs: u32 = crate::types::num_or(&state::state_get("hotplug_runs"), 0) + 1;
     let _ = state::state_write(&[("hotplug_runs", &runs.to_string())]);
     log::log_info(
@@ -315,6 +326,33 @@ pub fn hotplug_notify(cfg: &AppConfig, section: &str, action: &str) {
     let snap = network::read_live_state();
     let _ = crate::reconcile::reconcile_body(cfg, &snap, true);
     state::release_lock();
+}
+
+/// Remove a debounce marker whose owner is gone or that has overrun its
+/// window; returns true when one was removed.
+fn clear_stale_marker(marker: &std::path::Path, max_age_s: u64) -> bool {
+    let Ok(md) = std::fs::metadata(marker) else {
+        return false;
+    };
+    if !md.is_dir() {
+        return false;
+    }
+    let pid: u32 = std::fs::read_to_string(marker.join("pid"))
+        .ok()
+        .and_then(|t| t.trim().parse().ok())
+        .unwrap_or(0);
+    let owner_dead = pid == 0 || !state::proc_alive(pid);
+    let expired = md
+        .modified()
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .map(|e| e.as_secs() > max_age_s)
+        .unwrap_or(false);
+    if owner_dead || expired {
+        let _ = std::fs::remove_dir_all(marker);
+        return true;
+    }
+    false
 }
 
 /// `run_watch`: procd-managed watchdog loop.

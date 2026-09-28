@@ -9,6 +9,19 @@ base_url="https://downloads.openwrt.org/snapshots/targets/mediatek/filogic"
 mkdir -p "${work_dir}" "${output_dir}"
 find "${output_dir}" -mindepth 1 -maxdepth 1 -delete
 
+# Rebuild the backend from src/ before anything is packaged.
+#
+# root/usr/sbin/h5000m-netmode* is committed to the repo because the OpenWrt
+# buildroot has no Rust toolchain, which makes it the package's weakest link: a
+# src/ change that never reaches those binaries produces an installable package
+# with old behaviour and no warning anywhere. Compiling here - before the SDK
+# tarball is even downloaded - means every published package carries a backend
+# that was built from this exact tree, and the drift only remains in git where
+# CI reports it.
+if [ "${H5000M_SKIP_RUST_BUILD:-0}" != "1" ]; then
+	( cd "${repo_dir}" && bash scripts/build-rust.sh )
+fi
+
 # Gate before anything is downloaded.  po2lmo deletes its own output when no entry
 # survives it (every msgstr equal to its msgid), so the i18n package is built
 # successfully, installs successfully, and translates nothing: the plugin keeps

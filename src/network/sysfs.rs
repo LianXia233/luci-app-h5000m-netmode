@@ -10,9 +10,23 @@
 use std::fs;
 
 pub const SYS_NET: &str = "/sys/class/net";
+pub const PROC_NET: &str = "/proc/net";
+
+/// The sysfs root. `H5000M_SYSFS_NET` redirects it so the deterministic test
+/// suite can stand up a fake interface tree without root or namespaces.
+pub fn sys_net() -> String {
+    std::env::var("H5000M_SYSFS_NET")
+        .unwrap_or_else(|_| SYS_NET.to_string())
+}
+
+/// The /proc/net root (`H5000M_PROC_NET`), redirected for the same reason.
+pub fn proc_net() -> String {
+    std::env::var("H5000M_PROC_NET")
+        .unwrap_or_else(|_| PROC_NET.to_string())
+}
 
 pub fn netdev_exists(dev: &str) -> bool {
-    !dev.is_empty() && std::path::Path::new(&format!("{SYS_NET}/{dev}")).exists()
+    !dev.is_empty() && std::path::Path::new(&format!("{}/{dev}", sys_net())).exists()
 }
 
 fn read_file(path: &str) -> String {
@@ -27,27 +41,27 @@ pub fn is_tunnel_type(t: u32) -> bool {
 }
 
 pub fn dev_type(dev: &str) -> Option<u32> {
-    let t = read_file(&format!("{SYS_NET}/{dev}/type"))
+    let t = read_file(&format!("{}/{dev}/type", sys_net()))
         .trim()
         .to_string();
     t.parse().ok()
 }
 
 pub fn dev_carrier(dev: &str) -> Option<u8> {
-    read_file(&format!("{SYS_NET}/{dev}/carrier"))
+    read_file(&format!("{}/{dev}/carrier", sys_net()))
         .trim()
         .parse::<u8>()
         .ok()
 }
 
 pub fn dev_operstate(dev: &str) -> String {
-    read_file(&format!("{SYS_NET}/{dev}/operstate"))
+    read_file(&format!("{}/{dev}/operstate", sys_net()))
         .trim()
         .to_string()
 }
 
 pub fn dev_ifindex(dev: &str) -> Option<u32> {
-    read_file(&format!("{SYS_NET}/{dev}/ifindex"))
+    read_file(&format!("{}/{dev}/ifindex", sys_net()))
         .trim()
         .parse()
         .ok()
@@ -69,7 +83,7 @@ pub fn dev_ifindex(dev: &str) -> Option<u32> {
 /// Local entries appear as `| /32 link LOCAL` or `| /32 host LOCAL`; the
 /// enclosing `|-- <addr> / 32` line names the address.
 pub fn ipv4_addrs() -> Vec<(String, String)> {
-    let text = read_file("/proc/net/fib_trie");
+    let text = read_file(&format!("{}/fib_trie", proc_net()));
     let mut out: Vec<(String, String)> = Vec::new();
     let mut pending: Option<String> = None;
     let mut dev: String = String::new();
@@ -113,7 +127,7 @@ pub fn ipv4_addrs() -> Vec<(String, String)> {
 
 /// (dev, address, scope) tuples. `scope` 0x20 is link-local.
 pub fn ipv6_addrs() -> Vec<(String, String, u8)> {
-    let text = read_file("/proc/net/if_inet6");
+    let text = read_file(&format!("{}/if_inet6", proc_net()));
     let mut out = Vec::new();
     for line in text.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
@@ -131,7 +145,7 @@ pub fn ipv6_addrs() -> Vec<(String, String, u8)> {
 }
 
 fn dev_by_index(idx: u32) -> Option<String> {
-    for entry in fs::read_dir(SYS_NET).ok()? {
+    for entry in fs::read_dir(sys_net()).ok()? {
         let entry = entry.ok()?;
         if dev_ifindex(entry.file_name().to_str()?) == Some(idx) {
             return Some(entry.file_name().to_string_lossy().to_string());
@@ -220,7 +234,7 @@ pub fn dev_has_family_address(dev: &str, family: u8) -> bool {
 /// All physical netdevs present, sorted (for `list-devices`).
 pub fn list_netdevs() -> Vec<String> {
     let mut v: Vec<String> = Vec::new();
-    if let Ok(rd) = fs::read_dir(SYS_NET) {
+    if let Ok(rd) = fs::read_dir(sys_net()) {
         for e in rd.flatten() {
             v.push(e.file_name().to_string_lossy().to_string());
         }

@@ -6,6 +6,14 @@ PKG_RELEASE:=1
 PKG_LICENSE:=Apache-2.0
 PKG_LICENSE_FILES:=LICENSE
 
+# The backend is a Rust crate (src/ + Cargo.toml). The OpenWrt buildroot has no
+# Rust toolchain, so the package ships the prebuilt static ELF under
+# root/usr/sbin. Rebuild it from source before packaging:
+#
+#   scripts/build-rust.sh
+#
+# scripts/build-release.sh does this automatically on every release build, and
+# CI reports drift between src/ and the committed binaries.
 LUCI_TITLE:=H5000M network priority switch
 LUCI_DEPENDS:=+luci-base
 LUCI_PKGARCH:=all

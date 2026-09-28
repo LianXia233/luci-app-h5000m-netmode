@@ -31,10 +31,7 @@ pub fn run_bounded(program: &str, args: &[&str], timeout: Duration) -> Result<St
     if let Some(so) = child.stdout.as_ref() {
         use std::os::fd::AsRawFd;
         let fd = so.as_raw_fd();
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if flags >= 0 {
-            unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-        }
+        set_nonblocking(fd, true);
     }
 
     let deadline = std::time::Instant::now() + timeout;
@@ -42,8 +39,20 @@ pub fn run_bounded(program: &str, args: &[&str], timeout: Duration) -> Result<St
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // The child is gone but its output can still sit in the pipe
+                // buffer: judging the result before draining it loses the tail
+                // of a fast command (a ubus status, say) and makes callers see
+                // an empty answer for no reason. Switch the pipe back to
+                // blocking - the write end is closed now, so this cannot hang.
+                if let Some(so) = child.stdout.take() {
+                    use std::io::Read;
+                    use std::os::fd::AsRawFd;
+                    set_nonblocking(so.as_raw_fd(), false);
+                    let mut rest = Vec::new();
+                    let _ = so.read_to_end(&mut rest);
+                    stdout.extend_from_slice(&rest);
+                }
                 if status.success() {
-                    let _ = child.stdout.take();
                     return Ok(String::from_utf8_lossy(&stdout).into_owned());
                 }
                 return Err(Error::system(format!(
@@ -77,6 +86,39 @@ pub fn run_bounded(program: &str, args: &[&str], timeout: Duration) -> Result<St
     }
 }
 
+/// Flip O_NONBLOCK on a pipe fd.
+fn set_nonblocking(fd: i32, on: bool) {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return;
+    }
+    let next = if on {
+        flags | libc::O_NONBLOCK
+    } else {
+        flags & !libc::O_NONBLOCK
+    };
+    unsafe {
+        libc::fcntl(fd, libc::F_SETFL, next);
+    }
+}
+
+/// Escape a string for embedding in a JSON literal.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Run with the default 5s bound.
 pub fn run_bounded_default(program: &str, args: &[&str]) -> Result<String> {
     run_bounded(program, args, Duration::from_secs(5))
@@ -99,16 +141,9 @@ pub fn ubus_wireless_status() -> Option<String> {
 
 /// `ubus call iwinfo assoclist {"device": "<dev>"}`.
 pub fn ubus_iwinfo_assoclist(dev: &str) -> Option<String> {
-    run_bounded_default(
-        "ubus",
-        &[
-            "call",
-            "iwinfo",
-            "assoclist",
-            &format!("{{\"device\":\"{dev}\"}}"),
-        ],
-    )
-    .ok()
+    let payload = format!("{{\"device\":\"{}\"}}", json_escape(dev));
+    run_bounded_default("ubus", &["call", "iwinfo", "assoclist", &payload])
+        .ok()
 }
 
 /// `ifup <sec>` – bounded; never blocks a switch beyond the timeout.

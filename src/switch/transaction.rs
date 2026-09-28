@@ -458,6 +458,13 @@ pub fn reap_orphan_routes() {
                 continue;
             }
             let via = r.via.clone().unwrap_or_default();
+            // Without a gateway the delete cannot be narrowed down to one
+            // route: the device is gone too, so (metric) alone may well match
+            // a route that is still in use. Leave it to the kernel, which
+            // removes a device's routes when the device disappears.
+            if via.is_empty() {
+                continue;
+            }
             let boot = netlink::is_route_boot(fam, via.parse::<IpAddr>().ok(), &r.dev, r.metric);
             if !boot {
                 continue;

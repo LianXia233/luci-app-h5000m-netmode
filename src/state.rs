@@ -167,16 +167,29 @@ fn lock_owner_alive(dir: &Path) -> bool {
 /// Returns true when the lock was acquired (with our pid written).
 pub fn acquire_lock(wait_s: u32) -> bool {
     let dir = lock_dir();
+    let mine = std::process::id().to_string();
     let mut waited: u32 = 0;
+    let mut stale_rounds: u32 = 0;
     loop {
         match fs::create_dir(&dir) {
             Ok(()) => {
-                let _ = fs::write(dir.join("pid"), format!("{}\n", std::process::id()));
-                return true;
+                let _ = fs::write(dir.join("pid"), format!("{mine}\n"));
+                // Two processes can both conclude the owner is stale and both
+                // unlink the directory, and then both succeed at create_dir -
+                // which is two holders for one lock. Confirm the directory
+                // still names us before claiming it.
+                let still_mine = fs::read_to_string(dir.join("pid"))
+                    .map(|t| t.trim() == mine)
+                    .unwrap_or(false);
+                if still_mine {
+                    return true;
+                }
+                continue;
             }
             Err(_) => {
-                if !lock_owner_alive(&dir) {
+                if !lock_owner_alive(&dir) && stale_rounds < 3 {
                     // Stale owner: remove and retry immediately.
+                    stale_rounds += 1;
                     let _ = fs::remove_dir_all(&dir);
                     continue;
                 }

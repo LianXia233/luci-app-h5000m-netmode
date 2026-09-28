@@ -150,6 +150,23 @@ make menuconfig
 make package/luci-app-h5000m-netmode/compile V=s
 ```
 
+### 后端（Rust）
+
+后端是 Rust crate，构建产物为 aarch64 musl 静态 ELF，随包安装到 `root/usr/sbin`：
+
+```sh
+# 交叉编译并用产物覆盖 root/usr/sbin（发布构建会自动执行这一步）
+scripts/build-rust.sh aarch64-unknown-linux-musl
+
+# 只编译、只跑测试
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
+
+`root/usr/sbin/h5000m-netmode*` 是提交进仓库的预编译产物（buildroot 没有 Rust
+工具链），因此改动 `src/` 后必须重新执行上面的脚本并提交产物；CI 会比对编译输出
+与该产物，不一致时给出警告并上传本次编译结果。
+
 > 提示：GitHub Releases 中的软件包由 GitHub Actions 使用官方 OpenWrt SNAPSHOT `mediatek/filogic` SDK 在线构建，附带中文语言包、SDK 构建公钥和 SHA256 校验文件。软件包应安装到 ABI 匹配的近期 SNAPSHOT 固件。
 
 ### 安装
@@ -387,11 +404,14 @@ uci set h5000m_netmode.settings.watcher=0 && uci commit h5000m_netmode   # 停�
 │   ├── init.d/h5000m-netmode      # procd 看门狗服务
 │   └── uci-defaults/90-h5000m-netmode      # 首次安装初始化
 ├── root/usr/
-│   ├── sbin/h5000m-netmode        # 后端主程序
-│   ├── sbin/h5000m-netmode-status # 状态查询
+│   ├── sbin/h5000m-netmode        # 后端主程序（由 src/ 编译而来）
+│   ├── sbin/h5000m-netmode-status # 状态查询（由 src/bin 编译而来）
 │   └── share/luci/menu.d/         # LuCI 菜单注册
+├── src/                           # Rust 后端源码（7012 行，10 个职责模块）
+├── Cargo.toml / Cargo.lock        # Rust 后端构建描述
 ├── tests/
 │   ├── run_tests.sh               # 后端确定性测试（176 项断言，支持按用例名过滤）
+│   ├── netlink_netns.py           # 用真实内核（临时 netns）钉住 netlink 报文布局
 │   ├── svg_audit.js               # 前端审计：SVG 平衡 / 关键帧 / 动画绑定 / 选择器作用域 / 字段契约
 │   ├── render_live.js             # 把实机 status 输出灌入真实渲染路径，检查各区域是否互相矛盾
 │   ├── test_exit_card.js          # 页头合并卡片测试（离机，154 项断言：四分支 + 两半结构）
@@ -400,6 +420,7 @@ uci set h5000m_netmode.settings.watcher=0 && uci commit h5000m_netmode   # 停�
 │   └── sync_po.py                 # 从视图源码与菜单 JSON 生成 .po；--check 用于 CI 防漂移
 ├── docs/preview.png               # 界面预览图（仅用于 README，不进入软件包）
 ├── scripts/build-release.sh       # 发布构建脚本
+├── scripts/build-rust.sh          # 从 src/ 重建 root/usr/sbin 下的二进制
 ├── Makefile                       # OpenWrt 构建描述
 ├── README.md
 ├── CHANGELOG.md

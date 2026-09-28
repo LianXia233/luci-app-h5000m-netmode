@@ -6,6 +6,7 @@
 
 use std::fs;
 
+use crate::network::sysfs::proc_net;
 use crate::types::{Family, Group};
 
 /// A parsed default route.
@@ -163,8 +164,8 @@ fn hex_groups(hex: &str) -> Vec<u16> {
 /// carry no `linkdown` marker; structural checks compensate (see module doc).
 pub fn show_defaults(family: Family) -> Vec<Route> {
     match family {
-        Family::V4 => parse_ipv4_proc(read_lines("/proc/net/route")),
-        Family::V6 => parse_ipv6_proc(read_lines("/proc/net/ipv6_route")),
+        Family::V4 => parse_ipv4_proc(read_lines(&format!("{}/route", proc_net()))),
+        Family::V6 => parse_ipv6_proc(read_lines(&format!("{}/ipv6_route", proc_net()))),
     }
 }
 

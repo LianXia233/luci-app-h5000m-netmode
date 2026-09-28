@@ -2,6 +2,46 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 修复
+
+- **netlink 报文构造**（`src/network/netlink.rs`）：`struct rtmsg` 此前只写 9 字节
+  （实际 12 字节，`rtm_flags` 是 `u32`），且 `rtm_type` 写 0（`RTN_UNSPEC`）。两者都会让
+  内核以 `-EINVAL` 拒绝，而本程序没有任何 `ip route` 兜底路径，切换提交/回滚/热备路由
+  全部依赖这一条路 —— 实机上切换会直接落到 `FAILED`。现已补齐 12 字节并写
+  `RTN_UNICAST(1)`，并在临时网络命名空间内对真实内核逐项验证
+  （NEWROUTE / 同 metric 换槽 / DELROUTE）。
+- **`route_proto` 语义错误**：原来用 `RTM_GETROUTE` 做单次查询，而它是*查表*语义，
+  内核返回的是"到某目的地的最佳路由"（实测返回了本地路由），并非 (设备, 网关, metric)
+  指定的那条。改为 `RTM_GETROUTE + NLM_F_DUMP` 后在用户态按 (dst_len=0, oif, gw, metric)
+  过滤，并修正 `rtm_protocol` 的读取偏移（rtmsg 偏移 5，原代码读的是偏移 8 的
+  `rtm_flags`）。孤儿路由回收的 `is_route_boot` 守卫因此才真正生效。
+- **`reap_orphan_routes`**：无网关的默认路由不再删除 —— 设备消失时内核已清掉其路由，
+  而仅凭 metric 删除可能命中仍在使用的路由。
+- **`uci` 写入补上超时**：`uci_exec` 此前用无界的 `output()`，与它自己的注释相反；
+  `uci commit` 持有 UCI 文件锁，卡住会永久占用切换 worker。
+- **子进程输出不再被截断**：`run_bounded` 以前先判进程退出再读管道，快命令（ubus）
+  的尾部输出会被丢弃；现在退出后把管道切回阻塞并读至 EOF 再判定。
+- **热插拔去抖标记不再可能永久残留**：标记目录写入持有者 pid，并在每次事件前清理
+  "持有者已死"或"超过 4 倍去抖窗口"的陈旧标记。此前 notify 进程被 SIGKILL 后标记留在
+  `/var/run`，后续所有接口事件都会被静默合并跳过，故障切换不再发生。
+- **一键 align 真正绕过冷却**：`align_to` 此前把 force 硬编码为 false。
+- **锁的 stale 竞态**：两个进程同时判定锁陈旧时会各建一次目录、同时持锁；现在建锁后
+  回读 pid 确认持有者是自己，并限制 stale 清理次数。
+- **`ubus call iwinfo assoclist`** 的设备名改为 JSON 转义后再拼接。
+
+### 构建 / 工程
+
+- 新增 `scripts/build-rust.sh`：从 `src/` 重建 `root/usr/sbin` 下的两个二进制。
+- `scripts/build-release.sh` 在打包前自动执行上述编译，发布包内的后端始终来自当前源码。
+- CI 新增一步：逐字节比对编译输出与仓库内的预编译产物，不一致时告警并上传本次产物。
+- `src/network/sysfs.rs`、`src/network/routes.rs` 新增 `H5000M_SYSFS_NET` /
+  `H5000M_PROC_NET` 重定向，供确定性测试注入假内核状态。
+- 新增 `tests/netlink_netns.py`：在临时网络命名空间内用真实内核验证 netlink 报文布局
+  （新增/换槽/删除/协议号回读，8 项断言），并接入 CI。单元测试只能断言我们"造出的字节"，
+  断言不了内核对这些字节的反应 —— 本次两个布局 bug 都属于后者。
+
 ## [v1.8.1] — 2026-09-28
 
 版本号提升并触发 CI 编译：GitHub Actions 由 shell 检查改造为 Rust 编译工作流。
