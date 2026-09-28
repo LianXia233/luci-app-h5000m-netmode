@@ -23,7 +23,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-musl
-          components: clippy, rustfmt, lld
+          components: clippy, rustfmt
+      - name: Make rust-lld available for the musl linker
+        # rust-lld ships inside the stable toolchain itself; this step only
+        # ensures PATH/rustup agree before RUSTFLAGS references it.
+        run: rustup component add rust-lld || true
       - name: Install validation tools
         run: sudo apt-get update && sudo apt-get install -y gettext
       - name: Format check
