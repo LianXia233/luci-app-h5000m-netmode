@@ -263,17 +263,12 @@ pub fn switch_run(
     );
     prepare_group(target, target_mode, snap);
 
-    // A required family the target has no interface for can never become
-    // ready: fail now with a reason the UI can print.
-    if failure.is_none() {
-        for fam in Family::ALL {
-            if network::group_family_required(snap, target, fam, cfg.strict_dual_stack)
-                && !network::group_family_capable(snap, target, fam)
-            {
-                failure = Some(format!("ipv{}_not_configured", fam.n()));
-            }
-        }
-    }
+    // A family the target has no interface section for is simply not part of
+    // the switch (group_family_required is capability-based), so there is no
+    // pre-flight rejection here anymore: a single-stack target switches as a
+    // single-stack exit, and the standby's route for the missing family gets
+    // parked by apply_group_holes further down. A *capable* family that never
+    // becomes ready fails in its own wait/probe phase below.
 
     // ---- WAIT_IPV4 / WAIT_IPV6 ----
     if failure.is_none() {
@@ -303,8 +298,15 @@ pub fn switch_run(
                         snap.group_devs(target, Family::V6).join(",")
                     ),
                 );
-            } else {
+            } else if cfg.strict_dual_stack {
                 failure = Some("ipv6_not_ready".into());
+            } else {
+                log::log_warn(
+                    "switch",
+                    &format!(
+                        "warning: IPv6 not ready on {target} in time; continuing single-stack (strict_dual_stack=0)"
+                    ),
+                );
             }
         }
     }
@@ -351,8 +353,13 @@ pub fn switch_run(
             );
             if v.is_up() {
                 log::log_info("switch", "IPv6 connectivity OK");
-            } else {
+            } else if cfg.strict_dual_stack {
                 failure = Some("ipv6_unreachable".into());
+            } else {
+                log::log_warn(
+                    "switch",
+                    "warning: IPv6 probes failed on the target; continuing single-stack (strict_dual_stack=0)",
+                );
             }
         }
     }
@@ -394,8 +401,13 @@ pub fn switch_run(
     if failure.is_none() {
         if transaction::commit_family(Family::V6, target, previous_group, snap).is_ok() {
             committed6 = true;
-        } else {
+        } else if cfg.strict_dual_stack {
             failure = Some("ipv6_commit_failed".into());
+        } else {
+            log::log_warn(
+                "switch",
+                "warning: IPv6 default route commit failed; continuing single-stack (strict_dual_stack=0)",
+            );
         }
     }
     if failure.is_none() && !transaction::apply_group_holes(target_mode, snap, cfg, target) {
@@ -502,6 +514,13 @@ fn verify_group_online_after_settle(snap: &LiveSnapshot, cfg: &AppConfig, g: Gro
             &cfg.probe_targets6,
         );
         if !v.is_up() {
+            if fam == Family::V6 && !cfg.strict_dual_stack {
+                log::log_warn(
+                    "switch",
+                    "warning: IPv6 unreachable after settle; keeping the single-stack commit (strict_dual_stack=0)",
+                );
+                continue;
+            }
             return Err(crate::types::Error::probe(format!(
                 "ipv{}_unreachable_after_settle",
                 fam.n()

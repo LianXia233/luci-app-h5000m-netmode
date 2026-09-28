@@ -116,6 +116,16 @@ pub fn align_to(
             continue;
         }
         if commit_family(fam, group, Some(previous), snap).is_err() {
+            if fam == Family::V6 && !cfg.strict_dual_stack {
+                log::log_warn(
+                    "reconcile",
+                    &format!(
+                        "warning: IPv6 commit onto {} failed; continuing single-stack (strict_dual_stack=0)",
+                        group.as_str()
+                    ),
+                );
+                continue;
+            }
             ok = false;
             break;
         }

@@ -300,7 +300,7 @@ opkg remove luci-app-h5000m-netmode
 | `h5000m_netmode.settings.health_check` | `0` / `1` | 是否启用链路健康探测（默认 `1`，opt-out：显式设为 `0` / `off` / `false` / `no` 才关闭；仅作诊断，不驱动切换） |
 | `h5000m_netmode.settings.health_probe_interval` | 整数（秒） | 两次健康探测的最小间隔（默认 `60`；设为 `0` 表示不节流，每次复算都探测） |
 | `h5000m_netmode.settings.ipv6_owner` | `wan` / `modem` / `split` / `none` | 当前承载 IPv6 的出口（审计字段），由后端自动维护，通常无需手工设置 |
-| `h5000m_netmode.settings.strict_dual_stack` | `0` / `1` | **强双栈出口门禁（默认 1）**：目标出口必须 IPv4 + IPv6 都就绪且探测通过才允许提升；设为 `0` 才允许把「没有 IPv6 成员的出口」当作可用出口（此时活动出口缺失的族会被隔离，避免分流） |
+| `h5000m_netmode.settings.strict_dual_stack` | `0` / `1` | **IPv6 门禁（默认 0）**：IPv6 缺失或探测失败一律不阻塞主备切换——没有 IPv6 成员的出口按单栈切换，活动出口缺失的族会停靠备用出口对应路由以阻止分流；设为 `1` 恢复强双栈门禁（有 IPv6 成员的出口必须探测通过才允许提升，否则拒绝切换并回滚） |
 | `h5000m_netmode.settings.switch_wait_ipv4` | 整数（秒，≥1） | 切换时等待目标出口 IPv4 结构就绪的上限（默认 `15`） |
 | `h5000m_netmode.settings.switch_wait_ipv6` | 整数（秒，≥1） | 切换时等待目标出口 IPv6 结构就绪的上限（默认 `20`） |
 | `h5000m_netmode.settings.switch_budget` | 整数（秒，≥5） | 单次切换的总预算（默认 `60`）；预算耗尽即回滚，不会无限等待 |
@@ -330,8 +330,8 @@ config settings 'settings'
 	option health_check '1'
 	option health_probe_interval '60'
 
-	# 强双栈出口门禁（默认即开）；只有明确接受单栈出口时才设为 0
-	option strict_dual_stack '1'
+	# IPv6 门禁（默认 0）：IPv6 缺失/失败不阻塞切换；设为 1 恢复强双栈门禁
+	option strict_dual_stack '0'
 
 	# 切换时间预算：等待就绪、探测次数、失败门限、环路抑制
 	option switch_wait_ipv4 '15'

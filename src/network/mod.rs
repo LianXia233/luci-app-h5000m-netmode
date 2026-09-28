@@ -548,17 +548,22 @@ pub fn group_family_ready(snap: &LiveSnapshot, g: Group, fam: Family) -> bool {
     group_family_has_address(snap, g, fam)
 }
 
-/// `strict_dual_stack` gate + capability.
+/// Whether `fam` participates in the group predicates at all.
+///
+/// Participation is a purely structural property: a family for which the group
+/// has no interface section can never become ready, so demanding it would only
+/// reject otherwise-valid single-stack exits (the "ipv6_not_configured"
+/// rejection). `strict_dual_stack` therefore no longer forces absent families
+/// into the requirement set; it only governs how a *capable* family's
+/// wait/probe/commit failures are treated by the switch state machine
+/// (`strict=1` fails the switch, `strict=0` continues single-stack).
 pub fn group_family_required(
     snap: &LiveSnapshot,
     g: Group,
     fam: Family,
-    strict_dual_stack: bool,
+    _strict_dual_stack: bool,
 ) -> bool {
-    if group_family_capable(snap, g, fam) {
-        return true;
-    }
-    strict_dual_stack
+    group_family_capable(snap, g, fam)
 }
 
 pub fn group_complete(snap: &LiveSnapshot, g: Group, strict_dual_stack: bool) -> bool {

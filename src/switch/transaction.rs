@@ -245,16 +245,15 @@ fn fib_egress_fallback(snap: &LiveSnapshot, fam: Family) -> String {
     }
 }
 
-/// `verify_excluded_families`: with strict_dual_stack off, the standby's route
-/// for a family the active group cannot carry must be parked (no leak).
+/// `verify_excluded_families`: the standby's route for a family the active
+/// group cannot carry must be parked (no leak). This is capability-based, not
+/// gated on strict_dual_stack: since requirement follows capability, a hole
+/// can exist under either setting whenever the active group is single-stack.
 pub fn verify_excluded_families(
     snap: &LiveSnapshot,
     g: Group,
     cfg: &AppConfig,
 ) -> std::result::Result<(), String> {
-    if cfg.strict_dual_stack {
-        return Ok(());
-    }
     let standby = g.other();
     for fam in crate::network::group_hole_families(snap, g, cfg.strict_dual_stack) {
         if snap.group_route(standby, fam).is_some() {
@@ -286,6 +285,16 @@ pub fn verify_group_online(
             &cfg.probe_targets6,
         );
         if !verdict.is_up() {
+            if fam == Family::V6 && !cfg.strict_dual_stack {
+                log::log_warn(
+                    "align",
+                    &format!(
+                        "warning: IPv6 probes failed on {}; continuing single-stack (strict_dual_stack=0)",
+                        g.as_str()
+                    ),
+                );
+                continue;
+            }
             return Err(format!("ipv{}_unreachable", fam.n()));
         }
     }
@@ -421,11 +430,10 @@ pub fn rollback_family(fam: Family, previous: Group, target: Group, snap: &LiveS
 }
 
 /// `apply_group_holes`: park the standby's route for a family the active group
-/// cannot carry (explicit opt-out of the dual-stack promise).
+/// cannot carry, so the missing family can never leak out of the standby and
+/// split the egress. Capability-based: applies whenever the active group is
+/// single-stack, regardless of strict_dual_stack.
 pub fn apply_group_holes(_mode: Mode, snap: &LiveSnapshot, cfg: &AppConfig, g: Group) -> bool {
-    if cfg.strict_dual_stack {
-        return true;
-    }
     let standby = g.other();
     for fam in crate::network::group_hole_families(snap, g, cfg.strict_dual_stack) {
         let sec = snap.group_sec(standby, fam).to_string();
@@ -440,7 +448,14 @@ pub fn apply_group_holes(_mode: Mode, snap: &LiveSnapshot, cfg: &AppConfig, g: G
                 line.metric,
             );
         }
-        log::log_warn("switch", &format!("warning: {} cannot be the active exit for ipv{}; parked its route (strict_dual_stack=0)", standby.as_str(), fam.n()));
+        log::log_warn(
+            "switch",
+            &format!(
+                "warning: {} cannot be the active exit for ipv{}; parked its route",
+                standby.as_str(),
+                fam.n()
+            ),
+        );
     }
     true
 }

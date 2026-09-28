@@ -5,9 +5,10 @@ config settings 'settings'
 	option health_check '1'
 	option health_probe_interval '60'
 
-	# 强双栈出口门禁：目标出口必须 IPv4 + IPv6 都就绪且探测通过才允许提升。
-	# 只有明确接受单栈出口时才设为 0。详见 README「UCI 配置项」。
-	option strict_dual_stack '1'
+	# IPv6 门禁（默认 0）：IPv6 缺失或探测失败一律不阻塞主备切换，
+	# 活动出口缺失的族会停靠备用出口的对应路由以阻止分流。
+	# 设为 1 恢复强双栈门禁：有 IPv6 成员的出口必须探测通过才允许提升。
+	option strict_dual_stack '0'
 
 	# 切换时间预算：所有等待都有上限，超时即按状态机顺序退出并保留可用出口。
 	option switch_wait_ipv4 '15'

@@ -54,7 +54,7 @@ impl Default for AppConfig {
             watch_interval: 10,
             health_check: true,
             health_probe_interval: 60,
-            strict_dual_stack: true,
+            strict_dual_stack: false,
             switch_wait_ipv4: 15,
             switch_wait_ipv6: 20,
             switch_budget: 60,
@@ -100,7 +100,7 @@ impl AppConfig {
         c.watch_interval = clamp(num_or(get("watch_interval"), 10), 3, 3600);
         c.health_check = bool_val(get("health_check"), true);
         c.health_probe_interval = parse_u32(get("health_probe_interval"), 60);
-        c.strict_dual_stack = bool_val(get("strict_dual_stack"), true);
+        c.strict_dual_stack = bool_val(get("strict_dual_stack"), false);
         c.switch_wait_ipv4 = parse_u32(get("switch_wait_ipv4"), 15);
         c.switch_wait_ipv6 = parse_u32(get("switch_wait_ipv6"), 20);
         c.switch_budget = parse_u32(get("switch_budget"), 60);
@@ -208,7 +208,9 @@ mod tests {
         assert_eq!(c.mode, Mode::WanFirst);
         assert_eq!(c.probe_targets, vec!["223.5.5.5", "119.29.29.29"]);
         assert_eq!(c.probe_targets6, vec!["2400:3200::1", "2402:4e00::"]);
-        assert!(c.strict_dual_stack);
+        // The dual-stack gate is opt-in since v1.8.3: a missing or broken
+        // IPv6 must never block the switch.
+        assert!(!c.strict_dual_stack);
         assert_eq!(c.watch_interval, 10);
     }
 
@@ -217,14 +219,14 @@ mod tests {
         let m = map(&[
             ("mode", "modem_first"),
             ("watch_interval", "25"),
-            ("strict_dual_stack", "0"),
+            ("strict_dual_stack", "1"),
             ("probe_targets", "1.1.1.1 8.8.8.8"),
             ("health_check", "off"),
         ]);
         let c = AppConfig::from_section(&m, &BTreeMap::new());
         assert_eq!(c.mode, Mode::ModemFirst);
         assert_eq!(c.watch_interval, 25);
-        assert!(!c.strict_dual_stack);
+        assert!(c.strict_dual_stack);
         assert!(!c.health_check);
         assert_eq!(c.probe_targets, vec!["1.1.1.1", "8.8.8.8"]);
     }
