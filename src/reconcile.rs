@@ -131,6 +131,14 @@ pub fn align_to(
         }
     }
 
+    // Park the standby's route for every family the active group cannot
+    // carry. Without this the align/rescue path leaves the standby's IPv6
+    // default in place and the families split across uplinks - the very
+    // thing the switch state machine's apply_group_holes prevents.
+    if !transaction::apply_group_holes(cfg.mode, snap, cfg, group) {
+        ok = false;
+    }
+
     let _ = state::state_write(&[
         ("state", SmState::VERIFY_TARGET),
         ("message", &format!("verifying {}", group.as_str())),
