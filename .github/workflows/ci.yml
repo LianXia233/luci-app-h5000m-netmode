@@ -23,7 +23,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-musl
-          components: clippy, rustfmt
+          components: clippy, rustfmt, lld
       - name: Install validation tools
         run: sudo apt-get update && sudo apt-get install -y gettext
       - name: Format check
@@ -34,8 +34,9 @@ jobs:
         run: cargo test
       - name: Cross-compile static aarch64 ELF (release)
         # The OpenWrt package ships the prebuilt binary in root/usr/sbin.
-        # Linking happens with rust-lld, so no musl cross C toolchain is needed.
-        run: cargo build --release --target aarch64-unknown-linux-musl
+        # Linking happens with rust-lld (RUSTFLAGS), so no musl cross C
+        # toolchain is needed on the runner.
+        run: RUSTFLAGS="-C linker=rust-lld" cargo build --release --target aarch64-unknown-linux-musl
       - name: Assert shipped binaries are static aarch64 executables (100755)
         # A dynamically linked ELF would silently fail on a musl router; a lost
         # exec bit would make procd fail to start the service.  Both are pinned
