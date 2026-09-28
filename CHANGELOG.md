@@ -2,6 +2,68 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.8.0] — 2026-09-28
+
+后端整体 **Rust 化重构**：`root/usr/sbin/h5000m-netmode` 与 `h5000m-netmode-status` 由 shell
+脚本替换为单个 **aarch64 静态链接 Rust ELF**（musl，不依赖任何运行时），随插件包一次安装/卸载。
+**前端零修改**：页面结构、菜单、中文文案、RPC 方法、参数与返回格式全部保持兼容。
+
+### 重构
+
+- **CLI / RPC 契约不变**：全部子命令（status / set / align / switch-worker / align-worker /
+  notify / watch / reconcile / health / iface-role / list-devices / get-device-map /
+  set-device-map / eth-candidates / eth-fallback / now-cs）行为、stdout 行格式与退出码
+  （64 非法、3 忙排队、0 已启动）逐字节对齐原 shell 后端，LuCI 前端无需任何修改。
+- **多文件模块架构**：`config / network / probe / health / switch / reconcile / state /
+  system / status / rpc` 十个职责模块 + 极薄 `main.rs`，禁止单文件巨型后端。
+- **读路径全部原生化**：路由/地址/网关状态直接读 `/proc/net/route`、`/proc/net/ipv6_route`、
+  `/proc/net/fib_trie`、`/proc/net/if_inet6` 与 `/sys/class/net/*`；UCI 配置在进程内解析；
+  仅剩每接口 up/available/pending、无线状态、关联列表三个 ubus 查询，且带 5s 上限。
+- **写路径最小化**：网络指标写入经 `/sbin/uci`（保留 UCI 文件锁与 `config_change` 通知，
+  低频）；路由切换走 **netlink**（RTM_NEWROUTE + NLM_F_CREATE|NLM_F_REPLACE 原子替代），
+  不再派生 `ip` 命令。
+- **worker 模型不变**：`set`/`align` 立即返回并派发后台 worker，LuCI 轮询 `status`；
+  并发由 mkdir 锁 + pid + `/proc` 存活判定排他，请求 gen 最多拾取 3 轮。
+
+### 新增
+
+- **六层健康检测**（Rust 原生实现）：Link/carrier、Gateway、ICMP（IPv4 ping socket 与
+  IPv6 ICMPv6 echo + 伪头校验和）、TCP connect（默认关闭）、DNS、HTTPS（预留扩展）；
+  探测全部 **SO_BINDTODEVICE 绑定目标 WAN**，杜绝流量走错出口导致误判。
+- **并行探测**：同族多目标、多族检查在线程池并行执行，任一成功即早退。
+- **分层健康评分**（仅报告、不门控切换）：Link+20 / Gateway+20 / ICMP+30 / TCP+15 / DNS+15，
+  状态 healthy / degraded / suspect / failed；自动切换仍沿用原连续失败门限语义。
+- **探测目标国内化**：默认 `223.5.5.5 119.29.29.29`、IPv6 `2400:3200::1 2402:4e00::`，
+  不把 114.114.114.114 作为强制目标。
+
+### 优化
+
+- **消除固定 sleep**：无 `sleep 1` 类秒级固定等待；全部改为条件轮询 + 预算上限
+  （IPv4 15s / IPv6 20s / 总预算 60s / 探测 2/3 / 对齐冷却 20s / hotplug 合并 2s）。
+- **减少 fork / exec**：状态轮询路径（LuCI 高频调用 `h5000m-netmode-status`）从
+  「数百次 fork + 多次 ubus」降为「一次快照文件读取 + 条件命中零子进程」。
+- **IPv4 / IPv6 同一事务**：`apply_policy` 双族同步写 metric / defaultroute / auto
+  （auto 恒 1，IPv6 永不禁用）；`commit_family` 先提升目标（metric 10）再降旧主
+  （metric 50），无空窗；回滚仅当旧主仍可用时才回。
+- **快照缓存**：`h5000m-netmode-status` 以 `gen:applied_mode` 为代次标记，切换中直接
+  重放 worker 的任务行，TTL 3 秒，冷路径才付一次完整 status。
+
+### 构建 / 打包
+
+- Cargo 工程：`libc` 唯一依赖，release 用 `opt-level=s + lto + panic=abort + strip`。
+- 交叉编译验证：`aarch64-unknown-linux-musl`，`file` 显示 `statically linked`，
+  `ldd` 显示 `not a dynamic executable`；主后端约 601 KB、状态程序约 397 KB。
+- 插件包仍为单包安装：LuCI 前端 + Rust ELF + UCI 配置 + init + hotplug + RPC 一次装完；
+  卸载时一并移除。
+
+### 测试
+
+- `cargo check` / `cargo test`（24 用例）/ `cargo clippy --all-targets`（0 警告）/
+  `cargo fmt --check` / `cargo build --release` 全部通过；
+- 本机冒烟：`now-cs` / `list-devices` / `health` / `status` 正常退出；
+- 未连接 OpenWrt 实机，未进行 192.168.10.1 验证；毫秒级为目标，性能数据均基于静态
+  分析与模拟，不代表实机实测。
+
 ## [v1.7.1] — 2026-09-28
 
 修复主备切换的**锁竞争、完成判定与前端锁定窗口**，并恢复 CI 全绿。

@@ -1,0 +1,20 @@
+[package]
+name = "h5000m-netmode"
+version = "1.8.0"
+edition = "2021"
+rust-version = "1.70"
+description = "Rust backend for the H5000M dual-WAN primary/backup switch (LuCI frontend unchanged)"
+license = "Apache-2.0"
+
+# OpenWrt-friendly: one small static ELF, no async runtime, no TLS stack.
+# The only dependency is `libc` (a pure-Rust crate of FFI declarations); it adds
+# no shared objects and links statically against musl.
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
