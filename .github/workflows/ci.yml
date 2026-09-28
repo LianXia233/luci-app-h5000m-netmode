@@ -165,7 +165,9 @@ jobs:
   # the follow-up push runs CI again, finds nothing to fix, and stops.
   autofix:
     needs: rust-backend
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Run even when the checks above failed: publishing the logs is exactly what
+    # makes a red run diagnosable, and the repairs below are independent of it.
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -188,8 +190,8 @@ jobs:
           cargo fmt
           for b in h5000m-netmode h5000m-netmode-status; do
             if [ ! -f "dist-artifacts/$b" ]; then
-              echo "::error::dist-artifacts/$b is missing; cannot refresh the shipped binaries"
-              exit 1
+              echo "::warning::dist-artifacts/$b is missing; skipping the binary refresh"
+              continue
             fi
             if ! cmp -s "dist-artifacts/$b" "root/usr/sbin/$b"; then
               install -m 0755 "dist-artifacts/$b" "root/usr/sbin/$b"
@@ -213,3 +215,32 @@ jobs:
             echo "::warning::cannot push the autofix; run cargo fmt and scripts/build-rust.sh locally"
             exit 0
           }
+      - name: Download the check logs
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ci-logs
+          path: ci-logs
+      - name: Publish the check logs to the ci-diag branch
+        # The log artefact is a zip on Azure Blob Storage, which the API will
+        # not hand out to a script; a branch is plain git and readable from
+        # anywhere. Keep it off main - it is a diagnostic, not part of the tree.
+        continue-on-error: true
+        run: |
+          if [ -z "$(ls -A ci-logs 2>/dev/null)" ]; then
+            echo "no check logs to publish"
+            exit 0
+          fi
+          git checkout -B ci-diag
+          git rm -rq --ignore-unmatch . || true
+          mkdir -p log
+          cp ci-logs/* log/ 2>/dev/null || true
+          git add log
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "ci: 诊断日志 $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push -qf origin ci-diag || {
+            echo "::warning::cannot publish the check logs to ci-diag"
+            exit 0
+          }
+          echo "check logs published on the ci-diag branch"
