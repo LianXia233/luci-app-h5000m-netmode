@@ -4,7 +4,7 @@
 //!   * `/sys/class/net/<dev>/`  – carrier, operstate, address, ifindex, type;
 //!   * `/proc/net/route`        – IPv4 FIB (including the gateway + metric);
 //!   * `/proc/net/ipv6_route`   – IPv6 FIB;
-//!   * `/proc/net/fib_trie`     – IPv4 interface addresses;
+//!   * `SIOCGIFCONF`            – IPv4 interface addresses;
 //!   * `/proc/net/if_inet6`     – IPv6 interface addresses.
 
 use std::fs;
@@ -66,54 +66,62 @@ pub fn dev_ifindex(dev: &str) -> Option<u32> {
 }
 
 // ---------------------------------------------------------------------------
-// IPv4 addresses: /proc/net/fib_trie
+// IPv4 addresses: SIOCGIFCONF
 // ---------------------------------------------------------------------------
 
-/// Collect IPv4 addresses per device from the fib trie.
-/// Format (Linux 4.x+):
-/// ```text
-/// Main:
-///   +-- 0.0.0.0/0 3 0 5
-///      |-- 127.0.0.0/8 ...
-///         |-- 127.0.0.0/32 ...
-///            | /32 universe LOCAL
-/// ```
-/// Local entries appear as `| /32 link LOCAL` or `| /32 host LOCAL`; the
-/// enclosing `|-- <addr> / 32` line names the address.
+/// Collect IPv4 addresses per device via `SIOCGIFCONF`.
+///
+/// The previous implementation parsed `/proc/net/fib_trie`, but that file
+/// names no devices at all - its `| /32 link LOCAL` lines carry only scope
+/// labels. Every (dev, addr) pair it produced was garbage, `dev_has_family_
+/// address` was always false and every IPv4 readiness gate (`wan4_ready`,
+/// `modem4_ready`) was stuck at 0. SIOCGIFCONF is the kernel's actual
+/// interface-address enumeration and is what `ip addr` itself wraps.
 pub fn ipv4_addrs() -> Vec<(String, String)> {
-    let text = read_file(&format!("{}/fib_trie", proc_net()));
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        return Vec::new();
+    }
     let mut out: Vec<(String, String)> = Vec::new();
-    let mut pending: Option<String> = None;
-    let mut dev: String = String::new();
-    for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with("Main:") {
-            continue;
-        }
-        if let Some((addr, _)) = t.split_once('/') {
-            let addr = addr.trim();
-            if addr.starts_with('|') || addr.is_empty() {
-                continue;
+    // 16 KiB is plenty for a SoC router; SIOCGIFCONF writes back the filled
+    // length, so an undersized buffer degrades (never overflows).
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut ifc: libc::ifconf = unsafe { std::mem::zeroed() };
+    ifc.ifc_len = buf.len() as libc::c_int;
+    ifc.ifc_buf = buf.as_mut_ptr() as *mut libc::c_char;
+    let rc = unsafe { libc::ioctl(fd, libc::SIOCGIFCONF, &mut ifc) };
+    if rc >= 0 && ifc.ifc_len > 0 {
+        let filled = (ifc.ifc_len as usize).min(buf.len());
+        out = parse_ifconf(&buf, filled, std::mem::size_of::<libc::ifreq>());
+    }
+    unsafe { libc::close(fd) };
+    out
+}
+
+/// Byte-level decoder for the `struct ifreq` array `SIOCGIFCONF` returns.
+/// Layout per entry: `char name[16]` (NUL-padded) followed by a `sockaddr`;
+/// `AF_INET` is 2 and `sin_addr` sits at sockaddr offset 4. Kept libc-free so
+/// the test suite can exercise it on any host.
+fn parse_ifconf(buf: &[u8], filled: usize, req_size: usize) -> Vec<(String, String)> {
+    const AF_INET: u16 = 2;
+    let mut out: Vec<(String, String)> = Vec::new();
+    if req_size < 24 {
+        return out;
+    }
+    let mut off = 0usize;
+    while off + req_size <= filled && off + 24 <= buf.len() {
+        let name_bytes = &buf[off..off + 16];
+        let namelen = name_bytes.iter().position(|&b| b == 0).unwrap_or(16).max(1);
+        let name = String::from_utf8_lossy(&name_bytes[..namelen.min(16)]).to_string();
+        let family = u16::from_le_bytes([buf[off + 16], buf[off + 17]]);
+        if !name.is_empty() && family == AF_INET {
+            let a = [buf[off + 20], buf[off + 21], buf[off + 22], buf[off + 23]];
+            let ip = format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3]);
+            if !out.iter().any(|(d, x)| d == &name && x == &ip) {
+                out.push((name, ip));
             }
-            // A `|-- 1.2.3.4/32` (or `+-`) line names the candidate address.
-            if let Some(a) = addr.strip_prefix("+- ") {
-                pending = Some(a.trim().to_string());
-            } else if let Some(a) = addr.strip_prefix("|-- ") {
-                pending = Some(a.trim().to_string());
-            }
-            continue;
         }
-        if let Some(devtok) = t.strip_prefix("|") {
-            let devtok = devtok.trim();
-            if let Some(d) = devtok.strip_prefix('/') {
-                dev = d.to_string();
-            }
-        }
-        if let Some(addr) = pending.take() {
-            if t.contains("LOCAL") {
-                out.push((dev.clone(), addr));
-            }
-        }
+        off += req_size;
     }
     out
 }
@@ -273,5 +281,37 @@ mod tests {
         assert_eq!(format_v6(&groups), "::1");
         let groups = [0xfe80, 0, 0, 0, 0, 0, 0, 0];
         assert_eq!(format_v6(&groups), "fe80::");
+    }
+
+    #[test]
+    fn ifconf_parses_ipv4_entries() {
+        // Three struct-ifreq slots (req_size 40): two AF_INET entries and one
+        // non-inet entry that must be skipped.
+        let mut buf = vec![0u8; 120];
+        let mut put = |off: usize, name: &[u8], family: u16, ip: [u8; 4]| {
+            buf[off..off + name.len()].copy_from_slice(name);
+            buf[off + 16..off + 18].copy_from_slice(&family.to_le_bytes());
+            buf[off + 20..off + 24].copy_from_slice(&ip);
+        };
+        put(0, b"eth0", 2, [192, 168, 10, 1]);
+        put(40, b"eth2", 2, [10, 7, 109, 108]);
+        put(80, b"lo0", 0, [127, 0, 0, 1]);
+        let got = parse_ifconf(&buf, 120, 40);
+        assert_eq!(
+            got,
+            vec![
+                ("eth0".to_string(), "192.168.10.1".to_string()),
+                ("eth2".to_string(), "10.7.109.108".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn ifconf_tolerates_truncation_and_empty_names() {
+        // A filled length that is not a multiple of req_size must not read
+        // past the buffer, and an all-zero (empty) name is skipped.
+        let buf = vec![0u8; 40];
+        assert!(parse_ifconf(&buf, 39, 40).is_empty());
+        assert!(parse_ifconf(&buf, 40, 40).is_empty());
     }
 }

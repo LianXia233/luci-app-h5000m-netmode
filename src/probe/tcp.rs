@@ -54,8 +54,10 @@ pub fn tcp_connect(dev: &str, addr: IpAddr, port: u16, timeout: Duration) -> Res
                 let sa = libc::sockaddr_in {
                     sin_family: libc::AF_INET as u16,
                     sin_port: port.to_be(),
+                    // octets() is already network byte order in memory; a
+                    // .to_be() here double-swaps the address (see icmp.rs).
                     sin_addr: libc::in_addr {
-                        s_addr: u32::from_ne_bytes(a.octets()).to_be(),
+                        s_addr: u32::from_ne_bytes(a.octets()),
                     },
                     sin_zero: [0; 8],
                 };

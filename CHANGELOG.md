@@ -2,6 +2,36 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.8.5-r4] — 2026-09-28
+
+本次修复健康探测链的四个叠加缺陷。实机表现：`wan4_ready=0`、`addr4_wan=0`、probe 恒
+`unknown`、切换被 `ipv4_not_ready` 误判回滚；而手工 `ping -I eth0/eth2` 双双可达 ——
+链路正常，判定链路坏死。
+
+### 修复
+
+- **IPv4 地址枚举架构性失效（`src/network/sysfs.rs`）**：原实现解析
+  `/proc/net/fib_trie`，但该文件只给 scope 标签（`| /32 link LOCAL`），**根本不含
+  设备名**，任何内核格式下都拼不出有效的 (dev, addr) 对 —— `dev_has_family_address`
+  恒 false，`wan4_ready` / `modem4_ready` / `addr4_*` 全部钉死在 0。这是 probe 恒
+  unknown（readiness 门拦截，探测从未执行）、切换在 WaitIpv4 阶段 15 秒超时后
+  `ipv4_not_ready` 回滚的共同根因。现改为 `SIOCGIFCONF` ioctl 枚举（`ip addr` 的
+  内核数据源），纯字节解析器 `parse_ifconf` 附跨平台单测。
+- **IPv4 目标地址字节序双重转换（`src/probe/icmp.rs`、`src/probe/tcp.rs`）**：
+  `u32::from_ne_bytes(octets()).to_be()` 在小端机上把目的地址反转（223.5.5.5 →
+  5.5.5.223）。`octets()` 本身就是网络字节序内存序列，`from_ne_bytes` 后不得再转。
+- **IPv6 回包解析越界偏移（`src/probe/icmp.rs`）**：raw IPv6 socket 的 recv 缓冲
+  **不含 IPv6 头**（RFC 3542），原代码照搬 raw IPv4 习惯跳过 40 字节，读到包尾之外
+  的零填充区，`icmp[0] != 129` 恒 false —— 即使回包在线也判 `ok=0`（对应日志
+  `ipv6 probe failed: attempts=3 ok=0 need=2`）。现从缓冲头直接解析，并附
+  `IPV6_CHECKSUM` 显式声明。
+- **ping socket 受 `ping_group_range` 门控时无回退（`src/probe/icmp.rs`）**：DGRAM
+  ping socket 创建失败（EACCES）时错误被吞成 false。现按 iputils 同款语义双路径化：
+  ping socket 优先（内核按 ident 分发回包，type 命中即可信），失败自动降级 raw
+  socket（回包含 IPv4 头按 IHL 剥离、按 type+ident 过滤并发探测者的流量）；接收
+  循环以硬截止时间重挂 `SO_RCVTIMEO`，RA/NS 等无关 ICMP 不再污染判定，也不会
+  挂死切换。
+
 ## [v1.8.5-r3] — 2026-09-28
 
 ### 修复
