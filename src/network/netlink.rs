@@ -377,7 +377,7 @@ fn dump_routes(family: Family) -> Result<Vec<Vec<u8>>> {
                 break;
             }
         }
-        Ok(collect_dump_payloads(&raw)?)
+        collect_dump_payloads(&raw)
     })();
     unsafe { libc::close(fd) };
     result
