@@ -4,12 +4,30 @@
 
 ## [v1.8.5-r4] — 2026-09-28
 
-本次修复健康探测链的四个叠加缺陷。实机表现：`wan4_ready=0`、`addr4_wan=0`、probe 恒
-`unknown`、切换被 `ipv4_not_ready` 误判回滚；而手工 `ping -I eth0/eth2` 双双可达 ——
-链路正常，判定链路坏死。
+本次修复健康探测与切换判定链的七个叠加缺陷。实机表现：`wan4_ready=0`、`addr4_wan=0`、
+probe 恒 `unknown`（`attempts=3 ok=0 need=2`）、切换被 `ipv4_not_ready` 误判回滚、
+看门狗不自动 failback；而手工 `ping -I eth0/eth2` 双双可达 —— 链路正常，判定链路坏死。
 
 ### 修复
 
+- **IPv4 ping socket 未 bind ident（`src/probe/icmp.rs`）**：内核 ping socket 要求先
+  `bind()` 到 ident 端口——未绑定时 `inet_sport=0`，socket 不进内核 ping 哈希表，
+  `ping_lookup` 匹配不到任何回包（`SKB_DROP_REASON_NO_SOCKET` 全部丢弃），recv 必然
+  超时，**v4 探测确定性 100% 失败**（与手工 ping 正常完全吻合）。现按 iputils 同款
+  语义在 sendto 前 `bind(INADDR_ANY, htons(id))`，EADDRINUSE 时 id 递增重试（并发
+  探测线程各持独立 ident）；IPv6 ping socket 同样补齐。这是 probe 恒 `ok=0` 的
+  直接根因。
+- **切换等待循环检查冻结快照（`src/switch/mod.rs`）**：`wait_group_family` 在循环中
+  反复检查 worker 启动时读取的那份 LiveSnapshot，从不重读内核状态——目标接口若在
+  切换开始后才就绪（warm/ifup 生效），等待循环永远看不到，15 秒超时后以
+  `ipv4_not_ready` 回滚（用户看到的「切换失败：目标出口的 IPv4 未在限时内就绪」）。
+  现在每轮轮询后 `read_live_state()` 刷新快照。
+- **`group_complete` 无视 `strict_dual_stack`（`src/network/mod.rs`）**：该判定对每个
+  capable 族（含 IPv6）要求结构就绪 + verdict up，与 strict=0 下切换状态机「v6 失败
+  仅告警」的语义不一致——坏掉的 IPv6 把 `group_ready_*` / `group_online_*` 恒压 0，
+  reconcile 的 failback 门（`group_complete_online`）因此永不放行，FIB 不迁移。
+  现 strict=0 时 IPv6 不参与 group 判定（IPv4 是主备切换的裁决族），切换/回切/状态
+  三处语义对齐。
 - **IPv4 地址枚举架构性失效（`src/network/sysfs.rs`）**：原实现解析
   `/proc/net/fib_trie`，但该文件只给 scope 标签（`| /32 link LOCAL`），**根本不含
   设备名**，任何内核格式下都拼不出有效的 (dev, addr) 对 —— `dev_has_family_address`
