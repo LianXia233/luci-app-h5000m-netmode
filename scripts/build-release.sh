@@ -103,6 +103,11 @@ CONFIG_PACKAGE_luci-app-h5000m-netmode=m
 CONFIG_LUCI_LANG_zh_Hans=y
 # 包内 js 与仓库源码逐字节一致,便于比对线上文件、热更与回滚。
 # CONFIG_LUCI_JSMIN is not set
+# 本包没有 .css 与 .ut 资源,关闭后不再构建 csstidy/ucode 的 host 工具链。
+# csstidy 的源码托管在 github.com,在无 GitHub 连通性的构建主机上下载
+# 失败会拖垮整个 release 构建。
+# CONFIG_LUCI_CSSTIDY is not set
+# CONFIG_LUCI_UTMIN is not set
 EOF
 make defconfig
 make package/h5000m-custom/luci-app-h5000m-netmode/compile -j"$(nproc)" V=s
