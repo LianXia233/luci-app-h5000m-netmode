@@ -2,6 +2,19 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.8.5-r2] — 2026-09-28
+
+### 修复
+
+- **`uci_get` 三段式键查询恒返回空（`src/config/uci.rs`）**：键拆分误用
+  `splitn(3, '.')`，第二次 `next()` 已把 section 名切出，`option` 恒为空串，
+  所有 `cfg.section.option` 形式的读取（如 `network.wan.device`）在真实设备上
+  恒返回空 —— `wan_device` / `modem_device` 因此保持空白，WAN 与 5G 的物理
+  接口解析全部失效。现改为 `split_once` 逐段拆分（新 `split_key()`），并附
+  三段/两段键的回归测试。`uci_has_key` 的同类隐患一并修正（三段键现在语义
+  正确：检查 option 是否存在）。
+  注：v1.8.5-r1 已包含 interface_sections 修复但被本缺陷掩盖了设备解析效果。
+
 ## [v1.8.5] — 2026-09-28
 
 本次解决实机上一组「WAN 与 5G 全部显示 eth0 / 第三方路由接管 / 5G 硬件未配置」的连锁故障，

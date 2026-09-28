@@ -138,15 +138,26 @@ fn tokenize(line: &str) -> Vec<String> {
 }
 
 /// Read a single option: `uci_get("network.wan.metric")`.
-pub fn uci_get(dotted: &str) -> String {
-    let mut parts = dotted.splitn(3, '.');
-    let (cfg, rest) = match (parts.next(), parts.next()) {
-        (Some(c), Some(r)) => (c, r),
-        _ => return String::new(),
-    };
+/// Split a `cfg.section[.option]` key into its three parts; the option is
+/// empty for two-segment keys.
+///
+/// `uci_get` originally used `splitn(3, '.')` here and pulled the *second*
+/// component out as the remainder, so for "network.wan.device" the option
+/// ended up empty and every three-segment read returned "" on real devices -
+/// exactly why wan_device/modem_device stayed blank while section-presence
+/// checks (two-segment keys) kept working.
+fn split_key(dotted: &str) -> Option<(&str, &str, &str)> {
+    let (cfg, rest) = dotted.split_once('.')?;
     let (section, option) = match rest.split_once('.') {
         Some((s, o)) => (s, o),
         None => (rest, ""),
+    };
+    Some((cfg, section, option))
+}
+
+pub fn uci_get(dotted: &str) -> String {
+    let Some((cfg, section, option)) = split_key(dotted) else {
+        return String::new();
     };
     let path = match cfg {
         "h5000m_netmode" => H5000M_CFG,
@@ -165,11 +176,10 @@ pub fn uci_get(dotted: &str) -> String {
 }
 
 /// `uci_has_key("network.wan")` -> section exists.
+/// `uci_has_key("network.wan.device")` -> the option exists.
 pub fn uci_has_key(dotted: &str) -> bool {
-    let mut parts = dotted.splitn(3, '.');
-    let (cfg, rest) = match (parts.next(), parts.next()) {
-        (Some(c), Some(r)) => (c, r),
-        _ => return false,
+    let Some((cfg, rest)) = dotted.split_once('.') else {
+        return false;
     };
     let path = match cfg {
         "h5000m_netmode" => H5000M_CFG,
@@ -178,9 +188,9 @@ pub fn uci_has_key(dotted: &str) -> bool {
         _ => return false,
     };
     let doc = parse_uci(path);
-    if let Some((_, o)) = rest.split_once('.') {
-        doc.get(rest.split_once('.').unwrap().0)
-            .map(|(opts, _)| opts.contains_key(o))
+    if let Some((section, option)) = rest.split_once('.') {
+        doc.get(section)
+            .map(|(opts, _)| opts.contains_key(option))
             .unwrap_or(false)
     } else {
         doc.contains_key(rest)
@@ -284,6 +294,19 @@ pub fn bounded_timeout() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_key_segments() {
+        // Regression: splitn(3) used to swallow the option on three-segment
+        // keys, making every uci_get("cfg.section.option") return "".
+        assert_eq!(
+            split_key("network.wan.device"),
+            Some(("network", "wan", "device"))
+        );
+        assert_eq!(split_key("network.wan"), Some(("network", "wan", "")));
+        assert_eq!(split_key("network"), None);
+        assert_eq!(split_key(""), None);
+    }
 
     #[test]
     fn tokenize_quotes() {
