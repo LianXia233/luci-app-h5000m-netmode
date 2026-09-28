@@ -182,6 +182,9 @@ jobs:
         with:
           components: rustfmt
       - uses: actions/download-artifact@v4
+        # Absent when the cross-compile step never ran (a red run above), which
+        # must not cost us the log publication at the end of this job.
+        continue-on-error: true
         with:
           name: h5000m-netmode-aarch64-musl
           path: dist-artifacts
