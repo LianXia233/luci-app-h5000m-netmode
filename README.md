@@ -64,27 +64,57 @@
 ## 工作原理
 
 ```mermaid
-flowchart TD
-    A["LuCI 卡片<br/>选择出口策略"] --> B["后端写入 UCI<br/>mode / 设备映射"]
-    B --> C["procd 看门狗 + hotplug<br/>按 watch_interval 复算"]
-    C --> D["ip route get<br/>向内核查询实际出口"]
-    D --> E{"默认出口属于谁"}
-    E -->|"有线 WAN"| F["认领该链路<br/>维护其状态与默认路由"]
-    E -->|"5G 模组"| F
-    E -->|"TUN 隧道<br/>透明代理"| M["忽略虚拟接口<br/>归属到物理 IPv4 出口"]
-    M --> F
-    E -->|"外部路由<br/>mwan3 / VPN"| G["报「其他路由」<br/>不认领、不染绿"]
-    F --> H["切换 = 移动默认路由优先级<br/>目标→metric 10，旧出口→metric 50"]
-    H --> P{"目标出口<br/>IPv4 + IPv6 都通过？"}
-    P -->|否| Q["不做任何改变<br/>回到原出口（回滚）"]
-    P -->|是| K["提交：两族同时切换<br/>旧出口保留热备路由"]
-    F --> I{"IPv4 与 IPv6 归属相同？"}
-    I -->|否| J["红色「出口分流」<br/>+ 一键对齐出口"]
-    I -->|是| K
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif","primaryColor":"#eef4ff","primaryTextColor":"#172554","primaryBorderColor":"#93c5fd","lineColor":"#94a3b8","secondaryColor":"#ecfdf5","tertiaryColor":"#fff7ed","clusterBkg":"#f8fafc","clusterBorder":"#dbe4f0"},"flowchart":{"curve":"basis","nodeSpacing":34,"rankSpacing":42}}}%%
+flowchart LR
+    subgraph trigger[触发与决策]
+      direction TB
+      UI([LuCI 修改策略]) --> UCI[(UCI 配置)]
+      HP[Hotplug up/down] --> REC
+      WD[procd 周期看门狗] --> REC
+      UCI --> REC[后端 reconcile<br/>读取配置与实时快照]
+    end
+    subgraph detect[识别真实出口]
+      direction TB
+      REC --> FIB[按 IPv4 / IPv6 查询内核 FIB<br/>ip route get]
+      FIB --> OWNER{出口归属}
+      OWNER -->|WAN / 5G| PHY[归入物理出口组]
+      OWNER -->|TUN 隧道| TUN[忽略虚拟接口<br/>追溯到实际上行出口]
+      OWNER -->|外部路由 / 无出口| OTHER[如实报告<br/>不接管外部路由]
+      TUN --> PHY
+    end
+    subgraph action[状态维护与切换]
+      direction TB
+      PHY --> SPLIT{IPv4 / IPv6<br/>是否分流？}
+      SPLIT -->|是| ALIGN[检查可用出口<br/>必要时对齐并告警]
+      SPLIT -->|否| HEALTH[按策略检查当前出口<br/>链路健康与备用可用性]
+      HEALTH --> DECIDE{需要切换？}
+      DECIDE -->|否| KEEP[保持当前路由<br/>更新状态与健康缓存]
+      DECIDE -->|是| TX[串行切换事务<br/>准备 → 有界等待 → 探测]
+      TX --> PASS{目标验证通过？}
+      PASS -->|是| COMMIT[按出口组提交路由<br/>旧出口保留为热备]
+      PASS -->|否| ROLLBACK[恢复已变更路由<br/>报告失败原因]
+    end
+    ALIGN --> TX
+    OTHER --> STATUS[状态上报 / UI 轮询]
+    KEEP --> STATUS
+    COMMIT --> STATUS
+    ROLLBACK --> STATUS
+
+    classDef triggerStyle fill:#eff6ff,stroke:#60a5fa,color:#1e3a8a,stroke-width:1.5px;
+    classDef decisionStyle fill:#fff7ed,stroke:#fb923c,color:#7c2d12,stroke-width:1.5px;
+    classDef goodStyle fill:#ecfdf5,stroke:#34d399,color:#064e3b,stroke-width:1.5px;
+    classDef warnStyle fill:#fff1f2,stroke:#fb7185,color:#881337,stroke-width:1.5px;
+    class UI,UCI,HP,WD,REC,FIB triggerStyle;
+    class OWNER,SPLIT,DECIDE,PASS decisionStyle;
+    class PHY,TUN,ALIGN,HEALTH,TX,COMMIT,KEEP goodStyle;
+    class OTHER,ROLLBACK,STATUS warnStyle;
+    style trigger fill:#f8fbff,stroke:#bfdbfe,stroke-width:1px
+    style detect fill:#f8fafc,stroke:#cbd5e1,stroke-width:1px
+    style action fill:#f0fdf4,stroke:#bbf7d0,stroke-width:1px
 ```
 
 1. 用户通过 LuCI 卡片选择策略，前端调用 `set <mode>`；后端只创建后台任务并**立即返回**，真正的切换由工作进程完成，LuCI 通过只读 `status` 轮询进度（切换中收紧到 1 秒），HTTP/ubus 调用永远不会被切换阻塞；
-2. 切换不是重建接口，而是**移动默认路由的优先级**：目标出口被 `ip route replace` 原子提升到活动槽位（metric 10），旧出口降到热备槽位（metric 50）；IPv4 与 IPv6 被建模为两个「出口组」（WAN 组 = `wan` + `wan6`，5G 组 = `modem` + `modem6`），以组为单位同步移动，不存在「IPv4 在新出口、IPv6 在旧出口」的中间态；
+2. 切换不是重建接口，而是**移动默认路由的优先级**：目标出口准备并通过连通性验证后，后端按协议族依次提交（IPv4、IPv6），并复核最终路由；目标出口缺少某个协议族时会按组能力处理并停靠备用侧对应路由，避免残留分流。切换期间路由更新并非跨 IPv4 / IPv6 的单条原子操作，因此提交中途失败会按已成功修改的协议族执行回滚；`strict_dual_stack=0` 时 IPv6 缺失或验证失败可按单栈继续，设为 `1` 才要求严格双栈；
 3. 出口判定用 `ip route get` 向内核查询**实际**默认出口而非读 main 表，因此策略路由（mwan3 / qmodem / VPN / daed）环境下依然准确；若出口是 TUN 隧道（透明代理），按网卡内核类型识别并归属到代理实际使用的上行链路；
 4. Hotplug 脚本（`95-h5000m-netmode`）委托后端对 section 分类并触发复算；procd 看门狗按 `watch_interval` 周期复算，覆盖 Hotplug 看不到的漂移；两路都只管理物理 WAN / 5G 模组接口，HomeProxy、sing-box、daed 等透明代理的 TUN 不作为出口被管理，也不重载代理服务；
 5. 检测到 IPv4 与 IPv6 出口不一致时自动纠正（对齐到策略首选出口）并红色告警；若两个族都可用但其中一个**没有出口**，则如实上报而不删除另一个族的默认路由；
@@ -93,16 +123,35 @@ flowchart TD
 ### 出口切换流程与状态机
 
 ```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif","primaryColor":"#eff6ff","primaryTextColor":"#172554","primaryBorderColor":"#93c5fd","lineColor":"#94a3b8","clusterBkg":"#f8fafc","clusterBorder":"#dbe4f0"},"flowchart":{"curve":"basis","nodeSpacing":30,"rankSpacing":38}}}%%
 flowchart LR
-    A["IDLE"] --> B["PREPARING_TARGET<br/>只补齐目标所需的 UCI/接口"] --> C["WAIT_IPV4<br/>目标地址+默认路由"] --> D["WAIT_IPV6<br/>目标地址+默认路由"]
-    D --> E["VERIFY_IPV4<br/>2/3 探测"] --> F["VERIFY_IPV6<br/>2/3 探测"] --> G["SWITCHING<br/>两族 replace 到活动槽位"]
-    G --> H["VERIFY_TARGET<br/>复核优先级 + 静置后复测"] --> I["COMMITTED"]
-    G -.失败.-> J["ROLLBACK<br/>恢复原出口"] --> K["FAILED"]
-    C -.超时.-> J
-    D -.超时.-> J
-    E -.不通.-> J
-    F -.不通.-> J
-    H -.校验不过.-> J
+    IDLE([IDLE]) --> PREP[PREPARING_TARGET<br/>只准备目标接口与策略配置<br/>不拆除当前出口]
+    PREP --> W4[WAIT_IPV4<br/>等待地址与默认路由就绪]
+    W4 -->|就绪 / IPv4 不要求| W6[WAIT_IPV6<br/>等待目标 IPv6 就绪]
+    W6 -->|就绪 / IPv6 不要求| V4[VERIFY_IPV4<br/>按 probe_attempts / probe_ok 探测]
+    V4 -->|可达 / IPv4 不要求| V6[VERIFY_IPV6<br/>按 probe_attempts / probe_ok 探测]
+    V6 -->|可达 / 非严格模式可降级| SW[SWITCHING<br/>按族提交默认路由<br/>IPv4 → IPv6；停靠不支持的协议族]
+    SW -->|提交成功| VT[VERIFY_TARGET<br/>刷新快照、核验路由<br/>静置后再次核验与探测]
+    VT -->|校验通过| OK([COMMITTED<br/>更新已应用策略])
+
+    PREP -. 总预算耗尽 .-> RB[ROLLBACK<br/>仅撤销本次已改动项<br/>尽力恢复原出口]
+    W4 -. 超时 / 总预算耗尽 .-> RB
+    W6 -. 严格双栈下超时 .-> RB
+    V4 -. 不可达 / 总预算耗尽 .-> RB
+    V6 -. 严格双栈下不可达 .-> RB
+    SW -. 写入或提交失败 .-> RB
+    VT -. 复核失败 .-> RB
+    RB --> FAIL([FAILED<br/>记录失败原因并刷新状态])
+
+    classDef start fill:#eef2ff,stroke:#818cf8,color:#312e81,stroke-width:1.5px;
+    classDef stage fill:#eff6ff,stroke:#60a5fa,color:#1e3a8a,stroke-width:1.5px;
+    classDef commit fill:#ecfdf5,stroke:#34d399,color:#064e3b,stroke-width:2px;
+    classDef rollback fill:#fff1f2,stroke:#fb7185,color:#881337,stroke-width:1.5px;
+    class IDLE,OK start;
+    class PREP,W4,W6,V4,V6,SW,VT stage;
+    class RB,FAIL rollback;
+    linkStyle 0,1,2,3,4,5,6,7 stroke:#64748b,stroke-width:1.8px;
+    linkStyle 8,9,10,11,12,13,14 stroke:#f87171,stroke-width:1.6px,stroke-dasharray:5 4;
 ```
 
 保证与边界：
