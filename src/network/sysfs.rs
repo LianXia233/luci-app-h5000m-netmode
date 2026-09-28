@@ -89,7 +89,7 @@ pub fn ipv4_addrs() -> Vec<(String, String)> {
     let mut ifc: libc::ifconf = unsafe { std::mem::zeroed() };
     ifc.ifc_len = buf.len() as libc::c_int;
     ifc.ifc_ifcu.ifcu_buf = buf.as_mut_ptr() as *mut libc::c_char;
-    let rc = unsafe { libc::ioctl(fd, libc::SIOCGIFCONF, &mut ifc) };
+    let rc = unsafe { libc::ioctl(fd, libc::SIOCGIFCONF as _, &mut ifc) };
     if rc >= 0 && ifc.ifc_len > 0 {
         let filled = (ifc.ifc_len as usize).min(buf.len());
         out = parse_ifconf(&buf, filled, std::mem::size_of::<libc::ifreq>());
