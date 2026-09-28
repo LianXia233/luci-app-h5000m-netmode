@@ -48,6 +48,22 @@ tar --zstd -xf "${archive}"
 sdk_dir="$(find "${work_dir}" -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n 1)"
 test -n "${sdk_dir}"
 
+# The SDK tarball ships staging_dir/host/bin entries as symlinks into the
+# packer's own filesystem (/usr/bin/gcc on the OpenWrt build server), so on
+# any other host they dangle and host builds die with "gcc: No such file
+# or directory". Re-point every dangling symlink at the local tool of the
+# same name; candidates not installed locally are left dangling and will
+# fail loudly if actually needed.
+while IFS= read -r link; do
+	name="$(basename "${link}")"
+	for cand in "/usr/bin/${name}" "/usr/sbin/${name}"; do
+		if [ -e "${cand}" ]; then
+			ln -sfn "${cand}" "${link}"
+			break
+		fi
+	done
+done < <(find "${sdk_dir}/staging_dir/host/bin" -maxdepth 1 -xtype l)
+
 # The video feed is hosted on github.com, which is unreachable from some
 # build hosts (mainland CN clouds); nothing in this package needs it, and
 # `feeds update -a` treats a failed clone as fatal under set -e. Drop the
