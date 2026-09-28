@@ -58,6 +58,9 @@
   `unshare(1)` 自身失败时以非零退出码加 stderr 诊断结束、不抛 Python 异常，原来的
   `except` 接不住，导致"应跳过"的路径以 rc=1 让 CI 失败。现按 stderr 中的 unshare
   诊断识别为跳过，子进程检查真实失败仍照常报错。
+- `src/probe/icmp.rs` 改用推断类型填充 `timeval.tv_sec`，移除对已弃用别名
+  `libc::time_t` 的引用（musl 目标下的 clippy 告警；musl 1.2.0 起 `time_t` 为 64 位，
+  推断写法对 glibc/musl 均正确）。
 - `PKG_VERSION` 与 Cargo 版本同步升至 1.8.2。
 
 ### 已知遗留

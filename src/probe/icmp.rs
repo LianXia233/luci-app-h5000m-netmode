@@ -33,7 +33,7 @@ fn bind_device(fd: i32, dev: &str) -> Result<()> {
 
 fn set_recv_timeout(fd: i32, secs: u32) {
     let tv = libc::timeval {
-        tv_sec: secs as libc::time_t,
+        tv_sec: secs as _,
         tv_usec: 0,
     };
     unsafe {
