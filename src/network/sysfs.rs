@@ -15,14 +15,12 @@ pub const PROC_NET: &str = "/proc/net";
 /// The sysfs root. `H5000M_SYSFS_NET` redirects it so the deterministic test
 /// suite can stand up a fake interface tree without root or namespaces.
 pub fn sys_net() -> String {
-    std::env::var("H5000M_SYSFS_NET")
-        .unwrap_or_else(|_| SYS_NET.to_string())
+    std::env::var("H5000M_SYSFS_NET").unwrap_or_else(|_| SYS_NET.to_string())
 }
 
 /// The /proc/net root (`H5000M_PROC_NET`), redirected for the same reason.
 pub fn proc_net() -> String {
-    std::env::var("H5000M_PROC_NET")
-        .unwrap_or_else(|_| PROC_NET.to_string())
+    std::env::var("H5000M_PROC_NET").unwrap_or_else(|_| PROC_NET.to_string())
 }
 
 pub fn netdev_exists(dev: &str) -> bool {

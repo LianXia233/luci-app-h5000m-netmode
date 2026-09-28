@@ -46,17 +46,19 @@
 - 新增 `tests/netlink_netns.py`：在临时网络命名空间内用真实内核验证 netlink 报文布局
   （新增/换槽/删除/协议号回读，8 项断言），并接入 CI。单元测试只能断言我们"造出的字节"，
   断言不了内核对这些字节的反应 —— 本次两个布局 bug 都属于后者。
-- CI 新增 `sync-shipped-binaries` 任务：main 分支上若 `src/` 的编译结果与仓库内的预编译
-  产物不一致，自动提交更新后的 `root/usr/sbin/*`。产物漂移从此不必依赖人工记得跑脚本
-  （若仓库 Actions 令牌为只读则降级为警告）。
+- CI 新增 `autofix` 任务：main 分支上若 `src/` 的编译结果与仓库内的预编译产物不一致，
+  或 `cargo fmt --check` 有差异，自动在同一提交里修正并回推。产物漂移与格式漂移从此不必
+  依赖人工记得跑脚本（若仓库 Actions 令牌为只读则降级为警告）。
+- CI 的格式检查不再拦住后续步骤：此前 `cargo fmt --check` 一旦失败，clippy、单元测试、
+  真内核 netlink 验证会被全部跳过，一个空白符差异就能把真正的破坏藏住。现在 main 上降级
+  为警告（由 `autofix` 修），PR 上仍是硬门禁；三步检查的输出另存为 `ci-logs` 产物。
 - `PKG_VERSION` 与 Cargo 版本同步升至 1.8.2。
 
 ### 已知遗留
 
 - `root/usr/sbin/h5000m-netmode*` 仍是 v1.8.1 编译的旧产物（本次改动环境无 Rust 工具链，
   无法交叉编译）。它不包含上述任何修复，安装后仍会表现为切换失败。推到 main 后 CI 的
-  `sync-shipped-binaries` 任务会自动补上；或在本地执行 `scripts/build-rust.sh` 并连同产物
-  一起提交。
+  `autofix` 任务会自动补上；或在本地执行 `scripts/build-rust.sh` 并连同产物一起提交。
 
 ## [v1.8.1] — 2026-09-28
 

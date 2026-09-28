@@ -51,7 +51,7 @@ pub fn run_bounded(program: &str, args: &[&str], timeout: Duration) -> Result<St
                     let mut rest = Vec::new();
                     // Whatever the read reports, `rest` holds what was still
                     // in the pipe, and that is all this wrapper cares about.
-                    let _drained = so.read_to_end(&mut rest);
+                    let _ = so.read_to_end(&mut rest);
                     stdout.extend_from_slice(&rest);
                 }
                 if status.success() {
@@ -144,8 +144,7 @@ pub fn ubus_wireless_status() -> Option<String> {
 /// `ubus call iwinfo assoclist {"device": "<dev>"}`.
 pub fn ubus_iwinfo_assoclist(dev: &str) -> Option<String> {
     let payload = format!("{{\"device\":\"{}\"}}", json_escape(dev));
-    run_bounded_default("ubus", &["call", "iwinfo", "assoclist", &payload])
-        .ok()
+    run_bounded_default("ubus", &["call", "iwinfo", "assoclist", &payload]).ok()
 }
 
 /// `ifup <sec>` – bounded; never blocks a switch beyond the timeout.

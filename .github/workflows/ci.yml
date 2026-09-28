@@ -31,11 +31,34 @@ jobs:
       - name: Install validation tools
         run: sudo apt-get update && sudo apt-get install -y gettext
       - name: Format check
-        run: cargo fmt --check
+        # rustfmt's idea of the right layout moves with the toolchain, and a
+        # formatting-only failure used to skip every later step - clippy, the
+        # unit tests, the real-kernel netlink pin - hiding real breakage behind
+        # a whitespace diff. On main that repair is mechanical and the `autofix`
+        # job below does it in one commit, so here it is reported and never
+        # allowed to mask the rest; on a pull request it stays a hard gate.
+        run: |
+          mkdir -p ci-logs
+          if cargo fmt --check > ci-logs/fmt.log 2>&1; then
+            echo "formatting is clean"
+          else
+            echo "::warning::cargo fmt --check reported differences; see the ci-logs artifact"
+            cat ci-logs/fmt.log
+            if [ "${GITHUB_EVENT_NAME}" != "push" ] || [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+              echo "::error::run cargo fmt and commit the result"
+              exit 1
+            fi
+          fi
       - name: Clippy (all targets, deny warnings)
-        run: cargo clippy --all-targets -- -D warnings
+        run: |
+          mkdir -p ci-logs
+          cargo clippy --all-targets -- -D warnings 2>&1 | tee ci-logs/clippy.log
+          exit "${PIPESTATUS[0]}"
       - name: Unit tests
-        run: cargo test
+        run: |
+          mkdir -p ci-logs
+          cargo test 2>&1 | tee ci-logs/test.log
+          exit "${PIPESTATUS[0]}"
       - name: Pin the netlink layout against a real kernel
         # Unit tests assert the bytes we build, not what the kernel does with
         # them: both bugs this module shipped with produced plausible buffers
@@ -83,6 +106,16 @@ jobs:
         with:
           name: h5000m-netmode-aarch64-musl
           path: dist-artifacts/
+      - name: Upload the check logs
+        # A failing step's console output is the only place these details exist,
+        # and it is not reachable from the API. Keep the fmt / clippy / test
+        # output as an artefact so a red run can be diagnosed without a browser.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: ci-logs/
+          if-no-files-found: ignore
       - name: Check shell syntax of the remaining shell backend files
         # The core backend is Rust now; init/hotplug/uci-defaults stay POSIX sh
         # and must keep parsing under dash (CI default /bin/sh).
@@ -124,14 +157,13 @@ jobs:
       - name: Test the exit card's branches
         run: node tests/test_exit_card.js htdocs/luci-static/resources/view/h5000m/netmode.js
 
-  # The package ships root/usr/sbin/h5000m-netmode* as a committed binary
-  # because the OpenWrt buildroot has no Rust toolchain. That makes the binary
-  # the one artefact a src/ change can silently miss - and the miss is
-  # invisible: the package installs, the service starts, only the behaviour is
-  # old. Warnings do not fix it on their own, so on main this job commits the
-  # freshly built binaries back. The follow-up push runs CI again, finds no
-  # drift, and stops.
-  sync-shipped-binaries:
+  # Two artefacts can silently fall behind src/: the committed prebuilt binary
+  # (the buildroot has no Rust toolchain) and rustfmt's own output (it moves
+  # with the toolchain). Neither is worth a red run - the first ships old
+  # behaviour, the second hides every later check behind a whitespace diff - and
+  # both are mechanically repairable. On main this job fixes them in one commit;
+  # the follow-up push runs CI again, finds nothing to fix, and stops.
+  autofix:
     needs: rust-backend
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -142,43 +174,42 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
+      # rustfmt only: no target, no clippy component, no download of the
+      # toolchain twice.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - uses: actions/download-artifact@v4
         with:
           name: h5000m-netmode-aarch64-musl
           path: dist-artifacts
-      - name: Commit the binaries if they differ from what src/ builds
+      - name: Reformat src/ and refresh the shipped binaries
         run: |
-          changed=0
+          cargo fmt
           for b in h5000m-netmode h5000m-netmode-status; do
             if [ ! -f "dist-artifacts/$b" ]; then
-              echo "::error::dist-artifacts/$b is missing; cannot sync"
+              echo "::error::dist-artifacts/$b is missing; cannot refresh the shipped binaries"
               exit 1
             fi
             if ! cmp -s "dist-artifacts/$b" "root/usr/sbin/$b"; then
               install -m 0755 "dist-artifacts/$b" "root/usr/sbin/$b"
               echo "root/usr/sbin/$b updated from src/"
-              changed=1
             fi
           done
-          if [ "$changed" -eq 0 ]; then
-            echo "shipped binaries already match src/"
-            exit 0
-          fi
-          if [ -z "$(git status --porcelain -- root/usr/sbin)" ]; then
-            echo "no git-level change under root/usr/sbin"
+          if [ -z "$(git status --porcelain -- src root/usr/sbin)" ]; then
+            echo "nothing to fix: sources are formatted and the binaries match src/"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add root/usr/sbin
+          git add src root/usr/sbin
           msg="$(printf '%s\n\n%s\n' \
-            "chore(binaries): 同步 root/usr/sbin 与 src/ 的编译产物" \
-            "由 CI 自动生成：src/ 已变化而包内预编译二进制未随之更新，详见 ci.yml 的 sync-shipped-binaries 任务。")"
+            "chore(autofix): 同步 rustfmt 结果与 src/ 编译产物" \
+            "由 CI 自动生成，详见 .github/workflows/ci.yml 的 autofix 任务。")"
           git commit -m "$msg"
-          # A repo whose default GITHUB_TOKEN is read-only cannot push. That is
-          # worth saying out loud, but the checks that matter already ran, so
-          # it must not turn the whole workflow red.
+          # A repo whose default GITHUB_TOKEN is read-only cannot push. Say so,
+          # but every check that matters already ran, so do not fail the run.
           git push origin main || {
-            echo "::warning::cannot push the rebuilt binaries; run scripts/build-rust.sh locally and commit root/usr/sbin"
+            echo "::warning::cannot push the autofix; run cargo fmt and scripts/build-rust.sh locally"
             exit 0
           }

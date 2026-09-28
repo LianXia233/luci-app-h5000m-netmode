@@ -165,8 +165,8 @@ cargo clippy --all-targets -- -D warnings
 
 `root/usr/sbin/h5000m-netmode*` 是提交进仓库的预编译产物（buildroot 没有 Rust
 工具链）。CI 会比对编译输出与该产物：不一致时给出警告，并在 main 分支上自动提交更新后的
-产物（`sync-shipped-binaries` 任务）。本地改动 `src/` 后也可直接执行上面的脚本并连同产物
-一起提交。
+产物，并顺带修正格式（`autofix` 任务）。本地改动 `src/` 后也可直接执行上面的脚本并连同
+产物一起提交。
 
 > 提示：GitHub Releases 中的软件包由 GitHub Actions 使用官方 OpenWrt SNAPSHOT `mediatek/filogic` SDK 在线构建，附带中文语言包、SDK 构建公钥和 SHA256 校验文件。软件包应安装到 ABI 匹配的近期 SNAPSHOT 固件。
 
