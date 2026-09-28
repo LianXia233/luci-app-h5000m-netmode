@@ -1,6 +1,6 @@
 [package]
 name = "h5000m-netmode"
-version = "1.8.4"
+version = "1.8.5"
 edition = "2021"
 rust-version = "1.70"
 description = "Rust backend for the H5000M dual-WAN primary/backup switch (LuCI frontend unchanged)"

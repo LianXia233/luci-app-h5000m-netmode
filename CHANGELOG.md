@@ -2,6 +2,46 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.8.5] — 2026-09-28
+
+本次解决实机上一组「WAN 与 5G 全部显示 eth0 / 第三方路由接管 / 5G 硬件未配置」的连锁故障，
+并让外部路由（mwan3 / VPN / daed 等）与物理出口监管解耦。
+
+### 修复
+
+- **设备发现根因（`src/config/uci.rs`）**：`interface_sections()` 此前按
+  `opts.get("type") == "interface"` 过滤 UCI section，但 `parse_uci` 从不存储 section 头部
+  的类型（`config interface 'wan'` 的 `interface`），该条件在所有真实设备上恒为假 ——
+  network 的接口 section 永远发现不了，modem 分组永远不成立（页面显示「硬件未配置」），
+  下拉框回退到前端伪造的 `eth0/eth1/eth2`。现改为直接解析 `config <type> '<name>'`
+  头部（新增 `section_types()`），并附真实 network 文件的回归测试
+  （`config device` section 与幽灵注释行不得泄漏）。
+- **IPv6 不再回滚已成功的 IPv4 切换**：新增 `verify_commit()`，`strict_dual_stack=0`
+  （新默认）下 `ipv6_*` 验证失败降级为告警；`reconcile` 与切换状态机的全部
+  VERIFY_TARGET 校验点统一走该函数。
+- **双角色冲突拒绝**：`set-device-map` 对「device 已绑定到另一角色」直接拒绝
+  （exit 64 + 日志），前端同步改为本地拦截提示，不再静默把另一角色顶到别的接口。
+- **日志可读性**：syslog 行改为 `[netmode] [<ts>] <LEVEL> <module>: <message>`，
+  module tag 不再丢失；init.d 的 stderr 与 hotplug 通知接入 syslog。
+
+### 新增
+
+- **外部路由三字段状态契约**：`status` 新增 `external_route`（外部路由是否持有默认路由）、
+  `external_route_source`（`tun` / 检测到的策略引擎名：mwan3、daed、sing-box、openclash、
+  clash、passwall、homeproxy / `unknown`）、`external_physical_owner`（非隧道承载设备的
+  角色归属）。插件不退场：外部路由只享调度权，物理出口主备监管仍归本插件。
+- **前端如实展示**：`loadDeviceMap()` 删除本地猜测 fallback（`['eth0','eth1','eth2']` 与
+  `{wan:'eth1',modem:'eth2'}`），后端不可达时显式提示；外部路由提示拆分为
+  路由来源 / 实际物理承载两行结构化展示；`set-device-map` 失败时透传后端 stderr。
+
+### 构建链
+
+- `scripts/build-release.sh`：video feed（github.com 托管、本包无依赖）在解压后剔除；
+  SDK 压缩包 sha256 校验通过时复用缓存；解压后把 `staging_dir/host/bin` 的悬空 symlink
+  重新指向本机同名工具（官方打包机的 `/usr/bin/gcc` 在其他主机上不存在）；显式关闭
+  `LUCI_CSSTIDY` / `LUCI_UTMIN`（本包无 css/ut 资源，csstidy 源码托管在 github.com）。
+- `scripts/build-rust.sh` 产物随本版本重新提交（含上述全部后端修复）。
+
 ## [v1.8.4] — 2026-09-28
 
 ### 修复
