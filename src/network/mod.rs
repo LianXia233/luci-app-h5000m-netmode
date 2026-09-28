@@ -786,8 +786,12 @@ mod tests {
             "{\n\t\"up\": true,\n\t\"available\":\ttrue\n}",
             "up"
         ));
-        assert!(json_bool("{\n\t\"up\": true,\n}", "available"));
+        assert!(json_bool(
+            "{\n\t\"up\": false,\n\t\"available\": true\n}",
+            "available"
+        ));
         assert!(!json_bool("{\n\t\"up\": false,\n}", "up"));
+        assert!(!json_bool("{\n\t\"up\": true,\n}", "available"));
     }
 
     #[test]
