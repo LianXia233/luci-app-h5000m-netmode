@@ -782,7 +782,10 @@ mod tests {
         assert!(!json_bool("{\"up\":true}", "missing"));
         // Regression: ubus prints pretty JSON with whitespace after the
         // colon; every boolean used to read as false there.
-        assert!(json_bool("{\n\t\"up\": true,\n\t\"available\":\ttrue\n}", "up"));
+        assert!(json_bool(
+            "{\n\t\"up\": true,\n\t\"available\":\ttrue\n}",
+            "up"
+        ));
         assert!(json_bool("{\n\t\"up\": true,\n}", "available"));
         assert!(!json_bool("{\n\t\"up\": false,\n}", "up"));
     }
