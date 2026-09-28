@@ -229,8 +229,8 @@ fn build_v4_pkt(id: u16, seq: u16) -> Vec<u8> {
     pkt.extend_from_slice(&seq.to_ne_bytes());
     pkt.extend_from_slice(b"h5000m");
     let sum = checksum(&pkt);
-    pkt[2] = (sum & 0xff) as u8;
-    pkt[3] = (sum >> 8) as u8;
+    // ICMP header fields are network byte order: high byte first.
+    pkt[2..4].copy_from_slice(&sum.to_be_bytes());
     pkt
 }
 
@@ -285,8 +285,8 @@ fn build_v6_pkt(id: u16, seq: u16, src6: Ipv6Addr, dst6: Ipv6Addr) -> Vec<u8> {
     ph.extend_from_slice(&[0, 0, 0, libc::IPPROTO_ICMPV6 as u8]);
     ph.extend_from_slice(&pkt);
     let sum = checksum(&ph);
-    pkt[2] = (sum & 0xff) as u8;
-    pkt[3] = (sum >> 8) as u8;
+    // ICMPv6 header fields are network byte order: high byte first.
+    pkt[2..4].copy_from_slice(&sum.to_be_bytes());
     pkt
 }
 
