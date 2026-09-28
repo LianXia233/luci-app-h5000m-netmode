@@ -61,6 +61,13 @@
 - `src/probe/icmp.rs` 改用推断类型填充 `timeval.tv_sec`，移除对已弃用别名
   `libc::time_t` 的引用（musl 目标下的 clippy 告警；musl 1.2.0 起 `time_t` 为 64 位，
   推断写法对 glibc/musl 均正确）。
+- 修复 SDK 发布构建（Build Release）失败：Rust 化后 `src/`（Cargo 工程）随打包脚本
+  进入 SDK 包目录，命中上游 `luci.mk` 的 `ifneq ($(wildcard ${CURDIR}/src),)` 规则，
+  `Package/install` 随之执行 `Build/Install/Default`（`make -C <build_dir> install`），
+  而无 Makefile 的 Cargo 工程没有该目标，报 `No rule to make target 'install'`。
+  本包按设计仅发布预编译静态产物（`root/usr/sbin`，构建环境无 Rust 工具链），
+  现将 `src/`、`Cargo.toml`、`Cargo.lock` 排除出 SDK 包目录，并在 rsync 后加泄漏断言，
+  泄漏在 SDK 构建前 1 秒内显式失败。
 - `PKG_VERSION` 与 Cargo 版本同步升至 1.8.2。
 
 ### 已知遗留

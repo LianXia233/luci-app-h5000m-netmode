@@ -64,7 +64,21 @@ perl -0pi -e 's/(config TARGET_MULTI_PROFILE\n\s+bool\n\s+default )y/${1}n/; s/(
 sed -i 's/^[[:space:]]*default m$/\tdefault n/' Config-build.in
 
 mkdir -p package/h5000m-custom
-rsync -a --exclude '.git/' --exclude '.github/' --exclude 'scripts/' --exclude 'dist-release/' "${repo_dir}/" package/h5000m-custom/luci-app-h5000m-netmode/
+# Exclude the Rust crate: the OpenWrt buildroot has no Rust toolchain, the
+# package ships the prebuilt static ELF under root/usr/sbin, and shipping src/
+# into the SDK actively breaks the build - luci.mk enables its compiled-source
+# path whenever a src/ directory exists (Package/install then runs
+# Build/Install/Default, i.e. `make -C <build_dir> install`), and a Cargo
+# project has no such rule ("No rule to make target 'install'").
+rsync -a --exclude '.git/' --exclude '.github/' --exclude 'scripts/' --exclude 'dist-release/' \
+	--exclude 'src/' --exclude 'Cargo.toml' --exclude 'Cargo.lock' \
+	"${repo_dir}/" package/h5000m-custom/luci-app-h5000m-netmode/
+# Gate before the SDK build: src/ must not have leaked into the package tree.
+if [ -e package/h5000m-custom/luci-app-h5000m-netmode/src ] ||
+   [ -e package/h5000m-custom/luci-app-h5000m-netmode/Cargo.toml ]; then
+	echo "::error::Rust crate leaked into the SDK package tree; luci.mk would run 'make install' on it"
+	exit 1
+fi
 cat > .config <<'EOF'
 CONFIG_TARGET_mediatek=y
 CONFIG_TARGET_mediatek_filogic=y
