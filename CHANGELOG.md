@@ -2,6 +2,29 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.8.5-r7] — 2026-09-29
+
+r6 实测双向切换时序取证暴露的 worker 侧同构缺陷。
+
+### 修复
+
+- **切换 worker 的 post-switch reconcile 使用启动时冻结的配置
+  （`src/rpc.rs`）**：`cmd_switch_worker` 在切换成功后立即执行
+  `reconcile_body(cfg, ...)`，但 `cfg` 是 worker 进程启动时加载的——手动
+  `set` 切换期间 policy 已切到新 mode，用旧 mode reconcile 等于让 worker
+  **亲手把刚提交的 FIB 拖回旧出口**（r6 实测：`set wan_first --wait` 本体
+  0.60s 提交成功，5 秒后被 worker 的 `align -> modem (failback)` 拉回，
+  2 分钟后看门狗才用 cooldown 窗口纠正）。这是冻结状态缺陷链的第三处
+  实例（S1 的 WAIT 冻结快照、r6 的 watcher 冻结配置），现 reconcile 前
+  `AppConfig::load()` 重读，与 watcher 修复同构。
+
+### 验证记录（r5/r6 修复本体）
+
+- r5 standby 实时化：双向切换本体全部成功（wan→modem 22.43s、modem→wan
+  0.60s），r4 时代的 `ipv4_standby_not_demoted` 必败场景已消除。
+- r6 watcher 重载：看门狗最终按新 uci mode 收敛（00:47:13 align -> wan），
+  自动 failback 正常工作。
+
 ## [v1.8.5-r6] — 2026-09-29
 
 r5 部署实测中暴露：手动切换本体已成功，但数秒后被看门狗拉回旧出口。

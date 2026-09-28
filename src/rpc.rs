@@ -232,8 +232,14 @@ pub fn cmd_switch_worker(cfg: &AppConfig, applied: &str, my_gen: u32) -> i32 {
         break;
     }
     // Re-arm the warm standby route and the audit field after the switch.
+    // cfg predates the switch: the mode may have changed in uci while the
+    // worker ran (a manual `set` updates policy, LuCI edits land between
+    // ticks), and reconciling with the stale mode dragged the just-committed
+    // FIB straight back to the old exit seconds after a successful manual
+    // switch (worker-side twin of the watcher freeze fixed in r6).
+    let cfg = AppConfig::load();
     let snap = network::read_live_state();
-    let _ = crate::reconcile::reconcile_body(cfg, &snap, true);
+    let _ = crate::reconcile::reconcile_body(&cfg, &snap, true);
     if held {
         state::release_lock();
     }
