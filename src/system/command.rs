@@ -44,7 +44,7 @@ pub fn run_bounded(program: &str, args: &[&str], timeout: Duration) -> Result<St
                 // of a fast command (a ubus status, say) and makes callers see
                 // an empty answer for no reason. Switch the pipe back to
                 // blocking - the write end is closed now, so this cannot hang.
-                if let Some(so) = child.stdout.take() {
+                if let Some(mut so) = child.stdout.take() {
                     use std::io::Read;
                     use std::os::fd::AsRawFd;
                     set_nonblocking(so.as_raw_fd(), false);
