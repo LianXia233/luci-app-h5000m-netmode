@@ -309,9 +309,12 @@ fn read_section_state(section: &str) -> SectionState {
 
 fn json_bool(json: &str, key: &str) -> bool {
     // Minimal JSON field scan: `"key":true` / `"key":false`.
+    // ubus prints pretty JSON - `"up":\ttrue` - so whitespace after the
+    // colon must be skipped, otherwise every boolean read as false and
+    // the whole readiness/watchdog stack went blind on real netifd.
     let needle = format!("\"{key}\":");
     if let Some(pos) = json.find(&needle) {
-        let rest = &json[pos + needle.len()..];
+        let rest = json[pos + needle.len()..].trim_start();
         if rest.starts_with("true") {
             return true;
         }
@@ -777,6 +780,11 @@ mod tests {
         assert!(json_bool("{\"up\":true,\"available\":true}", "up"));
         assert!(!json_bool("{\"up\":false}", "up"));
         assert!(!json_bool("{\"up\":true}", "missing"));
+        // Regression: ubus prints pretty JSON with whitespace after the
+        // colon; every boolean used to read as false there.
+        assert!(json_bool("{\n\t\"up\": true,\n\t\"available\":\ttrue\n}", "up"));
+        assert!(json_bool("{\n\t\"up\": true,\n}", "available"));
+        assert!(!json_bool("{\n\t\"up\": false,\n}", "up"));
     }
 
     #[test]

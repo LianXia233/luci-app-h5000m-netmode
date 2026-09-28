@@ -2,6 +2,16 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.8.5-r3] — 2026-09-28
+
+### 修复
+
+- **`json_bool` 无法解析 ubus 的 pretty JSON（`src/network/mod.rs`）**：ubus 返回的
+  接口状态是带缩进的 JSON（`"up":\ttrue`，冒号后有空白），字段扫描没有跳过冒号后的
+  空白，所有 `up` / `available` 布尔量在真实 netifd 上恒判 false —— `group_ready_*`、
+  `group_online_*` 全 0，健康检查报 unknown，看门狗因此永远不触发 failback/救援。
+  现读取前先 `trim_start()`，并附 pretty JSON 回归测试。
+
 ## [v1.8.5-r2] — 2026-09-28
 
 ### 修复
