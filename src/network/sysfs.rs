@@ -88,7 +88,7 @@ pub fn ipv4_addrs() -> Vec<(String, String)> {
     let mut buf = vec![0u8; 16 * 1024];
     let mut ifc: libc::ifconf = unsafe { std::mem::zeroed() };
     ifc.ifc_len = buf.len() as libc::c_int;
-    ifc.ifc_buf = buf.as_mut_ptr() as *mut libc::c_char;
+    ifc.ifc_ifcu.ifcu_buf = buf.as_mut_ptr() as *mut libc::c_char;
     let rc = unsafe { libc::ioctl(fd, libc::SIOCGIFCONF, &mut ifc) };
     if rc >= 0 && ifc.ifc_len > 0 {
         let filled = (ifc.ifc_len as usize).min(buf.len());
@@ -111,9 +111,11 @@ fn parse_ifconf(buf: &[u8], filled: usize, req_size: usize) -> Vec<(String, Stri
     let mut off = 0usize;
     while off + req_size <= filled && off + 24 <= buf.len() {
         let name_bytes = &buf[off..off + 16];
-        let namelen = name_bytes.iter().position(|&b| b == 0).unwrap_or(16).max(1);
-        let name = String::from_utf8_lossy(&name_bytes[..namelen.min(16)]).to_string();
-        let family = u16::from_le_bytes([buf[off + 16], buf[off + 17]]);
+        let namelen = name_bytes.iter().position(|&b| b == 0).unwrap_or(16);
+        let name = String::from_utf8_lossy(&name_bytes[..namelen]).to_string();
+        // sa_family_t is host-endian in the kernel ABI; on any target the
+        // from_ne_bytes/to_ne_bytes pair round-trips it losslessly.
+        let family = u16::from_ne_bytes([buf[off + 16], buf[off + 17]]);
         if !name.is_empty() && family == AF_INET {
             let a = [buf[off + 20], buf[off + 21], buf[off + 22], buf[off + 23]];
             let ip = format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3]);
@@ -290,7 +292,7 @@ mod tests {
         let mut buf = vec![0u8; 120];
         let mut put = |off: usize, name: &[u8], family: u16, ip: [u8; 4]| {
             buf[off..off + name.len()].copy_from_slice(name);
-            buf[off + 16..off + 18].copy_from_slice(&family.to_le_bytes());
+            buf[off + 16..off + 18].copy_from_slice(&family.to_ne_bytes());
             buf[off + 20..off + 24].copy_from_slice(&ip);
         };
         put(0, b"eth0", 2, [192, 168, 10, 1]);

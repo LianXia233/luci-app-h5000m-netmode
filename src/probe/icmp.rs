@@ -37,6 +37,73 @@ fn bind_device(fd: i32, dev: &str) -> Result<()> {
     Ok(())
 }
 
+/// Bind a ping socket to its echo ident. The kernel ping socket stores the
+/// ICMP echo ident in the sockaddr port field: without a bind, `inet_sport`
+/// stays 0, the socket never enters the kernel ping hash table and every
+/// echo reply is dropped (`SKB_DROP_REASON_NO_SOCKET`) - the probe would
+/// time out 100% of the time while `ping` on the shell works. Retries with
+/// `id+1` on EADDRINUSE (concurrent probers), like iputils does.
+fn bind_ident_v4(fd: i32, start: u16) -> Option<u16> {
+    let mut id = start;
+    for _ in 0..8 {
+        let sa = libc::sockaddr_in {
+            sin_family: libc::AF_INET as u16,
+            sin_port: id.to_be(), // the echo ident lives in the port field
+            sin_addr: libc::in_addr {
+                s_addr: libc::INADDR_ANY,
+            },
+            sin_zero: [0; 8],
+        };
+        let rc = unsafe {
+            libc::bind(
+                fd,
+                &sa as *const libc::sockaddr_in as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
+        };
+        if rc == 0 {
+            return Some(id);
+        }
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EADDRINUSE) {
+            id = id.wrapping_add(1);
+            continue;
+        }
+        return None;
+    }
+    None
+}
+
+fn bind_ident_v6(fd: i32, start: u16) -> Option<u16> {
+    let mut id = start;
+    for _ in 0..8 {
+        let sa = libc::sockaddr_in6 {
+            sin6_family: libc::AF_INET6 as u16,
+            sin6_port: id.to_be(),
+            sin6_flowinfo: 0,
+            sin6_addr: libc::in6_addr {
+                s6_addr: [0; 16], // in6addr_any
+            },
+            sin6_scope_id: 0,
+        };
+        let rc = unsafe {
+            libc::bind(
+                fd,
+                &sa as *const libc::sockaddr_in6 as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+            )
+        };
+        if rc == 0 {
+            return Some(id);
+        }
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EADDRINUSE) {
+            id = id.wrapping_add(1);
+            continue;
+        }
+        return None;
+    }
+    None
+}
+
 /// Re-arm `SO_RCVTIMEO` for the remaining wait. Zero remaining time is
 /// handled by the caller (`recv_echo_reply` returns before calling this).
 fn set_recv_timeout_us(fd: i32, us: i64) {
@@ -267,13 +334,16 @@ fn ping_v4(dev: &str, target: IpAddr, timeout: u32, seq: u16) -> Result<bool> {
     if dgram >= 0 {
         let out = (|| -> Result<bool> {
             bind_device(dgram, dev)?;
-            let pkt = build_v4_pkt(id, seq);
+            // The kernel rewrites the echo ident from inet_sport on send, so
+            // the packet must be built with the ident actually bound.
+            let bound = bind_ident_v4(dgram, id).ok_or_else(|| Error::probe("icmp bind ident"))?;
+            let pkt = build_v4_pkt(bound, seq);
             send_v4(dgram, addr4, &pkt)?;
             Ok(recv_echo_reply(
                 dgram,
                 ICMP_ECHO_REPLY,
                 false,
-                id,
+                bound,
                 false,
                 dl,
             ))
@@ -333,13 +403,15 @@ fn ping_v6(dev: &str, target: IpAddr, timeout: u32, seq: u16) -> Result<bool> {
     if dgram >= 0 {
         let out = (|| -> Result<bool> {
             bind_device(dgram, dev)?;
-            let pkt = build_v6_pkt(id, seq, src6, addr6);
+            let bound =
+                bind_ident_v6(dgram, id).ok_or_else(|| Error::probe("icmpv6 bind ident"))?;
+            let pkt = build_v6_pkt(bound, seq, src6, addr6);
             send_v6(dgram, addr6, &pkt)?;
             Ok(recv_echo_reply(
                 dgram,
                 ICMPV6_ECHO_REPLY,
                 false,
-                id,
+                bound,
                 false,
                 dl,
             ))

@@ -671,6 +671,14 @@ pub fn group_family_required(
 
 pub fn group_complete(snap: &LiveSnapshot, g: Group, strict_dual_stack: bool) -> bool {
     for fam in Family::ALL {
+        // strict_dual_stack=0: a broken or merely-stale IPv6 must never gate
+        // the group predicates - IPv4 is the deciding family for failover and
+        // failback. The switch state machine already treats a capable-family
+        // wait/probe failure as a warning under strict=0; mirroring that here
+        // keeps group_ready_* / group_online_* / reconcile aligned.
+        if fam == Family::V6 && !strict_dual_stack {
+            continue;
+        }
         if !group_family_required(snap, g, fam, strict_dual_stack) {
             continue;
         }
@@ -687,6 +695,10 @@ pub fn group_complete_online(snap: &LiveSnapshot, g: Group, strict_dual_stack: b
         return false;
     }
     for fam in Family::ALL {
+        // Same strict=0 rule as group_complete: IPv6 verdicts never gate.
+        if fam == Family::V6 && !strict_dual_stack {
+            continue;
+        }
         if !group_family_required(snap, g, fam, strict_dual_stack) {
             continue;
         }

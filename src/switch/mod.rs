@@ -154,7 +154,7 @@ pub fn wait_group_family(
     fam: Family,
     limit: u32,
     mode: Mode,
-    snap: &LiveSnapshot,
+    snap: &mut LiveSnapshot,
 ) -> bool {
     let mut waited: u32 = 0;
     let mut tried_warm = false;
@@ -182,6 +182,11 @@ pub fn wait_group_family(
             return false;
         }
         waited += 1;
+        // Re-read live kernel state: a warm/ifup that succeeded only becomes
+        // visible in a FRESH snapshot - the caller's snapshot was taken at
+        // switch start and would stay stale until the wait timed out (the
+        // spurious "ipv4_not_ready" rollback on an already-healthy uplink).
+        *snap = network::read_live_state();
         let _ = state::state_write(&[(
             "message",
             &format!("waiting ipv{} ({}) {waited}s/{limit}s", fam.n(), g.as_str()),
