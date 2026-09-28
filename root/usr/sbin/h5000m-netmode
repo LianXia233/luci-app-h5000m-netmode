@@ -1444,8 +1444,12 @@ ping_one() { # <4|6> <dev> <timeout> <target>
 }
 
 ping_targets_once() { # <4|6> <devs> <timeout>
-	local family="$1" devs="$2" timeout="$3" target dev
+	local family="$1" devs="$2" timeout="$3" target dev pids="" rc
 	[ -n "$devs" ] || return 1
+	# Fire every (target, device) pair in parallel: one round then costs at most
+	# a single probe timeout instead of targets x devices x timeout, and any
+	# success answers the round.  BusyBox `ping -W` bounds every child, so the
+	# fan-out is self-terminating even on a silent uplink.
 	for target in $(probe_targets "$family"); do
 		case "$target" in
 			*:*) [ "$family" = "6" ] || continue ;;
@@ -1454,8 +1458,17 @@ ping_targets_once() { # <4|6> <devs> <timeout>
 		esac
 		for dev in $devs; do
 			netdev_exists "$dev" || continue
-			ping_one "$family" "$dev" "$timeout" "$target" && return 0
+			ping_one "$family" "$dev" "$timeout" "$target" &
+			pids="$pids $!"
 		done
+	done
+	[ -n "$pids" ] || return 1
+	for p in $pids; do
+		if wait "$p"; then
+			# A sibling probe may still be running out its bounded timeout; it is
+			# a read-only probe and is left to finish on its own.
+			return 0
+		fi
 	done
 	return 1
 }
@@ -1550,16 +1563,18 @@ health_write() { # <key=value> ...
 # One probe round: every (group, family) that structurally can answer is probed,
 # the verdicts and their failure streaks are persisted.  Throttled by
 # health_probe_interval so the watchdog cannot spend traffic re-learning a value
-# that rarely changes.
+# that rarely changes; pass `force` (e.g. right after an interface event, or
+# while the active exit already shows a failed verdict) to skip that throttle.
 refresh_health() {
-	local wan wan6 modem modem6 now last interval streak
+	local wan wan6 modem modem6 now last interval streak force
 	local wan_fail modem_fail wan6_fail modem6_fail
+	force="$1"
 
 	now="$(date +%s 2>/dev/null || echo 0)"
 	interval="$(number_or "$(uci_get h5000m_netmode.settings.health_probe_interval)" 60)"
 	last="$(number_or "$(cached_field ts)" 0)"
 
-	if [ "$interval" -gt 0 ] && [ "$last" -gt 0 ] && [ "$now" -gt 0 ] &&
+	if [ -z "$force" ] && [ "$interval" -gt 0 ] && [ "$last" -gt 0 ] && [ "$now" -gt 0 ] &&
 		[ $((now - last)) -lt "$interval" ]; then
 		return 0
 	fi
@@ -2874,6 +2889,7 @@ write_ipv6_owner() { # <active group|split|none>
 }
 
 reconcile_body() {
+	local force
 	invalidate_state
 	read_live_state
 
@@ -2886,7 +2902,15 @@ reconcile_body() {
 	fi
 
 	if health_check_enabled; then
-		refresh_health
+		force=""
+		[ "$(state_get health_force)" = "1" ] && force=1
+		refresh_health "$force"
+		# An interface event is the earliest failure signal; the forced round it
+		# produced is the first confirmation (the flag is consumed here so a
+		# plain watch cycle stays throttled by health_probe_interval).
+		if [ "$force" = "1" ]; then
+			state_write "health_force=0"
+		fi
 		invalidate_state
 		read_live_state
 	fi
@@ -2914,7 +2938,7 @@ hotplug_notify() { # <section> [action]
 	local section="$1" action="${2:-event}" marker="${STATE_FILE}.debounce" events runs
 
 	events=$(( $(number_or "$(state_get hotplug_events)" 0) + 1 ))
-	state_write "hotplug_last=${section}:${action}" "hotplug_events=$events" 		"hotplug_last_ts=$(date +%s 2>/dev/null || echo 0)"
+	state_write "hotplug_last=${section}:${action}" "hotplug_events=$events" 		"hotplug_last_ts=$(date +%s 2>/dev/null || echo 0)" 		"health_force=1"
 
 	if ! mkdir "$marker" 2>/dev/null; then
 		# Coalesced into the run that is already scheduled: a burst of events
