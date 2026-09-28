@@ -52,6 +52,12 @@
 - CI 的格式检查不再拦住后续步骤：此前 `cargo fmt --check` 一旦失败，clippy、单元测试、
   真内核 netlink 验证会被全部跳过，一个空白符差异就能把真正的破坏藏住。现在 main 上降级
   为警告（由 `autofix` 修），PR 上仍是硬门禁；三步检查的输出另存为 `ci-logs` 产物。
+- 修复 netlink 真内核验证在 GitHub runner 上的假失败：ubuntu-24.04 镜像默认开启
+  `apparmor_restrict_unprivileged_userns`，非特权 `unshare -n` 被内核拒绝（EPERM）。
+  CI 步骤内先放开该限制使检查真正运行；`tests/netlink_netns.py` 同时修正跳过判定 ——
+  `unshare(1)` 自身失败时以非零退出码加 stderr 诊断结束、不抛 Python 异常，原来的
+  `except` 接不住，导致"应跳过"的路径以 rc=1 让 CI 失败。现按 stderr 中的 unshare
+  诊断识别为跳过，子进程检查真实失败仍照常报错。
 - `PKG_VERSION` 与 Cargo 版本同步升至 1.8.2。
 
 ### 已知遗留

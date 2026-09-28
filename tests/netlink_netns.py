@@ -239,8 +239,18 @@ if __name__ == "__main__":
         sys.exit(main())
     env = dict(os.environ, H5_NETNS_CHILD="1")
     try:
-        rc = subprocess.run(["unshare", "-n", sys.executable, __file__], env=env).returncode
+        proc = subprocess.run(["unshare", "-n", sys.executable, __file__], env=env,
+                              capture_output=True, text=True)
     except (FileNotFoundError, PermissionError, OSError) as exc:
         print("skipped: no usable network namespace (%s)" % exc)
         sys.exit(0)
-    sys.exit(rc)
+    # unshare(1) itself failing (no privileges, userns disabled) is not a check
+    # failure: the util-linux binary prints its own diagnostic and exits
+    # non-zero instead of raising, so catch that here. A non-zero exit without
+    # an unshare diagnostic means the child checks genuinely failed.
+    if proc.returncode != 0 and "unshare" in (proc.stderr or "").lower():
+        print("skipped: no usable network namespace (%s)" % proc.stderr.strip())
+        sys.exit(0)
+    sys.stdout.write(proc.stdout)
+    sys.stderr.write(proc.stderr)
+    sys.exit(proc.returncode)

@@ -65,7 +65,12 @@ jobs:
         # and a silent -EINVAL, and no unit test can see that. This replays the
         # same wire image inside a throwaway network namespace. It exits 0
         # (skipped) where namespaces are unavailable, so it never blocks CI.
-        run: python3 tests/netlink_netns.py
+        # Ubuntu 24.04 (noble) ships with apparmor_restrict_unprivileged_userns
+        # enabled, which makes unprivileged `unshare -n` fail with EPERM; lift
+        # it so the check actually runs instead of silently skipping.
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          python3 tests/netlink_netns.py
       - name: Cross-compile static aarch64 ELF (release)
         # The OpenWrt package ships the prebuilt binary in root/usr/sbin.
         # Linking happens with rust-lld (RUSTFLAGS), so no musl cross C
