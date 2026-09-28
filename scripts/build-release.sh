@@ -34,11 +34,25 @@ cd "${work_dir}"
 curl -fsSLO "${base_url}/sha256sums"
 archive="$(awk '/openwrt-sdk-.*Linux-x86_64\.tar\.zst$/ { print $2; exit }' sha256sums | sed 's/^\*//')"
 test -n "${archive}"
-curl -fL --retry 5 "${base_url}/${archive}" -o "${archive}"
-grep "[ *]${archive}$" sha256sums | sha256sum -c -
+# Reuse a previously downloaded SDK when it still matches the published
+# sha256: the archive is ~250 MB and a retried run (missing dependency,
+# transient feed failure) should not pay for it again. Extraction always
+# re-runs so the SDK tree stays clean.
+if [ -f "${archive}" ] && grep "[ *]${archive}\$" sha256sums | sha256sum -c - >/dev/null 2>&1; then
+	echo "reusing cached ${archive}"
+else
+	curl -fL --retry 5 "${base_url}/${archive}" -o "${archive}"
+	grep "[ *]${archive}\$" sha256sums | sha256sum -c -
+fi
 tar --zstd -xf "${archive}"
 sdk_dir="$(find "${work_dir}" -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n 1)"
 test -n "${sdk_dir}"
+
+# The video feed is hosted on github.com, which is unreachable from some
+# build hosts (mainland CN clouds); nothing in this package needs it, and
+# `feeds update -a` treats a failed clone as fatal under set -e. Drop the
+# entry after extraction instead of failing the whole release.
+sed -i '/src-git.*video/d' "${sdk_dir}/feeds.conf.default" 2>/dev/null || true
 
 cd "${sdk_dir}"
 ./scripts/feeds update -a
