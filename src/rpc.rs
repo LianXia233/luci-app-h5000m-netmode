@@ -366,8 +366,14 @@ pub fn run_watch(cfg: &AppConfig) {
     let _ = crate::reconcile::reconcile_body(cfg, &snap, false);
     loop {
         std::thread::sleep(std::time::Duration::from_secs(cfg.watch_interval as u64));
+        // Reload the config every tick: a manual `set` writes uci without
+        // restarting this watcher, and a frozen startup snapshot makes the
+        // reconcile loop silently drag the FIB back to the OLD mode seconds
+        // after a successful manual switch (manual settings outrank
+        // everything). Interval changes take effect on the next tick.
+        let cfg = AppConfig::load();
         let snap = network::read_live_state();
-        let _ = crate::reconcile::reconcile_body(cfg, &snap, false);
+        let _ = crate::reconcile::reconcile_body(&cfg, &snap, false);
     }
 }
 

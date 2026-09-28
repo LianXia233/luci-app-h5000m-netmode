@@ -2,6 +2,29 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.8.5-r6] — 2026-09-29
+
+r5 部署实测中暴露：手动切换本体已成功，但数秒后被看门狗拉回旧出口。
+
+### 修复
+
+- **看门狗循环使用启动时冻结的配置（`src/rpc.rs`）**：`run_watch` 的
+  `AppConfig` 是进程启动时加载的一份快照，循环内从不重读。用户手动
+  `set modem_first` 只写 uci，不重启 watcher —— reconcile 每轮仍按旧
+  `mode=wan_first` 判定 primary=wan，在手动切换成功 2 秒后执行
+  `align -> wan (failback)` 把 FIB 拖回旧出口（r5 部署实测：
+  `switch committed: wan -> modem in 22.43s` 后随即被拉回）。这同时违背
+  「手动设置高于一切」原则。现每轮 tick 调用 `AppConfig::load()` 重读配置
+  （uci 读取为毫秒级开销，10s 周期完全可承受），手动变更在下一轮 reconcile
+  即被尊重；`watch_interval` 自身的变更延迟一轮生效。
+
+### 验证（r5 修复本体）
+
+r5 的 standby 实时化修复已实机验证成功：watcher 自动 failback
+（`last_align_reason=failback`）、手动 `set modem_first --wait` 切换本体
+22.43s 提交成功且 VERIFY_TARGET 通过——r4 时期该路径必然
+`ipv4_standby_not_demoted` 误判回滚，r6 解决的是其后的看门狗回拖。
+
 ## [v1.8.5-r5] — 2026-09-29
 
 本次修复「WAN 口实际正常、手动切回却必然失败回滚」的验证环节缺陷。实机日志铁证：
