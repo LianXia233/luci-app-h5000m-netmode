@@ -49,7 +49,9 @@ pub fn run_bounded(program: &str, args: &[&str], timeout: Duration) -> Result<St
                     use std::os::fd::AsRawFd;
                     set_nonblocking(so.as_raw_fd(), false);
                     let mut rest = Vec::new();
-                    let _ = so.read_to_end(&mut rest);
+                    // Whatever the read reports, `rest` holds what was still
+                    // in the pipe, and that is all this wrapper cares about.
+                    let _drained = so.read_to_end(&mut rest);
                     stdout.extend_from_slice(&rest);
                 }
                 if status.success() {

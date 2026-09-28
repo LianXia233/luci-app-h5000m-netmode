@@ -164,8 +164,9 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 `root/usr/sbin/h5000m-netmode*` 是提交进仓库的预编译产物（buildroot 没有 Rust
-工具链），因此改动 `src/` 后必须重新执行上面的脚本并提交产物；CI 会比对编译输出
-与该产物，不一致时给出警告并上传本次编译结果。
+工具链）。CI 会比对编译输出与该产物：不一致时给出警告，并在 main 分支上自动提交更新后的
+产物（`sync-shipped-binaries` 任务）。本地改动 `src/` 后也可直接执行上面的脚本并连同产物
+一起提交。
 
 > 提示：GitHub Releases 中的软件包由 GitHub Actions 使用官方 OpenWrt SNAPSHOT `mediatek/filogic` SDK 在线构建，附带中文语言包、SDK 构建公钥和 SHA256 校验文件。软件包应安装到 ABI 匹配的近期 SNAPSHOT 固件。
 
@@ -434,6 +435,8 @@ uci set h5000m_netmode.settings.watcher=0 && uci commit h5000m_netmode   # 停�
 
 | 版本 | 日期 | 主要更新 |
 | --- | --- | --- |
+| [v1.8.2](CHANGELOG.md) | 2026-09-28 | 修复 Rust 化后出口切换在实机上不可用：netlink 报文 `struct rtmsg` 少写 3 字节且 `rtm_type` 写成 `RTN_UNSPEC`（内核回 `-EINVAL`，且无 `ip` 兜底）；修 `route_proto` 查询语义与协议号偏移、孤儿路由回收、uci 写入超时、子进程输出截断、热插拔去抖标记残留、一键 align 冷却；新增 `build-rust.sh` 与真内核 netlink 回归测试，CI 自动同步预编译产物 |
+| [v1.8.1](CHANGELOG.md) | 2026-09-28 | CI 由 shell 检查改造为 Rust 编译工作流 |
 | [v1.7.1](CHANGELOG.md) | 2026-09-28 | 修复主备切换的锁竞争与完成判定（切换不再被静默丢弃、失败写 `lock_busy` 终态、前端不再用 `set` 返回值判完成、按钮锁定窗口由约 19s 降至 ~1s）；修复 CI 全红（po 目录重新生成、后端 `section_status_json` 的 bashism `${1//…}` 改回 POSIX `tr`，dash 兼容） |
 | [v1.7.0](CHANGELOG.md) | 2026-09-24 | 切换改为**移动默认路由优先级**（不再 ifdown/ifup，不再重建接口），IPv4/IPv6 以「出口组」为单位同步切换；强双栈门禁默认开启（单栈目标直接拒绝而不是关闭 IPv6）；切换变成后台任务 + 状态机（页面立即反馈、只读轮询进度、失败自动回滚、全部等待有上限）；修复切换预算因八进制解析而随机失效（约 10% 的切换误判目标不可达）、手动接口映射被覆盖失效、提交前失败也做路由搬家、单族无出口被误报分流等问题 |
 | [v1.6.5](CHANGELOG.md) | 2026-09-22 | 重构透明代理 TUN 归属：后端只管理物理 WAN / 5G 模组接口，HomeProxy、sing-box、daed 的虚拟 TUN 不作为第三出口，也不触发代理重载；兼容字段 `daed_exit_state` 固定输出 `none` |

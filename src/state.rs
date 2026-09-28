@@ -170,6 +170,7 @@ pub fn acquire_lock(wait_s: u32) -> bool {
     let mine = std::process::id().to_string();
     let mut waited: u32 = 0;
     let mut stale_rounds: u32 = 0;
+    let mut claims: u32 = 0;
     loop {
         match fs::create_dir(&dir) {
             Ok(()) => {
@@ -184,6 +185,12 @@ pub fn acquire_lock(wait_s: u32) -> bool {
                 if still_mine {
                     return true;
                 }
+                // Someone else won the same race; retry, but never spin
+                // forever on a directory we keep losing.
+                if claims >= 8 {
+                    return false;
+                }
+                claims += 1;
                 continue;
             }
             Err(_) => {

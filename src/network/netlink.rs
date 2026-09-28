@@ -320,7 +320,7 @@ fn dump_routes(family: Family) -> Result<Vec<Vec<u8>>> {
             tv_sec: DUMP_TIMEOUT_S,
             tv_usec: 0,
         };
-        unsafe {
+        let _ = unsafe {
             libc::setsockopt(
                 fd,
                 libc::SOL_SOCKET,

@@ -220,13 +220,10 @@ pub fn settings_section() -> (BTreeMap<String, String>, BTreeMap<String, Vec<Str
 /// forever. The previous implementation used `output()` with no bound at all,
 /// which contradicts what this function promises.
 pub fn uci_exec(args: &[&str]) -> Result<()> {
-    match crate::system::command::run_bounded("/sbin/uci", args, bounded_timeout()) {
-        Ok(_) => Ok(()),
-        Err(e) => Err(crate::types::Error::system(format!(
-            "uci {} failed: {e}",
-            args.join(" ")
-        ))),
-    }
+    let joined = args.join(" ");
+    crate::system::command::run_bounded("/sbin/uci", args, bounded_timeout())
+        .map(|_| ())
+        .map_err(|e| crate::types::Error::system(format!("uci {joined} failed: {e}")))
 }
 
 /// `uci -q set <key>=<value>` + `uci -q commit <config>` with bounded timeout.

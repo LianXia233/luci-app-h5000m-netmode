@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-h5000m-netmode
-PKG_VERSION:=1.8.1
+PKG_VERSION:=1.8.2
 PKG_RELEASE:=1
 PKG_LICENSE:=Apache-2.0
 PKG_LICENSE_FILES:=LICENSE
@@ -13,7 +13,8 @@ PKG_LICENSE_FILES:=LICENSE
 #   scripts/build-rust.sh
 #
 # scripts/build-release.sh does this automatically on every release build, and
-# CI reports drift between src/ and the committed binaries.
+# CI both reports drift between src/ and the committed binaries and, on main,
+# commits freshly built ones.
 LUCI_TITLE:=H5000M network priority switch
 LUCI_DEPENDS:=+luci-base
 LUCI_PKGARCH:=all

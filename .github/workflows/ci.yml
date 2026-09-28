@@ -123,3 +123,62 @@ jobs:
         run: node tests/svg_audit.js htdocs/luci-static/resources/view/h5000m/netmode.js src/status.rs
       - name: Test the exit card's branches
         run: node tests/test_exit_card.js htdocs/luci-static/resources/view/h5000m/netmode.js
+
+  # The package ships root/usr/sbin/h5000m-netmode* as a committed binary
+  # because the OpenWrt buildroot has no Rust toolchain. That makes the binary
+  # the one artefact a src/ change can silently miss - and the miss is
+  # invisible: the package installs, the service starts, only the behaviour is
+  # old. Warnings do not fix it on their own, so on main this job commits the
+  # freshly built binaries back. The follow-up push runs CI again, finds no
+  # drift, and stops.
+  sync-shipped-binaries:
+    needs: rust-backend
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/download-artifact@v4
+        with:
+          name: h5000m-netmode-aarch64-musl
+          path: dist-artifacts
+      - name: Commit the binaries if they differ from what src/ builds
+        run: |
+          changed=0
+          for b in h5000m-netmode h5000m-netmode-status; do
+            if [ ! -f "dist-artifacts/$b" ]; then
+              echo "::error::dist-artifacts/$b is missing; cannot sync"
+              exit 1
+            fi
+            if ! cmp -s "dist-artifacts/$b" "root/usr/sbin/$b"; then
+              install -m 0755 "dist-artifacts/$b" "root/usr/sbin/$b"
+              echo "root/usr/sbin/$b updated from src/"
+              changed=1
+            fi
+          done
+          if [ "$changed" -eq 0 ]; then
+            echo "shipped binaries already match src/"
+            exit 0
+          fi
+          if [ -z "$(git status --porcelain -- root/usr/sbin)" ]; then
+            echo "no git-level change under root/usr/sbin"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add root/usr/sbin
+          msg="$(printf '%s\n\n%s\n' \
+            "chore(binaries): 同步 root/usr/sbin 与 src/ 的编译产物" \
+            "由 CI 自动生成：src/ 已变化而包内预编译二进制未随之更新，详见 ci.yml 的 sync-shipped-binaries 任务。")"
+          git commit -m "$msg"
+          # A repo whose default GITHUB_TOKEN is read-only cannot push. That is
+          # worth saying out loud, but the checks that matter already ran, so
+          # it must not turn the whole workflow red.
+          git push origin main || {
+            echo "::warning::cannot push the rebuilt binaries; run scripts/build-rust.sh locally and commit root/usr/sbin"
+            exit 0
+          }

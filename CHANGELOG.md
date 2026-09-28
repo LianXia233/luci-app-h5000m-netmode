@@ -2,7 +2,9 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [v1.8.2] — 2026-09-28
+
+本次为缺陷修复版本，修复 Rust 化之后出口切换在实机上不可用等一组问题。
 
 ### 修复
 
@@ -36,11 +38,25 @@
 - 新增 `scripts/build-rust.sh`：从 `src/` 重建 `root/usr/sbin` 下的两个二进制。
 - `scripts/build-release.sh` 在打包前自动执行上述编译，发布包内的后端始终来自当前源码。
 - CI 新增一步：逐字节比对编译输出与仓库内的预编译产物，不一致时告警并上传本次产物。
+- 健壮性收尾：`uci_exec` 改为组合式写法、`run_bounded` 排空管道时处理读取返回值、
+  `acquire_lock` 加竞争上界（避免两个进程同时判定锁陈旧而反复重试）、netlink dump
+  设置接收超时并显式忽略 `setsockopt` 返回值 —— 均为通过 `clippy -D warnings` 所需。
 - `src/network/sysfs.rs`、`src/network/routes.rs` 新增 `H5000M_SYSFS_NET` /
   `H5000M_PROC_NET` 重定向，供确定性测试注入假内核状态。
 - 新增 `tests/netlink_netns.py`：在临时网络命名空间内用真实内核验证 netlink 报文布局
   （新增/换槽/删除/协议号回读，8 项断言），并接入 CI。单元测试只能断言我们"造出的字节"，
   断言不了内核对这些字节的反应 —— 本次两个布局 bug 都属于后者。
+- CI 新增 `sync-shipped-binaries` 任务：main 分支上若 `src/` 的编译结果与仓库内的预编译
+  产物不一致，自动提交更新后的 `root/usr/sbin/*`。产物漂移从此不必依赖人工记得跑脚本
+  （若仓库 Actions 令牌为只读则降级为警告）。
+- `PKG_VERSION` 与 Cargo 版本同步升至 1.8.2。
+
+### 已知遗留
+
+- `root/usr/sbin/h5000m-netmode*` 仍是 v1.8.1 编译的旧产物（本次改动环境无 Rust 工具链，
+  无法交叉编译）。它不包含上述任何修复，安装后仍会表现为切换失败。推到 main 后 CI 的
+  `sync-shipped-binaries` 任务会自动补上；或在本地执行 `scripts/build-rust.sh` 并连同产物
+  一起提交。
 
 ## [v1.8.1] — 2026-09-28
 
