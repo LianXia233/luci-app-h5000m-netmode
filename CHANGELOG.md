@@ -2,6 +2,34 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.8.3] — 2026-09-28
+
+本次解决「切换失败：目标出口没有 IPv6 接口（双栈出口要求，拒绝切换）」：IPv6 从此不再阻塞主备切换。
+
+### 修复
+
+- **IPv6 缺失不再拒绝切换**：族参与判定改为纯结构能力（目标出口有该族的接口成员才参与），
+  `strict_dual_stack` 不再把结构性缺失的 IPv6 强行纳入要求集。没有 IPv6 成员的出口按
+  单栈直接切换，预检不再产出 `ipv6_not_configured` 拒绝。
+- **看门狗可以救援/回切到无 IPv6 的出口**：`group_complete` / `group_complete_online` /
+  `group_degraded` 随判定同步改为按能力评估，此前 `strict_dual_stack=1` 会让健康检查、
+  故障转移与救援全部无视一个「只有 IPv4 可用」的完好出口。
+- **单栈提交后防分流**：`apply_group_holes` / `verify_excluded_families` 改为按能力执行
+  （不再被 `strict_dual_stack=1` 跳过）——活动出口缺失的族，其备用出口默认路由会被停靠
+  （`defaultroute=0` + 删路由），IPv4/IPv6 不会各自走不同上行。
+- **`strict_dual_stack` 语义收敛为「IPv6 探测门禁」（默认 0）**：
+  - `0`（新默认）：IPv6 等待超时、探测失败、提交失败、settle 后复核失败都只告警不回滚，
+    IPv4 单栈照常切换/对齐；
+  - `1`：恢复强双栈——目标出口有 IPv6 成员时必须等待、探测、提交全部通过，否则拒绝并回滚；
+    但结构性缺失（根本没有 IPv6 成员）在任何取值下都不再拒绝。
+- 前端 `ipv6_not_configured` 文案映射保留（兼容旧状态文件），后端不再产出该原因码。
+
+### 兼容性
+
+- 升级后默认行为变化：此前 `strict_dual_stack` 缺省为 1（无 IPv6 即拒绝切换），现缺省为 0。
+  需要「IPv6 必须随行，否则宁可拒绝切换」的部署请在 UCI 显式设 `strict_dual_stack='1'`。
+- 设备上已有配置若显式写有 `strict_dual_stack='1'`，升级后仍会生效（conffile 保留），需手工改 0。
+
 ## [v1.8.2] — 2026-09-28
 
 本次为缺陷修复版本，修复 Rust 化之后出口切换在实机上不可用等一组问题。
