@@ -197,17 +197,22 @@ pub fn verify_group_priority(
             }
         }
     }
-    // Standby must sit strictly below the active slot.
+    // Standby must sit strictly below the active slot. The standby metric is
+    // read from the LIVE FIB, never from the caller's snapshot: during a
+    // switch the snapshot predates commit_family, so it still reports the
+    // previous owner at the active metric it had *before* the surgery.
+    // Comparing that stale 10 against the live winner's fresh 10 produced a
+    // spurious `ipv4_standby_not_demoted` and rolled back every active ->
+    // opposite-group switch (r4 field bug, 2026-09-29). The group's device
+    // list still comes from the snapshot on purpose: device membership does
+    // not change mid-switch, only metrics do.
+    let other = g.other();
     for fam in Family::ALL {
-        for other in Group::ALL {
-            if other == g {
-                continue;
-            }
-            if let Some(oline) = snap.group_route(other, fam) {
-                if let Some(w) = routes::winning_default(fam) {
-                    if oline.metric <= w.metric {
-                        return Err(format!("ipv{}_standby_not_demoted", fam.n()));
-                    }
+        let standby_devs: Vec<String> = snap.group_devs(other, fam).to_vec();
+        if let Some(sm) = routes::slot_metric(fam, other, &standby_devs) {
+            if let Some(w) = routes::winning_default(fam) {
+                if sm <= w.metric {
+                    return Err(format!("ipv{}_standby_not_demoted", fam.n()));
                 }
             }
         }

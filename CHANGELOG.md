@@ -2,6 +2,38 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.8.5-r5] — 2026-09-29
+
+本次修复「WAN 口实际正常、手动切回却必然失败回滚」的验证环节缺陷。实机日志铁证：
+commit 阶段 promote/demote 全部成功（`ipv4 default -> wan (metric 10)`、
+`ipv4 standby -> modem (metric 50)` 均已落 FIB），紧接着被
+`ipv4_standby_not_demoted` 判死并回滚 —— 链路无罪，判定有罪。
+
+### 修复
+
+- **`verify_group_priority` 的 standby 检查混用陈旧快照与实时 FIB
+  （`src/switch/transaction.rs`）**：该检查把 `snap.group_route(other, fam)`
+  （切换开始时捕获的快照）与 `routes::winning_default(fam)`（commit 后的实时
+  FIB）直接比较。任何「从 active 切到对面」的完整切换，快照里 previous 组的
+  metric 恰好是 ACTIVE_METRIC(10)，与 commit 后 winner 的 10 相等 ——
+  `10 <= 10` 必然误判为「standby 未降级」并回滚。此前切到 modem_first 侥幸
+  成功，只因当时快照里 wan 已是热备 metric 50（天然满足 strictly below），
+  掩盖了问题的结构性。现 standby 的 metric 改由 `routes::slot_metric` 从实时
+  FIB 采集（与 P2/S1 同一修复哲学：状态机判定基于实时数据，快照只用于设备
+  归属这类不随切换瞬变的输入）；此修复同时覆盖 reconcile 的 align 路径。
+- **VERIFY_TARGET 第一次 verify 使用 commit 前快照（`src/switch/mod.rs`）**：
+  切换状态机在 commit 后直接以旧快照调用 `verify_commit`，
+  `verify_excluded_families` 等其余快照谓词同样会看到「手术前」的世界。现
+  verify 首次调用前 `read_live_state()` 刷新快照（S1 修复在 VERIFY 阶段的
+  同构补齐），settle 后的第二次 verify 本就用新快照、不受影响。
+
+### 边界说明
+
+- `network.fm350` 自带的 metric 30 原生静态默认路由不受插件管理，demote 只
+  replace 插件自建条目（10 → 50）。当前 ACTIVE=10 / STANDBY=50 下，热备语义
+  保持（30 仍严格高于 active 位）；仅当未来把 ACTIVE_METRIC 调到 30 以上时
+  需要重新评估该条目的处置。
+
 ## [v1.8.5-r4] — 2026-09-28
 
 本次修复健康探测与切换判定链的七个叠加缺陷。实机表现：`wan4_ready=0`、`addr4_wan=0`、

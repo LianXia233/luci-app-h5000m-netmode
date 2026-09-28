@@ -421,6 +421,12 @@ pub fn switch_run(
     // ---- VERIFY_TARGET ----
     if failure.is_none() {
         task_phase(SmState::VerifyTarget, "verifying the committed exit");
+        // The snapshot was captured before commit_family rewrote the FIB, so
+        // every snapshot-backed predicate below would still see the world as
+        // it was pre-surgery (the same frozen-state trap S1 fixed in the WAIT
+        // phase). Refresh once so the whole verify pass judges the committed
+        // state, not the pre-switch one.
+        *snap = network::read_live_state();
         // verify_commit: ipv6_* failures degrade to warnings under
         // strict_dual_stack=0 so a committed IPv4 exit is never rolled back.
         if let Err(r) = transaction::verify_commit(snap, target, cfg) {
