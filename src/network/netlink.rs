@@ -157,7 +157,7 @@ fn build_request(
     buf.extend_from_slice(&flags.to_ne_bytes());
     buf.extend_from_slice(&(0u32).to_ne_bytes()); // seq
     buf.extend_from_slice(&(0u32).to_ne_bytes()); // pid
-    // struct rtmsg - 12 bytes, see the module docs
+                                                  // struct rtmsg - 12 bytes, see the module docs
     buf.push(af as u8);
     buf.push(0); // rtm_dst_len: 0 = default route
     buf.push(0); // rtm_src_len
@@ -167,7 +167,7 @@ fn build_request(
     buf.push(0); // rtm_scope: the kernel fills it in
     buf.push(RTN_UNICAST); // rtm_type
     buf.extend_from_slice(&0u32.to_ne_bytes()); // rtm_flags
-    // attrs
+                                                // attrs
     if let Some(oif) = oif {
         push_attr(&mut buf, RTA_OIF, &oif.to_ne_bytes());
     }
@@ -353,9 +353,8 @@ fn dump_routes(family: Family) -> Result<Vec<Vec<u8>>> {
         let mut raw: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 65536];
         loop {
-            let n = unsafe {
-                libc::recv(fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len(), 0)
-            };
+            let n =
+                unsafe { libc::recv(fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len(), 0) };
             if n < 0 {
                 let e = std::io::Error::last_os_error();
                 // EAGAIN == EWOULDBLOCK on Linux; matching both would be an
