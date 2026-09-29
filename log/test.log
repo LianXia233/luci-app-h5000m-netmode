@@ -1,0 +1,60 @@
+[1m[92m   Compiling[0m libc v0.2.189
+[1m[92m   Compiling[0m h5000m-netmode v1.8.5 (/home/runner/work/luci-app-h5000m-netmode/luci-app-h5000m-netmode)
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 1.41s
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/h5000m_netmode-abe95ecaf97747ac)
+
+running 33 tests
+test config::tests::defaults_are_documented ... ok
+test config::tests::section_overrides ... ok
+test config::tests::watch_interval_clamped ... ok
+test config::uci::tests::split_key_segments ... ok
+test config::uci::tests::parse_uci_doc ... ok
+test config::uci::tests::section_types_skips_devices_and_anonymous ... ok
+test config::uci::tests::strip_comments ... ok
+test config::uci::tests::tokenize_quotes ... ok
+test health::score::tests::labels ... ok
+test health::tests::streak_semantics ... ok
+test network::netlink::tests::ipv6_request_carries_a_16_byte_gateway ... ok
+test health::score::tests::score_clamped ... ok
+test network::netlink::tests::parse_getroute_payload ... ok
+test network::netlink::tests::request_is_a_well_formed_rtmsg ... ok
+test network::netlink::tests::short_payload_is_not_a_panic ... ok
+test network::routes::tests::parse_ipv4_defaults ... ok
+test network::sysfs::tests::ifconf_parses_ipv4_entries ... ok
+test network::routes::tests::ipv6_default_parse ... ok
+test network::sysfs::tests::ifconf_tolerates_truncation_and_empty_names ... ok
+test network::sysfs::tests::v6_formatting ... ok
+test network::tests::json_bool_parses ... ok
+test network::tests::json_field_parses ... ok
+test probe::icmp::tests::v4_pkt_layout ... ok
+test probe::icmp::tests::v6_pkt_layout ... ok
+test network::tests::owner_classification ... ok
+test probe::icmp::tests::checksum_basic ... ok
+test switch::budget::tests::deadline_arithmetic ... ok
+test system::clock::tests::fmt_cs_rounds ... ok
+test system::clock::tests::parses_uptime_plain ... ok
+test system::log::tests::toggle_roundtrip ... ok
+test state::tests::lock_exclusion ... ok
+test state::tests::sanitize_tabs ... ok
+test state::tests::kv_write_merges ... ok
+
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m unittests src/main.rs (target/debug/deps/h5000m_netmode-40725dd0b4bb179b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m unittests src/bin/h5000m-netmode-status.rs (target/debug/deps/h5000m_netmode_status-4499556ea2f5f566)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m h5000m_netmode
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -1,0 +1,6 @@
+[1m[92m    Updating[0m crates.io index
+[1m[92m Downloading[0m crates ...
+[1m[92m  Downloaded[0m libc v0.2.189
+[1m[92m   Compiling[0m libc v0.2.189
+[1m[92m    Checking[0m h5000m-netmode v1.8.5 (/home/runner/work/luci-app-h5000m-netmode/luci-app-h5000m-netmode)
+[1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 9.39s
