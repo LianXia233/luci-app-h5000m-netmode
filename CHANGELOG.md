@@ -2,6 +2,18 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布] — 2026-09-29
+
+产物二进制与 r7 完全一致，`PKG_RELEASE` 暂未递增，下个版本发版时并入。
+
+### 修复
+
+- **`src/` 缺少 Makefile 导致下游 OpenWrt 打包失败（新增 `src/Makefile`）**：后端重写为 Rust crate 后，`src/` 下只有 `.rs` 源码、没有 Makefile。而 `feeds/luci/luci.mk` 两个分支的判定条件并不一致——`Build/Compile` 依据 `$(wildcard ${CURDIR}/src/Makefile)`（要求有 Makefile），`Package/.../install` 依据 `$(wildcard ${CURDIR}/src)`（只要目录存在）。于是踩中「有目录、无 Makefile」的组合：Compile 被跳过、`ipkg-install` 目录永不生成，install 阶段却仍执行 `Build/Install/Default`，即 `make -C $(PKG_BUILD_DIR)/src install`，make 报 `*** No rule to make target 'install'.  Stop.` 并以 **exit code 2** 退出，表现为 luci.mk 末尾 `BuildPackage` 展开的打包规则报错（`luci.mk:408`），进而 `package/Makefile:255` → `toplevel.mk:268` 层层上抛、中断整个 `world` 编译。2026-09-29 下游 `LianXia233/OpenWRT-CI`（5 个定时工作流 / 17 个 job）与 `LianXia233/H5000M-CI-Qmodem`（MTK-AUTO #100 + OWRT-ALL #76 共 6 个 job）在 x86_64 与 aarch64_cortex-a53 上同时失败即此因，且 9-27 那批构建尚且全绿——`src/` 由 `c68ac211`（2026-09-28，rewrite backend as single static Rust ELF）引入，9-29 是首个带 `src/` 的下游构建。现补上 `src/Makefile` 让两个分支判定对齐：`compile` / `clean` 为空操作（buildroot 内没有 Rust 工具链，两个静态 ELF 仍由 `scripts/build-rust.sh` 交叉编译后随仓库发布在 `root/usr/sbin/` 下），`install` 只把已发布的 `h5000m-netmode` 与 `h5000m-netmode-status` 拷贝进 `DESTDIR` 供 luci.mk 收集进 `ipkg-install`。已按 buildroot 调用方式实测：`DESTDIR="$(PKG_INSTALL_DIR)"` 由 `MAKE_INSTALL_FLAGS` 传入（`include/package-defaults.mk`），`make install DESTDIR=...` 与 `make clean compile` 均正常退出，产物与原先一致。
+
+### 变更文件
+
+- `src/Makefile` — 新增（不参与编译的判定补丁：空 `compile` / `clean`，`install` 拷贝已发布的 ELF 到 `DESTDIR`）
+
 ## [v1.8.5-r7] — 2026-09-29
 
 r6 实测双向切换时序取证暴露的 worker 侧同构缺陷。
