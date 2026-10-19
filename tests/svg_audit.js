@@ -230,6 +230,16 @@ const consumed = new Set([ ...src.matchAll(/\bdata\.([a-z][a-z0-9_]*)/g) ].map(m
 [ '6_up', '4_ready', '6_ready' ].forEach(function(suffix) {
 	[ 'wan', 'modem' ].forEach(function(kind) { consumed.add(kind + suffix); });
 });
+// connectionState() 的运行面证据（健康探测在线、地址快照）走 computed key，
+// deviceDropdown() 的映射来源同理 —— 逐一展开，别让单个展开规则发明出
+// 不存在的字段名。
+[ 'wan', 'modem' ].forEach(function(kind) {
+	consumed.add('group_online_' + kind);
+	consumed.add('group_ready_' + kind);
+	consumed.add('addr4_' + kind);
+	consumed.add('addr6_' + kind);
+	consumed.add(kind + '_device_source');
+});
 
 console.log('\nbackend emits ' + emitted.size + ' status keys, view reads ' + consumed.size + ' fields');
 const notEmitted = [ ...consumed ].filter(f => !emitted.has(f)).sort();
@@ -242,6 +252,8 @@ report(src.indexOf("[ 'align' ]") > -1, 'split repair calls the `align` command'
 report(/data\.split_detail/.test(src), 'the split alert surfaces split_detail');
 report(src.indexOf('reconcileExits') < 0,
 	'the retired synchronous `reconcile` UI action stays gone');
+report(src.indexOf("'eth-candidates'") > -1 && src.indexOf("'eth-fallback', 'set'") > -1,
+	'the wired-fallback picker reads candidates and writes eth-fallback set');
 
 const neverRead = [ ...emitted ].filter(f => !consumed.has(f)).sort();
 console.log('emitted but not read by the view (' + neverRead.length + '): ' + (neverRead.join(', ') || '(none)'));

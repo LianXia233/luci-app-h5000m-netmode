@@ -2,6 +2,30 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.9.2] — 2026-10-19
+
+修复实机"接口在通、页面报链路离线"的误报，接入 v1.9.x 后端的运行面证据字段，并新增有线兜底（`eth-candidates` / `eth-fallback`）管理面板。
+
+### 修复
+
+- **链路状态误报"链路离线"**（实机：`wan_carrier=1`、`addr4_wan=1`、默认路由经 eth1、健康探测在线，但 netifd `wan_up=0`/`wan_available=0`）：`connectionState()` 原来只按 netifd 的 up/available 标志判活，接口 up 标志与真实数据面脱节时就误报。现引入后端 v1.9.x 的运行面证据——`group_online_*`（真实发包探测）与 `*_4_ready/addr4_*`、`*_6_ready/addr6_*`（内核地址与默认路由快照）——任一成立即判"已接通运行"，netifd 标志仅作为兜底路径保留。
+
+### 新增
+
+- **有线兜底面板**：读取 `eth-candidates` 候选 section 池渲染复选框，当前列表与 status 的 `eth_fallback` 字段同源回显；保存走 `eth-fallback set`（空列表落库为空 option，等价于全部交由后端自动判定）。面板附语义说明：标记的 section 不参与模组网关接口自动发现。
+- **接口映射来源徽标**：接口绑定下拉框旁显示 `自动`/`手动`（来自 `wan_device_source`/`modem_device_source`），说明当前值是后端自动判定还是用户指定。
+- **meta 栏如实化**：静态文案"双栈对称原则：强制 IPv6 伴随 IPv4"与后端实际行为不符（strict_dual_stack=0 时允许单栈切换），改为按 `strict_dual_stack` 显示"严格双栈/宽松单栈"；健康探测一并显示后端通过阈值（如 `2/3`）。
+
+### 测试
+
+- `tests/svg_audit.js` 字段契约扩展：`group_online_*`、`addr4_/addr6_*`、`*_device_source` 走 computed key 展开；新增守卫"兜底面板必须读 `eth-candidates`、写 `eth-fallback set`"。
+- `tests/test_exit_card.js` 149 项断言零改动通过（新增证据字段在测试基线中缺省，不改变既有分支）。
+- `tools/sync_po.py` 重新生成目录（172 条），`check_catalog` 与 `msgfmt --check` 通过。
+
+### 变更文件
+
+- `htdocs/luci-static/resources/view/h5000m/netmode.js`、`tests/svg_audit.js`、`po/zh_Hans/h5000m-netmode.po`、`Makefile`（PKG_RELEASE）
+
 ## [v1.9.1] — 2026-10-19
 
 LuCI 前端适配 v1.9.x Rust 后端并整体简化：删除 8 宫格状态仪表矩阵（约 200 行装饰层），分流修复改走新后端的 `align` 命令。

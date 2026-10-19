@@ -192,6 +192,18 @@ msgstr "后端未响应，物理接口列表不可用"
 msgid "后端未报告任何可用物理接口"
 msgstr "后端未报告任何可用物理接口"
 
+msgid "该映射由用户手动指定"
+msgstr "该映射由用户手动指定"
+
+msgid "该映射由后端按接口角色自动判定"
+msgstr "该映射由后端按接口角色自动判定"
+
+msgid "手动"
+msgstr "手动"
+
+msgid "自动"
+msgstr "自动"
+
 msgid "5G 移动蜂窝模组"
 msgstr "5G 移动蜂窝模组"
 
@@ -276,6 +288,12 @@ msgstr "当前路由来源：%s"
 msgid "当前实际物理承载：%s%s"
 msgstr "当前实际物理承载：%s%s"
 
+msgid "已就绪"
+msgstr "已就绪"
+
+msgid "未开启"
+msgstr "未开启"
+
 msgid "守护看门狗："
 msgstr "守护看门狗："
 
@@ -285,20 +303,17 @@ msgstr "运行中"
 msgid "已挂起"
 msgstr "已挂起"
 
-msgid "实时健康探测："
-msgstr "实时健康探测："
+msgid "健康探测："
+msgstr "健康探测："
 
-msgid "已就绪"
-msgstr "已就绪"
+msgid "双栈策略："
+msgstr "双栈策略："
 
-msgid "未开启"
-msgstr "未开启"
+msgid "严格双栈（必须同路）"
+msgstr "严格双栈（必须同路）"
 
-msgid "双栈对称原则："
-msgstr "双栈对称原则："
-
-msgid "强制 IPv6 伴随 IPv4"
-msgstr "强制 IPv6 伴随 IPv4"
+msgid "宽松单栈（允许暂缺 IPv6）"
+msgstr "宽松单栈（允许暂缺 IPv6）"
 
 msgid "已有切换任务在执行，本次请求已排队，稍后自动执行。"
 msgstr "已有切换任务在执行，本次请求已排队，稍后自动执行。"
@@ -452,6 +467,36 @@ msgstr "对齐失败（返回码 %d）"
 
 msgid "已发起出口对齐，IPv6 正在对齐 IPv4 出口。"
 msgstr "已发起出口对齐，IPv6 正在对齐 IPv4 出口。"
+
+msgid "有线兜底列表保存失败（返回码 %d）。"
+msgstr "有线兜底列表保存失败（返回码 %d）。"
+
+msgid "有线兜底出口列表已更新。"
+msgstr "有线兜底出口列表已更新。"
+
+msgid "后端未响应，兜底候选列表不可用"
+msgstr "后端未响应，兜底候选列表不可用"
+
+msgid "后端未报告任何可作为有线兜底的 section"
+msgstr "后端未报告任何可作为有线兜底的 section"
+
+msgid "勾选的接口 section 将标记为“有线兜底”，不再参与 5G 模组网关接口的自动发现；未被标记的候选中，排序最前的会被识别为模组接口。留空表示全部交给后端自动判定。"
+msgstr "勾选的接口 section 将标记为“有线兜底”，不再参与 5G 模组网关接口的自动发现；未被标记的候选中，排序最前的会被识别为模组接口。留空表示全部交给后端自动判定。"
+
+msgid "有线兜底出口"
+msgstr "有线兜底出口"
+
+msgid "当前：%s"
+msgstr "当前：%s"
+
+msgid "当前：未设置"
+msgstr "当前：未设置"
+
+msgid "保存兜底列表"
+msgstr "保存兜底列表"
+
+msgid "已保存"
+msgstr "已保存"
 
 msgid "⚡ 一键对齐双栈出口"
 msgstr "⚡ 一键对齐双栈出口"
