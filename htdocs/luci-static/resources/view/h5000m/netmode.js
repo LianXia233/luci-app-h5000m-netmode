@@ -4,7 +4,17 @@
 'require ui';
 'require poll';
 
-// Exit policy UI for the H5000M netmode backend.
+// LuCI front end for the H5000M netmode backend (Rust v1.9.x contract).
+//
+// Simplified revision:
+// - the 8-tile status matrix (and its decorative CSS/animation layer) is gone;
+//   the hero card and the two uplink cards carry the same information.
+// - split repair now issues the new `align` command (one-click align, default
+//   fire-and-forget with a detached align-worker); the old synchronous
+//   `reconcile` is an internal serialised pass in the new backend and is no
+//   longer a UI action.
+// - the split alert surfaces the backend's split_detail breakdown.
+//
 // Invariants strictly enforced:
 // 1. IPv4 and IPv6 leave through the same uplink (family split alert).
 // 2. Backup uplink failover preserved by default; explicit confirm for only-mode.
@@ -75,13 +85,12 @@ return view.extend({
 
 	styleNode: function() {
 		return E('style', {}, [
-			/* ================= 主题与色彩体系（支持高光玻璃态与暗黑主题） ================= */
+			/* ================= 主题变量（支持暗黑主题） ================= */
 			'.h5net{',
 				'--h5-blue:#3b82f6;--h5-blue-soft:rgba(59,130,246,0.12);--h5-blue-glow:rgba(59,130,246,0.3);',
 				'--h5-green:#10b981;--h5-green-soft:rgba(16,185,129,0.12);--h5-green-glow:rgba(16,185,129,0.35);',
-				'--h5-amber:#f59e0b;--h5-amber-soft:rgba(245,158,11,0.12);--h5-amber-glow:rgba(245,158,11,0.35);',
+				'--h5-amber:#f59e0b;--h5-amber-soft:rgba(245,158,11,0.12);',
 				'--h5-red:#ef4444;--h5-red-soft:rgba(239,68,68,0.12);--h5-red-glow:rgba(239,68,68,0.35);',
-				'--h5-purple:#8b5cf6;--h5-purple-soft:rgba(139,92,246,0.12);',
 				'--h5-cyan:#06b6d4;--h5-cyan-soft:rgba(6,182,212,0.12);',
 				'--h5-card-bg:rgba(255,255,255,0.92);',
 				'--h5-card-border:rgba(226,232,240,0.85);',
@@ -101,9 +110,7 @@ return view.extend({
 				'--h5-text-main:#f8fafc;--h5-text-sub:#cbd5e1;--h5-text-muted:#64748b;',
 			'}',
 
-			/* ================= 首屏骨架：数据到达前的占位 ================= */
-			/* 首屏不再阻塞等待后端，因此 Hero 区在拿到真实数据前先渲染骨架占位：
-			   结构与正式卡片一致（同网格、同槽位），数据回来后原地替换，无跳动。 */
+			/* ================= 首屏骨架占位（数据到达前） ================= */
 			'.h5net .h5net-sk{',
 				'display:inline-block;min-width:56px;height:10px;border-radius:6px;',
 				'background:linear-gradient(90deg,rgba(148,163,184,0.16),rgba(148,163,184,0.30),rgba(148,163,184,0.16));',
@@ -160,33 +167,6 @@ return view.extend({
 			'.h5net-note.alert{background:var(--h5-red-soft);color:var(--h5-red);border-color:rgba(239,68,68,0.25);font-weight:600}',
 			'.h5net-note.warn{background:var(--h5-amber-soft);color:var(--h5-amber);border-color:rgba(245,158,11,0.25)}',
 			'.h5net-note.multi{flex-direction:column;align-items:flex-start;gap:3px}',
-
-			/* ================= 8大核心指标卡片矩阵 ================= */
-			'.h5net-stat{margin:0 0 18px}',
-			'.h5net-stat-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}',
-			'.h5net-stat-item{',
-				'background:var(--h5-card-bg);border:1px solid var(--h5-card-border);border-radius:16px;',
-				'padding:14px;box-shadow:var(--h5-card-shadow);transition:all .22s cubic-bezier(0.4,0,0.2,1);',
-				'position:relative;overflow:hidden;backdrop-filter:blur(10px);',
-			'}',
-			'.h5net-stat-item:hover{transform:translateY(-2px);border-color:var(--h5-blue)}',
-			'.h5net-stat-icon{',
-				'height:62px;display:grid;place-items:center;border-radius:12px;margin-bottom:10px;',
-				'background:rgba(241,245,249,0.7);transition:all .3s;',
-			'}',
-			'@media(prefers-color-scheme:dark){.h5net-stat-icon{background:rgba(15,23,42,0.4)}}',
-			'.h5net-stat-icon svg{width:46px;height:46px;overflow:visible}',
-			'.h5net-stat-icon.tone-green{color:var(--h5-green);background:var(--h5-green-soft)}',
-			'.h5net-stat-icon.tone-blue{color:var(--h5-blue);background:var(--h5-blue-soft)}',
-			'.h5net-stat-icon.tone-mint{color:#059669;background:rgba(5,150,105,0.12)}',
-			'.h5net-stat-icon.tone-orange{color:var(--h5-amber);background:var(--h5-amber-soft)}',
-			'.h5net-stat-icon.tone-purple{color:var(--h5-purple);background:var(--h5-purple-soft)}',
-			'.h5net-stat-icon.tone-cyan{color:var(--h5-cyan);background:var(--h5-cyan-soft)}',
-			'.h5net-stat-icon.tone-red{color:var(--h5-red);background:var(--h5-red-soft)}',
-			'.h5net-stat-icon.tone-gray{color:#64748b;background:rgba(100,116,139,0.12)}',
-			'.h5net-stat-item b{display:block;font-size:13.5px;font-weight:700;color:var(--h5-text-main);margin-bottom:4px}',
-			'.h5net-stat-value{display:block;font-size:12px;font-weight:600;color:var(--h5-text-sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
-			'.h5net-stat-hint{display:block;margin-top:3px;color:var(--h5-text-muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
 
 			/* ================= 链路选择双卡片 ================= */
 			'.h5net-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}',
@@ -249,7 +229,6 @@ return view.extend({
 			'}',
 			'.h5net-link:hover{background:var(--h5-blue);color:#fff}',
 			'.h5net-link[disabled]{background:transparent;color:var(--h5-text-muted);cursor:default}',
-			/* 主备选择按钮：卡片上的主要动作，做成实心按钮，一眼可见 */
 			'.h5net-pick{',
 				'flex:1 1 auto;min-width:124px;padding:8px 12px;border-radius:8px;cursor:pointer;',
 				'font:inherit;font-size:12.5px;font-weight:600;text-align:center;',
@@ -274,27 +253,19 @@ return view.extend({
 			'.h5net-buttons{display:flex;gap:10px;flex-shrink:0}',
 			'.h5net-buttons .cbi-button{min-width:110px;padding:8px 16px;border-radius:8px;font-weight:600}',
 
-			/* ================= 极具科技感的动态 SVG 关键帧动效 ================= */
+			/* ================= 动效：只保留 hero 图标需要的少量关键帧 ================= */
 			'@keyframes h5-beacon{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.4;transform:scale(1.2)}}',
 			'@keyframes h5-dash{to{stroke-dashoffset:-24}}',
-			'@keyframes h5-dash-rev{to{stroke-dashoffset:24}}',
 			'@keyframes h5-pulse{0%,100%{opacity:0.35}50%{opacity:1}}',
-			'@keyframes h5-ring{to{transform:rotate(360deg)}}',
-			'@keyframes h5-ring-rev{to{transform:rotate(-360deg)}}',
-			'@keyframes h5-expand{0%{r:4;opacity:0.8}100%{r:18;opacity:0}}',
 			'@keyframes h5-wave{0%,100%{opacity:0.25;transform:scale(0.92)}50%{opacity:1;transform:scale(1.05)}}',
-			'@keyframes h5-bounce-eq{0%,100%{height:4px}50%{height:14px}}',
-			'@keyframes h5-flow-dot{0%{transform:translateX(0);opacity:0}20%{opacity:1}80%{opacity:1}100%{transform:translateX(24px);opacity:0}}',
+			'@keyframes h5-ring{to{transform:rotate(360deg)}}',
 
 			'.h5net .svg-dash{animation:h5-dash 1.2s linear infinite}',
 			'.h5net .svg-dash-fast{animation:h5-dash 0.8s linear infinite}',
 			'.h5net .svg-pulse{animation:h5-pulse 1.6s ease-in-out infinite}',
-			'.h5net .svg-spin{transform-origin:center;animation:h5-ring 4s linear infinite}',
-			'.h5net .svg-spin-rev{transform-origin:center;animation:h5-ring-rev 3s linear infinite}',
 			'.h5net .svg-wave{transform-origin:center;animation:h5-wave 1.6s ease-in-out infinite}',
 			'.h5net .svg-wave2{animation-delay:.35s}',
 			'.h5net .svg-wave3{animation-delay:.7s}',
-			'.h5net .svg-flow-dot{animation:h5-flow-dot 1.5s ease-in-out infinite}',
 
 			/* 状态停止动效：故障或离线时让动效平稳归于静止 */
 			'.h5net .is-idle svg *,.h5net .tone-down svg *,.h5net .tone-off svg *{animation:none!important}',
@@ -325,7 +296,6 @@ return view.extend({
 
 			/* ================= 响应式排版 ================= */
 			'@media(max-width:960px){',
-				'.h5net-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}',
 				'.h5net .h5net-hero{grid-template-columns:1fr;gap:16px}',
 				'.h5net .hero-div{width:100%;height:1px;margin:8px 0;background:linear-gradient(90deg,transparent,var(--h5-card-border),transparent)}',
 			'}',
@@ -338,7 +308,6 @@ return view.extend({
 			'}'
 		].join(''));
 	},
-
 	// 卡片主图标：高精细动态 SVG
 	iconSvg: function(kind) {
 		if (kind === 'modem') {
@@ -625,154 +594,6 @@ return view.extend({
 		return 'tone-down';
 	},
 
-	// 8个精美状态仪表微组件
-	statusTiles: function(data) {
-		var wan = this.connectionState(data, 'wan');
-		var modem = this.connectionState(data, 'modem');
-		var e4 = data.egress4 || 'none';
-		var e6 = data.egress6 || 'none';
-		var split = data.split === '1';
-		var watcherOn = data.watcher === 'on';
-		var healthOn = data.health_check === '1';
-		var active4 = data.active4 || 'none';
-		var active6 = data.active6 || 'none';
-		var daed = data.daed_exit_state || 'none';
-		var wifiTotal = Number(data.wifi_total || 0) || 0;
-		var wifiUp = Number(data.wifi_up || 0) || 0;
-		var wifiClients = Number(data.wifi_clients || 0) || 0;
-
-		function ready(v) { return v === '1' ? _('就绪') : _('不可用'); }
-		function probe(v) {
-			if (v === '1') return _('正常');
-			if (v === '0') return _('异常');
-			return _('未探测');
-		}
-		function liveness(state) {
-			if (state.cls === 'up') return 'ok';
-			if (state.cls === 'pending') return 'warn';
-			if (state.cls === 'idle') return 'off';
-			return 'bad';
-		}
-
-		var items = [
-			{
-				tone: 'green',
-				name: _('有线 WAN 链路'),
-				value: (data.wan_device || _('未指定')) + ' · ' + wan.label,
-				hint: 'v4: ' + ready(data.wan4_ready) + ' | v6: ' + ready(data.wan6_ready),
-				live: wan.cls === 'up',
-				svg: '<svg viewBox="0 0 64 64">'
-					+ '<rect x="14" y="12" width="36" height="26" rx="6" fill="none" stroke="currentColor" stroke-width="2.6"/>'
-					+ '<path d="M22 46h20M26 38v8m12-8v8" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/>'
-					+ '<path class="svg-dash" d="M20 22h24M20 28h15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="5 4"/>'
-					+ '<circle class="svg-pulse" cx="42" cy="28" r="2.5" fill="currentColor"/>'
-					+ '</svg>'
-			},
-			{
-				tone: 'blue',
-				name: 'Wi‑Fi 无线覆盖',
-				value: wifiTotal ? _('%s/%s 频段在线').format(wifiUp, wifiTotal) : _('未检测到射频'),
-				hint: data.wifi_ssid ? data.wifi_ssid + ' · ' + _('%s 终端').format(wifiClients) : _('无线未开启'),
-				live: wifiUp > 0,
-				svg: '<svg viewBox="0 0 64 64">'
-					+ '<path class="svg-wave svg-wave3" d="M14 36a22 22 0 0 1 36 0" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" opacity=".25"/>'
-					+ '<path class="svg-wave svg-wave2" d="M20 40a14 14 0 0 1 24 0" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" opacity=".6"/>'
-					+ '<path class="svg-wave" d="M26 44a6 6 0 0 1 12 0" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/>'
-					+ '<circle cx="32" cy="48" r="3" fill="currentColor" class="svg-pulse"/>'
-					+ '</svg>'
-			},
-			{
-				tone: 'mint',
-				name: _('5G 移动模组'),
-				value: (data.modem_device || _('未指定')) + ' · ' + modem.label,
-				hint: 'v4: ' + ready(data.modem4_ready) + ' | v6: ' + ready(data.modem6_ready),
-				live: modem.cls === 'up',
-				svg: '<svg viewBox="0 0 64 64">'
-					+ '<rect x="14" y="14" width="36" height="36" rx="10" fill="none" stroke="currentColor" stroke-width="2.6"/>'
-					+ '<text x="32" y="38" text-anchor="middle" font-size="16" font-weight="900" fill="currentColor" letter-spacing="1">5G</text>'
-					+ '<circle class="svg-spin" cx="32" cy="32" r="23" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="6 8" opacity=".5"/>'
-					+ '</svg>'
-			},
-			{
-				tone: 'orange',
-				name: _('全双栈流量转发'),
-				value: split ? (e4 + ' ≠ ' + e6) : (e4 + ' ⇄ ' + e6),
-				hint: split ? _('⚠️ IPv4/v6 出口不一致') : _('双栈出口已严格对齐'),
-				live: !split && (e4 !== 'none' || e6 !== 'none'),
-				svg: '<svg viewBox="0 0 64 64">'
-					+ '<path d="M14 26h36M42 18l8 8-8 8" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>'
-					+ '<path d="M50 38H14M22 30l-8 8 8 8" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" opacity=".6"/>'
-					+ '<circle cx="32" cy="26" r="3.2" fill="currentColor" class="svg-flow-dot"/>'
-					+ '</svg>'
-			},
-			{
-				tone: 'purple',
-				name: _('自动链路看门狗'),
-				value: watcherOn ? _('守护中 · %ss 巡检').format(data.watch_interval || '10') : _('已挂起'),
-				hint: _('主选：') + this.modeLabel(data.mode),
-				live: watcherOn,
-				svg: '<svg viewBox="0 0 64 64">'
-					+ '<circle cx="32" cy="32" r="20" fill="none" stroke="currentColor" stroke-width="2.2" opacity=".25"/>'
-					+ '<circle class="svg-spin" cx="32" cy="32" r="16" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-dasharray="40 30"/>'
-					+ '<circle class="svg-spin-rev" cx="32" cy="32" r="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-dasharray="20 20"/>'
-					+ '<circle cx="32" cy="32" r="3" fill="currentColor" class="svg-pulse"/>'
-					+ '</svg>'
-			},
-			{
-				tone: 'cyan',
-				name: _('IPv6 承载状态'),
-				value: active6 === 'none' ? _('未激活') : (_('出接口: ') + e6),
-				hint: _('策略: 强绑定 IPv4 物理出口'),
-				live: active6 !== 'none',
-				svg: '<svg viewBox="0 0 64 64">'
-					+ '<path d="M20 44h24a10 10 0 0 0 1-20 14 14 0 0 0-26-3 9 9 0 0 0 1 23Z" fill="none" stroke="currentColor" stroke-width="2.6"/>'
-					+ '<path class="svg-dash" d="M32 38V22" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="3 3"/>'
-					+ '<path d="M26 28l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>'
-					+ '</svg>'
-			},
-			{
-				tone: 'red',
-				name: _('链路主动健康探测'),
-				value: healthOn ? ('WAN ' + probe(data.wan_health) + ' · 模组 ' + probe(data.modem_health)) : _('未启用'),
-				hint: healthOn ? _('Anycast 端到端活体心跳') : _('开启后即时探测防假死'),
-				live: healthOn,
-				svg: '<svg viewBox="0 0 64 64">'
-					+ '<circle cx="32" cy="32" r="22" fill="none" stroke="currentColor" stroke-width="2" opacity=".2"/>'
-					+ '<circle class="svg-spin" cx="32" cy="32" r="14" fill="none" stroke="currentColor" stroke-width="2.6" stroke-dasharray="25 35"/>'
-					+ '<path d="M18 32h7l3-6 6 12 4-8 3 2h5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'
-					+ '</svg>'
-			},
-			{
-				tone: 'gray',
-				name: _('智能核心路由'),
-				value: active4 === 'none' ? _('无默认路由') : (active4 === 'other' ? _('外部接管') : _('自主纳管')),
-				hint: (daed !== 'none') ? (_('daed 出口: ') + daed) : _('FIB 动态路由度量选路'),
-				live: active4 !== 'none' && active4 !== 'other',
-				svg: '<svg viewBox="0 0 64 64">'
-					+ '<path class="svg-dash" d="M16 46C24 46 22 20 32 20s8 26 16 26" fill="none" stroke="currentColor" stroke-width="2.6" stroke-dasharray="5 4"/>'
-					+ '<circle cx="16" cy="46" r="4.5" fill="currentColor"/>'
-					+ '<circle cx="48" cy="46" r="4.5" fill="currentColor"/>'
-					+ '<circle cx="32" cy="20" r="5" fill="currentColor" class="svg-pulse"/>'
-					+ '</svg>'
-			}
-		];
-
-		return E('section', { 'class': 'h5net-stat' }, [
-			E('div', { 'class': 'h5net-stat-grid' }, items.map(function(item) {
-				var icon = E('div', {
-					'class': 'h5net-stat-icon tone-' + item.tone + (item.live ? '' : ' is-idle')
-				});
-				icon.innerHTML = item.svg;
-				return E('div', { 'class': 'h5net-stat-item' }, [
-					icon,
-					E('b', {}, item.name),
-					E('span', { 'class': 'h5net-stat-value' }, item.value),
-					E('span', { 'class': 'h5net-stat-hint' }, item.hint)
-				]);
-			}))
-		]);
-	},
-
 	modeLabel: function(mode) {
 		if (mode === 'modem_first') return _('5G 模组优先');
 		if (mode === 'wan_only') return _('仅用有线 WAN');
@@ -1031,7 +852,11 @@ return view.extend({
 		var active = active4 !== 'none' ? active4 : active6;
 
 		if (data.split === '1') {
-			return { text: this.splitSentence(data), cls: 'h5net-note alert' };
+			var text = this.splitSentence(data);
+			// 新后端给出的分流明细：每个协议族实际由哪个物理口承载。
+			if (data.split_detail)
+				text += ' [' + data.split_detail + ']';
+			return { text: text, cls: 'h5net-note alert' };
 		}
 		if (active === 'none') {
 			return { text: _('⚠️ 未发现任何可用的默认出口网关，请检查物理网线或 SIM 卡射频注网状态。'), cls: 'h5net-note alert' };
@@ -1553,29 +1378,31 @@ return view.extend({
 		}, this));
 	},
 
-	reconcileExits: function() {
+	// `align` 是新后端的一键对齐命令：默认立即返回（fork align-worker 后台推进），
+	// 真正的对齐结果通过只读 status 轮询观察。旧前端调用的同步 `reconcile` 在
+	// 新后端里是看门狗/hotplug 共用的内部串行化通道，不再作为 UI 动作。
+	// 等待条件仍是"分流已消失"而不是固定时长：条件成立就立刻收工。
+	alignExits: function() {
 		if (this.guardReady()) return;
 		if (this.applying || this.switchRunning()) return;
 
 		this.applying = true;
 		this.repaint();
 
-		// `reconcile` 与 `set` 不同：它在调用进程里同步执行（持有写锁直到对齐
-		// 完成），不 fork 游离工作进程，所以它的返回是可用的。返回之后再等一个
-		// 固定的 1.5 秒纯属浪费 —— 改成等"分流已消失"这个条件。
-		return this.execStatus([ 'reconcile' ]).then(L.bind(function(res) {
+		return this.execStatus([ 'align' ]).then(L.bind(function(res) {
 			if (res.code !== 0) {
 				ui.addNotification(null, E('p',
 					_('对齐失败（返回码 %d）').format(res.code)), 'danger');
 				return null;
 			}
-			ui.addNotification(null, E('p', _('已发送重对齐信令，IPv6 正在对齐 IPv4 出口。')));
+			ui.addNotification(null, E('p', _('已发起出口对齐，IPv6 正在对齐 IPv4 出口。')));
 			return this.waitForAlign(12);
 		}, this)).then(L.bind(function() {
 			this.applying = false;
 			return this.refreshStatus();
 		}, this));
 	},
+
 
 	statusPanel: function(data) {
 		data.mode = data.mode || 'wan_first';
@@ -1600,7 +1427,7 @@ return view.extend({
 			buttons.push(E('button', {
 				'class': 'cbi-button cbi-button-action',
 				'disabled': (loading || this.applying || busy) ? 'disabled' : null,
-				'click': L.bind(this.reconcileExits, this)
+				'click': L.bind(this.alignExits, this)
 			}, _('⚡ 一键对齐双栈出口')));
 		}
 		buttons.push(E('button', {
@@ -1620,7 +1447,6 @@ return view.extend({
 		].filter(function(node) { return node != null; });
 
 		return E('div', { 'class': 'h5net', id: 'h5net-status' }, sections.concat([
-			this.statusTiles(data),
 			E('div', { 'class': 'h5net-grid' }, [
 				this.routeCard('wan', data),
 				this.routeCard('modem', data)
@@ -1642,7 +1468,6 @@ return view.extend({
 			data.wan_up, data.wan6_up, data.wan4_ready, data.wan6_ready, data.wan_device,
 			data.modem_present, data.modem_available, data.modem_pending, data.modem_carrier,
 			data.modem_up, data.modem6_up, data.modem4_ready, data.modem6_ready, data.modem_device,
-			data.wifi_total, data.wifi_up, data.wifi_ssid, data.wifi_clients,
 			data.switch_state, data.switch_busy, data.switch_target, data.switch_target_mode,
 			data.switch_reason, data.switch_message, data.switch_elapsed, data.switch_phases,
 			this.switchDismissed,
@@ -1713,34 +1538,6 @@ return view.extend({
 		}, this)).catch(function() {});
 	},
 
-	// 数据到达前的占位面板。
-	//
-	// 结构与正式面板保持一致（同一个容器 id、同一套 hero 布局），这样
-	// refreshStatus() 拿到真实数据后可以直接整块替换，视觉上是“同一个页面填上了
-	// 数值”，而不是跳转到另一张页面。之所以不直接渲染正式面板：空快照下 active4
-	// 取默认值 'none'，卡片会先闪一下“无可用网络出口”的红色告警，属于误导。
-	// 首屏骨架：在数据到达前把 Hero、状态格、出口卡片的高度都先占住，这样数据
-	// 回来后只是"原地显示数值"，不会出现整页跳动。容器 id 与正式面板相同，
-	// repaint() 因此可以直接整块替换。
-	loadingTiles: function() {
-		var items = [];
-		for (var i = 0; i < 8; i++) {
-			var icon = E('div', { 'class': 'h5net-stat-icon tone-gray is-idle' });
-			icon.innerHTML = '<svg viewBox="0 0 64 64"></svg>';
-			items.push(E('div', { 'class': 'h5net-stat-item' }, [
-				icon,
-				E('b', {}, E('span', { 'class': 'h5net-sk' }, _('读取中…'))),
-				E('span', { 'class': 'h5net-stat-value' },
-					E('span', { 'class': 'h5net-sk' }, _('正在读取状态…'))),
-				E('span', { 'class': 'h5net-stat-hint' },
-					E('span', { 'class': 'h5net-sk' }, _('正在读取链路信息…')))
-			]));
-		}
-		return E('section', { 'class': 'h5net-stat' }, [
-			E('div', { 'class': 'h5net-stat-grid' }, items)
-		]);
-	},
-
 	loadingCard: function(name) {
 		return E('article', { 'class': 'h5net-card' }, [
 			E('div', { 'class': 'h5net-card-head' }, [
@@ -1763,7 +1560,6 @@ return view.extend({
 		return E('div', { 'class': 'h5net', id: 'h5net-status' }, [
 			this.styleNode(),
 			this.loadingHero(),
-			this.loadingTiles(),
 			E('div', { 'class': 'h5net-grid' }, [
 				this.loadingCard(_('有线以太网 WAN')),
 				this.loadingCard(_('5G 移动蜂窝模组'))

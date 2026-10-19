@@ -126,99 +126,6 @@ msgstr "双路由就绪"
 msgid "点击下方卡片可快速切换首选出口；“仅用此出口”将移出备选路由。"
 msgstr "点击下方卡片可快速切换首选出口；“仅用此出口”将移出备选路由。"
 
-msgid "就绪"
-msgstr "就绪"
-
-msgid "不可用"
-msgstr "不可用"
-
-msgid "正常"
-msgstr "正常"
-
-msgid "异常"
-msgstr "异常"
-
-msgid "未探测"
-msgstr "未探测"
-
-msgid "有线 WAN 链路"
-msgstr "有线 WAN 链路"
-
-msgid "%s/%s 频段在线"
-msgstr "%s/%s 频段在线"
-
-msgid "未检测到射频"
-msgstr "未检测到射频"
-
-msgid "%s 终端"
-msgstr "%s 终端"
-
-msgid "无线未开启"
-msgstr "无线未开启"
-
-msgid "5G 移动模组"
-msgstr "5G 移动模组"
-
-msgid "全双栈流量转发"
-msgstr "全双栈流量转发"
-
-msgid "⚠️ IPv4/v6 出口不一致"
-msgstr "⚠️ IPv4/v6 出口不一致"
-
-msgid "双栈出口已严格对齐"
-msgstr "双栈出口已严格对齐"
-
-msgid "自动链路看门狗"
-msgstr "自动链路看门狗"
-
-msgid "守护中 · %ss 巡检"
-msgstr "守护中 · %ss 巡检"
-
-msgid "已挂起"
-msgstr "已挂起"
-
-msgid "主选："
-msgstr "主选："
-
-msgid "IPv6 承载状态"
-msgstr "IPv6 承载状态"
-
-msgid "未激活"
-msgstr "未激活"
-
-msgid "出接口: "
-msgstr "出接口: "
-
-msgid "策略: 强绑定 IPv4 物理出口"
-msgstr "策略: 强绑定 IPv4 物理出口"
-
-msgid "链路主动健康探测"
-msgstr "链路主动健康探测"
-
-msgid "未启用"
-msgstr "未启用"
-
-msgid "Anycast 端到端活体心跳"
-msgstr "Anycast 端到端活体心跳"
-
-msgid "开启后即时探测防假死"
-msgstr "开启后即时探测防假死"
-
-msgid "智能核心路由"
-msgstr "智能核心路由"
-
-msgid "无默认路由"
-msgstr "无默认路由"
-
-msgid "自主纳管"
-msgstr "自主纳管"
-
-msgid "daed 出口: "
-msgstr "daed 出口: "
-
-msgid "FIB 动态路由度量选路"
-msgstr "FIB 动态路由度量选路"
-
 msgid "5G 模组优先"
 msgstr "5G 模组优先"
 
@@ -239,6 +146,9 @@ msgstr "5G 模组"
 
 msgid "无可用出口"
 msgstr "无可用出口"
+
+msgid "未启用"
+msgstr "未启用"
 
 msgid "独占出口 (无故障容灾)"
 msgstr "独占出口 (无故障容灾)"
@@ -371,6 +281,9 @@ msgstr "守护看门狗："
 
 msgid "运行中"
 msgstr "运行中"
+
+msgid "已挂起"
+msgstr "已挂起"
 
 msgid "实时健康探测："
 msgstr "实时健康探测："
@@ -537,8 +450,8 @@ msgstr "（响应丢失，且设备上没有对应的切换任务）"
 msgid "对齐失败（返回码 %d）"
 msgstr "对齐失败（返回码 %d）"
 
-msgid "已发送重对齐信令，IPv6 正在对齐 IPv4 出口。"
-msgstr "已发送重对齐信令，IPv6 正在对齐 IPv4 出口。"
+msgid "已发起出口对齐，IPv6 正在对齐 IPv4 出口。"
+msgstr "已发起出口对齐，IPv6 正在对齐 IPv4 出口。"
 
 msgid "⚡ 一键对齐双栈出口"
 msgstr "⚡ 一键对齐双栈出口"
@@ -557,12 +470,6 @@ msgstr "保存并应用策略"
 
 msgid "读取中…"
 msgstr "读取中…"
-
-msgid "正在读取状态…"
-msgstr "正在读取状态…"
-
-msgid "正在读取链路信息…"
-msgstr "正在读取链路信息…"
 
 msgid "正在读取链路状态…"
 msgstr "正在读取链路状态…"

@@ -1,15 +1,17 @@
-// Audit the animated SVGs and the front-end/back-end field contract.
+// Audit the view/status field contract and the remaining animated SVGs.
 //
-// The animations live in two places - the SVG class attributes inside JS string
-// literals and the CSS rules injected by styleNode() - and a mistake in either
-// one is invisible to a syntax check: a class with no rule renders a frozen icon,
-// a rule with no keyframes animates nothing, and a field the view reads but the
-// backend does not print silently becomes `undefined` in the UI.
+// The simplified view keeps six SVGs (the two uplink card icons, the three
+// exit-card variants and the egress glyph) and dropped the 8-tile status
+// matrix with its decorative animation layer.  What is still audited here:
 //
-// The SVGs themselves live inside JS string literals, so they cannot be parsed as
-// XML directly.  This script harvests every string literal, concatenates them and
-// matches the result, which reconstructs each SVG exactly as the browser receives
-// it from innerHTML.
+//   * the SVG string literals stay balanced and their animated classes stay
+//     bound to CSS rules (a missing rule renders a frozen icon);
+//   * every `animation:` target resolves to a declared @keyframes;
+//   * the lead card's class vocabulary and state tones keep their rules;
+//   * the responsive overrides carry the .h5net scope they override;
+//   * and, most importantly, every field the view reads is emitted by the
+//     backend status emitter - a field the backend stopped printing silently
+//     becomes `undefined` in the UI.
 //
 // usage: node tests/svg_audit.js <netmode.js> <h5000m-netmode>
 
@@ -39,6 +41,12 @@ try {
 	process.exit(1);
 }
 
+// The 8-tile status matrix must stay gone: its data is carried by the hero
+// card and the two uplink cards now.  (h5net-state / h5net-status are
+// different, still-live class names - the character class keeps them legal.)
+report(!/h5net-stat[-']/.test(src), 'the status tile matrix stays removed');
+report(src.indexOf('statusTiles') < 0, 'statusTiles() stays removed');
+
 // ---------------------------------------------------------------------------
 // SVG fragments
 // ---------------------------------------------------------------------------
@@ -48,28 +56,16 @@ const flat = literals.join('\n');
 const svgs = [ ...flat.matchAll(/<svg[^>]*>[\s\S]*?<\/svg>/g) ].map(m => m[0]);
 
 console.log('\nSVG fragments found: ' + svgs.length +
-	' (2 uplink card icons + 8 tiles + 3 exit-card variants + 1 egress glyph' +
-	' + 1 skeleton tile placeholder expected)');
-svgs.forEach((svg, i) => {
-	const viewBox = (svg.match(/viewBox="([^"]+)"/) || [])[1];
-	const classes = [ ...svg.matchAll(/class="([^"]+)"/g) ].map(m => m[1]).sort();
-	const balanced = (svg.match(/<svg/g) || []).length === (svg.match(/<\/svg>/g) || []).length;
-	console.log('  #' + (i + 1) + '  viewBox=' + viewBox + '  len=' + svg.length +
-		'  balanced=' + balanced + '  classes=[' + classes.join(', ') + ']');
-});
-report(svgs.length === 15, 'SVG count is 15', 'found ' + svgs.length);
+	' (2 uplink card icons + 3 exit-card variants + 1 egress glyph expected)');
+report(svgs.length === 6, 'SVG count is 6', 'found ' + svgs.length);
 report(svgs.every(s => (s.match(/<svg/g) || []).length === (s.match(/<\/svg>/g) || []).length),
 	'every SVG is balanced');
 
-// The skeleton panel draws 8 tiles before the status arrives. Their icon box has
-// to exist so the tile is the same height as the real one, but it must stay an
-// empty frame: a placeholder that carried any drawing would be read as a frozen
-// icon - an uplink that looks up before the data is in.
-const emptyFrames = svgs.filter(s => /^<svg[^>]*><\/svg>$/.test(s));
-report(emptyFrames.length === 1,
-	'the skeleton tile icon is one empty frame', 'found ' + emptyFrames.length);
-report(emptyFrames.every(s => !/class="/.test(s)),
-	'the skeleton tile icon draws nothing and animates nothing');
+// The skeleton tile icon (an empty <svg></svg> frame) belonged to the removed
+// matrix; no empty frame may come back.
+report(svgs.every(s => !/^<svg[^>]*><\/svg>$/.test(s)),
+	'no empty placeholder SVG frame', 'found ' +
+	svgs.filter(s => /^<svg[^>]*><\/svg>$/.test(s)).length);
 
 // ---------------------------------------------------------------------------
 // CSS: keyframes, animation classes, tone and state classes
@@ -78,20 +74,12 @@ report(emptyFrames.every(s => !/class="/.test(s)),
 const keyframes = [ ...src.matchAll(/@keyframes\s+([A-Za-z0-9_-]+)/g) ].map(m => m[1]);
 console.log('\n@keyframes declared (' + keyframes.length + '): ' + keyframes.join(', '));
 
-// A rule's selector is not always ".h5net .name".  The exit card nests one level
-// deeper (.h5net .h5net-ecard .wan-flow), and some rules carry a compound or a
-// descendant part (.cell-wave.w2, ".tone-down svg *").  Take the last class name
-// in the selector, ignoring the .h5net scope token itself.
 const lastClassOf = function(selector) {
 	const names = [ ...selector.matchAll(/\.([A-Za-z0-9_-]+)/g) ].map(m => m[1])
 		.filter(n => n !== 'h5net');
 	return names.length ? names[names.length - 1] : null;
 };
 
-// An animation declaration is not always the first property in a rule: several of
-// them (.wave / .ring / .signal / .wan-ring / .cell-wave) open with transform-origin,
-// and the delay-only modifiers carry nothing but animation-delay.  Scan the whole
-// declaration block for "animation" instead of anchoring on it.
 const scopedRules = [ ...src.matchAll(/(\.h5net[^{}]*)\{([^{}]*)\}/g) ];
 const animClasses = [ ...new Set(scopedRules
 	.filter(m => m[2].indexOf('animation') > -1)
@@ -99,47 +87,36 @@ const animClasses = [ ...new Set(scopedRules
 	.filter(Boolean)) ].sort();
 console.log('scoped animation classes (' + animClasses.length + '): ' + animClasses.join(', '));
 
-const expectedKeyframes = [ 'h5-beacon', 'h5-dash', 'h5-dash-rev', 'h5-pulse',
-	'h5-ring', 'h5-ring-rev', 'h5-expand', 'h5-wave', 'h5-bounce-eq', 'h5-flow-dot' ];
-const missingKeyframes = expectedKeyframes.filter(k => keyframes.indexOf(k) < 0);
-report(!missingKeyframes.length, 'all sheet keyframes present',
-	missingKeyframes.length ? 'missing ' + missingKeyframes.join(', ') : '');
-
-// `animation:` may name a keyframe other than the class (dash -> flow, blink ->
-// pulse, orbit -> ring, route -> flow), so check every referenced name resolves.
+// `animation:` may name a keyframe other than the class (sk -> h5net-sk), so
+// check every referenced name resolves to a declared @keyframes.
 const referenced = [ ...new Set([ ...src.matchAll(/animation:\s*([A-Za-z0-9_-]+)\s/g) ].map(m => m[1])) ];
 const dangling = referenced.filter(k => keyframes.indexOf(k) < 0);
 report(!dangling.length, 'every animation: target is declared',
 	dangling.length ? 'dangling ' + dangling.join(', ') : '');
 
-const expectedClasses = [ 'svg-dash', 'svg-dash-fast', 'svg-flow-dot', 'svg-pulse',
-	'svg-spin', 'svg-spin-rev', 'svg-wave', 'svg-wave2', 'svg-wave3' ];
+// The core animated vocabulary the remaining icons rely on.
+const expectedClasses = [ 'svg-dash', 'svg-dash-fast', 'svg-pulse', 'svg-wave',
+	'svg-wave2', 'svg-wave3' ];
 const missingClasses = expectedClasses.filter(c => animClasses.indexOf(c) < 0);
-report(!missingClasses.length, 'every declared animation rule exists',
+report(!missingClasses.length, 'every core animation rule exists',
 	missingClasses.length ? 'missing ' + missingClasses.join(', ') : '');
 
-// Every animation class used in the markup must have a rule, otherwise the icon
-// silently renders frozen.  Purely presentational classes are excluded by design,
-// not by accident: `wan-port` only sets fill / stroke / linecap on the card's
-// paths and is expected to be static.
-const NON_ANIMATED = new Set([
-	// 新版没有任何纯展示类:SVG 里出现的每个 class 都绑定了一条动画规则,
-	// 状态差异改由 tone-* / is-* 作用在图标容器上表达(见 styleNode)。
-	// 集合保留为空,是为了让下面的检查在将来引入静态类时仍然有一处可登记。
-]);
+// Every animation class used in the markup must have a rule, otherwise the
+// icon silently renders frozen.
 const usedClasses = [ ...new Set(svgs.flatMap(s =>
 	[ ...s.matchAll(/class="([^"]+)"/g) ].flatMap(m => m[1].split(/\s+/)))) ].sort();
-const unbound = usedClasses.filter(c => animClasses.indexOf(c) < 0 && !NON_ANIMATED.has(c));
+const unbound = usedClasses.filter(c => animClasses.indexOf(c) < 0);
 report(!unbound.length, 'every animated class used in markup is bound',
 	unbound.length ? 'unbound ' + unbound.join(', ') : '');
 
-// Tone classes: 8 base colours from the sheet, and tone-live is deliberately
-// absent (a healthy uplink keeps the card's own colour).
-const tones = [ ...new Set([ ...src.matchAll(/tone:\s*'([a-z]+)'/g) ].map(m => m[1])) ].sort();
-const missingTones = tones.filter(t => src.indexOf('.h5net-stat-icon.tone-' + t + '{') < 0);
-report(tones.length === 8, 'status tiles declare 8 base tones', 'found ' + tones.length);
-report(!missingTones.length, 'every base tone has a colour rule',
-	missingTones.length ? 'missing ' + missingTones.join(', ') : '');
+// Retired animation vocabulary of the removed tile matrix must stay gone.
+const retiredAnim = [ 'svg-spin-rev', 'svg-flow-dot' ].filter(c =>
+	src.indexOf(c) > -1);
+report(!retiredAnim.length, 'the retired tile animation classes stay gone',
+	retiredAnim.join(', '));
+
+// tone-live is deliberately absent (a healthy uplink keeps the card's own
+// colour); the string still appears in iconTone().
 report(src.indexOf('.h5net-icon.tone-live') < 0 && src.indexOf('tone-live') > -1,
 	'tone-live intentionally has no rule (card colour is kept)');
 
@@ -151,8 +128,7 @@ report(src.indexOf('st-warn') < 0 && src.indexOf('st-bad') < 0 && src.indexOf('s
 	'either keep them absent or restore them with their own assertions');
 
 // The exit card's structure and its state tones.  A missing tone rule means a
-// degraded exit would keep the healthy green, which is the same class of defect
-// the tile tones exist to prevent.
+// degraded exit would keep the healthy green.
 for (const ec of [ 'h5net-hero', 'hero-svgbox', 'hero-info', 'hero-topline', 'hero-title',
 	'hero-badge', 'hero-pulse-dot', 'hero-meta', 'pill', 'iface', 'hero-hint' ]) {
 	report(src.indexOf('.' + ec) > -1, 'CSS defines .' + ec);
@@ -167,9 +143,6 @@ for (const tn of [ 'tone-pending', 'tone-down', 'tone-off' ]) {
 // ---------------------------------------------------------------------------
 // The lead card: two halves, one card, and the egress glyph
 // ---------------------------------------------------------------------------
-// The heading half of the card is not bare text next to a card any more, so the
-// vocabulary both halves are built from has to exist, and the sibling header
-// block it replaced has to be gone.
 for (const cls of [ 'hero-slot', 'hero-div', 'hero-hint' ]) {
 	report(src.indexOf('.' + cls) > -1, 'CSS defines .' + cls);
 }
@@ -182,11 +155,6 @@ report(src.indexOf('h5net-head') < 0, 'the two-sibling header block is gone',
 report(src.indexOf('.h5net .h5net-hero{grid-template-columns:1fr') > -1,
 	'the lead card stacks instead of squeezing on narrow screens');
 
-// The egress glyph.  Its selection class lives on the card rather than inside the
-// markup, which is what keeps every class attribute in the SVG string literal and
-// therefore readable here; these checks pin the other half of that contract - that
-// each branch is switched on by its own state class, and that the two are never
-// crossed, since a crossed binding would draw the traffic leaving the wrong way.
 const egressSvg = svgs.filter(s => s.indexOf('M22 28c12 0 10-14 24-14') > -1);
 report(egressSvg.length === 1, 'exactly one egress glyph', 'found ' + egressSvg.length);
 if (egressSvg.length === 1) {
@@ -197,9 +165,6 @@ if (egressSvg.length === 1) {
 		'egress glyph marks the local socket');
 	report(g.indexOf('viewBox="0 0 64 64"') > -1, 'egress glyph uses the shared 64x64 box');
 }
-// 新版不再按当前出口切换流动路径:两条方向路径始终同时流动,出口身份由右半张
-// 卡片的文字与 tone 表达。旧的 eg-via-wan / eg-via-modem / eg-via-both 三态绑定
-// 因此整体退役 —— 这里守卫它不要被半途重新引入(要么完整加回并配断言)。
 report(src.indexOf('eg-via-') < 0,
 	'the retired eg-via-* branch selection is gone',
 	'either keep it absent, or restore it together with its own assertions');
@@ -209,11 +174,6 @@ report(src.indexOf('.h5net .is-idle svg *') > -1,
 // ---------------------------------------------------------------------------
 // CSS scope: a media query adds no specificity
 // ---------------------------------------------------------------------------
-// The base sheet scopes nested rules as ".h5net .h5net-ecard{...}" (0,2,0).  A
-// responsive override written as ".h5net-ecard{...}" inside @media scores only
-// 0,1,0 and therefore loses outright, however late it appears - it parses
-// cleanly, reads correctly, and never applies.  Every selector that touches a
-// nested-scoped class must carry the same .h5net ancestor.
 const scopeToken = function(selector) {
 	return /(^|[\s,>+~])\.h5net(?![-A-Za-z0-9_])/.test(selector);
 };
@@ -275,6 +235,13 @@ console.log('\nbackend emits ' + emitted.size + ' status keys, view reads ' + co
 const notEmitted = [ ...consumed ].filter(f => !emitted.has(f)).sort();
 report(!notEmitted.length, 'every field the view reads is emitted by status',
 	notEmitted.length ? 'not emitted: ' + notEmitted.join(', ') : '');
+
+// New-backend adaptations the view must keep: the one-click align goes through
+// the dedicated `align` command, and the split alert carries split_detail.
+report(src.indexOf("[ 'align' ]") > -1, 'split repair calls the `align` command');
+report(/data\.split_detail/.test(src), 'the split alert surfaces split_detail');
+report(src.indexOf('reconcileExits') < 0,
+	'the retired synchronous `reconcile` UI action stays gone');
 
 const neverRead = [ ...emitted ].filter(f => !consumed.has(f)).sort();
 console.log('emitted but not read by the view (' + neverRead.length + '): ' + (neverRead.join(', ') || '(none)'));

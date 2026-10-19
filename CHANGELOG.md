@@ -2,6 +2,26 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.9.1] — 2026-10-19
+
+LuCI 前端适配 v1.9.x Rust 后端并整体简化：删除 8 宫格状态仪表矩阵（约 200 行装饰层），分流修复改走新后端的 `align` 命令。
+
+### 变更
+
+- **分流修复改用 `align` 命令**：旧前端调用的同步 `reconcile` 在新后端中是看门狗/hotplug 共用的内部串行化通道，不再是 UI 动作；「一键对齐」现调用专用 `align` 命令（默认立即返回、fork align-worker 后台推进），等待逻辑保持「等 split=0 条件收敛」不变。
+- **分流告警接入 `split_detail`**：分流时附此后端给出的明细（`ipv4=<dev> ipv6=<dev>`），用户可直接看到每个协议族实际由哪个物理口承载。
+- **删除 8 宫格状态矩阵**：`statusTiles()` / `loadingTiles()` 及其 CSS（`h5net-stat-*`）、专属动效（`svg-spin*`、`h5-expand`、`h5-bounce-eq`、`h5-flow-dot` 等）全部移除；同等信息由 hero 出口卡与双链路卡承载，首屏渲染与每轮 repaint 的 DOM 开销明显下降。
+
+### 测试
+
+- `tests/svg_audit.js` 重写为简化后视图的契约审计：SVG 数量 15 → 6、移除瓦片 tone/骨架空帧断言、新增「瓦片矩阵必须保持移除」「分流必须走 `align`」「告警必须带 `split_detail`」三条回归守卫；前后端字段契约审计保留（视图读取的 42 个字段全部由 `src/status.rs` 输出）。
+- `tests/test_exit_card.js` 149 项断言零改动通过（hero 卡结构未动）。
+- `tools/sync_po.py` 重新生成目录（157 条），`check_catalog` 与 `msgfmt --check` 通过。
+
+### 变更文件
+
+- `htdocs/luci-static/resources/view/h5000m/netmode.js`（1806 → 1601 行）、`tests/svg_audit.js`、`po/zh_Hans/h5000m-netmode.po`、`Makefile`（PKG_RELEASE）
+
 ## [v1.9.0-r1] — 2026-10-19
 
 网络切换逻辑优化与冗余代码清理：切换耗时、并发安全与测试体系的全面重构。除下方条目外，本版并入原「未发布」（现 [v1.8.5-r8]）的 `src/Makefile` 打包修复。
