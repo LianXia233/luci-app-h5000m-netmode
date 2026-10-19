@@ -1,0 +1,95 @@
+[1m[92m   Compiling[0m libc v0.2.189
+[1m[92m   Compiling[0m h5000m-netmode v1.9.0 (/home/runner/work/luci-app-h5000m-netmode/luci-app-h5000m-netmode)
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 1.90s
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/h5000m_netmode-e225babdd5b4e60e)
+
+running 34 tests
+test config::tests::defaults_are_documented ... ok
+test config::tests::section_overrides ... ok
+test config::tests::watch_interval_clamped ... ok
+test config::uci::tests::parse_uci_doc ... ok
+test config::uci::tests::section_types_skips_devices_and_anonymous ... ok
+test config::uci::tests::split_key_segments ... ok
+test config::uci::tests::strip_comments ... ok
+test config::uci::tests::tokenize_quotes ... ok
+test network::netlink::tests::ipv6_request_carries_a_16_byte_gateway ... ok
+test health::score::tests::labels ... ok
+test health::tests::streak_semantics ... ok
+test health::score::tests::score_clamped ... ok
+test network::netlink::tests::parse_getroute_payload ... ok
+test network::netlink::tests::request_is_a_well_formed_rtmsg ... ok
+test network::routes::tests::ipv6_default_parse ... ok
+test network::netlink::tests::short_payload_is_not_a_panic ... ok
+test network::sysfs::tests::v6_formatting ... ok
+test network::routes::tests::parse_ipv4_defaults ... ok
+test network::sysfs::tests::ifconf_parses_ipv4_entries ... ok
+test network::sysfs::tests::ifconf_tolerates_truncation_and_empty_names ... ok
+test probe::icmp::tests::checksum_basic ... ok
+test network::tests::json_bool_parses ... ok
+test network::tests::json_field_parses ... ok
+test network::tests::owner_classification ... ok
+test probe::icmp::tests::v4_pkt_layout ... ok
+test probe::icmp::tests::v6_pkt_layout ... ok
+test state::tests::lock_exclusion ... ok
+test switch::budget::tests::deadline_arithmetic ... ok
+test switch::tests::superseded_requires_newer_gen_and_mode ... ok
+test system::clock::tests::fmt_cs_rounds ... ok
+test system::clock::tests::parses_uptime_plain ... ok
+test system::log::tests::toggle_roundtrip ... ok
+test state::tests::sanitize_tabs ... ok
+test state::tests::kv_write_merges ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m unittests src/main.rs (target/debug/deps/h5000m_netmode-d77dcbb0dbc45a48)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m unittests src/bin/h5000m-netmode-status.rs (target/debug/deps/h5000m_netmode_status-8f6e122e5c31f31f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m unittests src/bin/h5000m-test-mocks.rs (target/debug/deps/h5000m_test_mocks-1c251ba44c43aa59)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/backend_logic.rs (target/debug/deps/backend_logic-57cbb348f9912408)
+
+running 12 tests
+test concurrent_notify_events_share_one_marker_run ... ok
+test flapping_ifdown_ifup_sequence_ends_on_the_real_state ... ok
+test failed_alignment_consumes_the_cooldown ... ok
+test hotplug_events_coalesce_into_one_marker_run ... ok
+test notify_records_events_even_when_coalesced ... ok
+test set_while_switch_running_is_queued_with_latest_mode ... ok
+test stable_state_reconcile_is_read_only ... ok
+test stale_lock_owner_is_reaped ... ok
+test superseded_transaction_aborts_before_any_route_write ... ok
+test tun_egress_is_attributed_to_the_physical_uplink ... ok
+test wait_phase_duration_is_charged_to_the_waiting_phase ... ok
+test watchdog_tick_defers_to_a_busy_lock ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.78s
+
+[1m[92m     Running[0m tests/backend_netns.rs (target/debug/deps/backend_netns-afda2568311a0cba)
+
+running 4 tests
+test concurrent_switch_and_hotplug_keep_one_writer ... ok
+test real_switch_commits_and_demotes_standby ... ok
+test stable_reconcile_touches_no_route ... ok
+test unreachable_target_rolls_back_without_blackholing ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m h5000m_netmode
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

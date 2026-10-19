@@ -1,4 +1,0 @@
-#!/bin/sh
-scen="${H5_SCEN:?H5_SCEN not set}"
-printf 'ifdown %s\n' "${1:-}" >> "$scen/iface-actions.log"
-exit 0
