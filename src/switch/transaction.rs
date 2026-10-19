@@ -69,16 +69,20 @@ pub fn route_del(family: Family, gw: &str, dev: &str, metric: u32) -> Result<()>
 
 /// `remember_group_route` / `recall_group_route`: the last known next hop of a
 /// group, so an isolated standby can be warmed again without waiting for its
-/// proto to re-announce. Stored in the state file (`rt_<group><4|6>`).
+/// proto to re-announce. Stored in the state file (`rt_<group><4|6>`); the
+/// write is skipped when the value is unchanged (the reconciler used to
+/// rewrite all four keys on every tick).
 pub fn remember_group_route(g: Group, fam: Family, r: &routes::Route) {
     let (gw, dev) = routes::route_gw_dev(r);
     if gw.is_empty() || dev.is_empty() {
         return;
     }
-    let _ = state::state_write(&[(
-        &format!("rt_{}{}", g.as_str(), fam.n()),
-        &format!("{gw} {dev}"),
-    )]);
+    let key = format!("rt_{}{}", g.as_str(), fam.n());
+    let val = format!("{gw} {dev}");
+    if state::state_get(&key) == val {
+        return;
+    }
+    let _ = state::state_write(&[(key.as_str(), val.as_str())]);
 }
 
 pub fn recall_group_route(g: Group, fam: Family) -> (String, String) {
@@ -533,33 +537,55 @@ pub fn reap_orphan_routes() {
     }
 }
 
-/// `set_network_option_if_changed`: write one network option only when it
-/// differs; returns false on a failed write.
-pub fn set_network_option_if_changed(
-    section: &str,
-    option: &str,
-    value: &str,
-    changed: &mut bool,
-) -> bool {
+/// `network_option_setline`: the `uci set` line that would bring one network
+/// option to `value`, or `None` when it already matches (a pure read).
+/// Collect the lines of a whole transaction, then hand them to
+/// `apply_uci_lines` so one `uci batch` fork does the work of one-fork-per-
+/// option.
+pub fn network_option_setline(section: &str, option: &str, value: &str) -> Option<String> {
     if section.is_empty() || !uci::uci_has_key(&format!("network.{section}")) {
-        return true;
+        return None;
     }
     let current = uci::uci_get(&format!("network.{section}.{option}"));
     if current == value {
-        return true;
+        return None;
     }
-    if uci::uci_exec(&["-q", "set", &format!("network.{section}.{option}={value}")]).is_err() {
-        return false;
+    Some(format!("set network.{section}.{option}={value}"))
+}
+
+/// Apply collected `uci` lines plus the trailing `commit <config>` in ONE
+/// `uci batch` invocation; on any batch failure fall back to per-line
+/// `uci_exec` so a BusyBox without `batch` still works. Returns Err when a
+/// write could not be applied at all (the caller fails the transaction).
+pub fn apply_uci_lines(lines: &[String], config: &str) -> Result<()> {
+    if lines.is_empty() {
+        return Ok(());
     }
-    *changed = true;
-    true
+    let mut batch: Vec<String> = lines.to_vec();
+    batch.push(format!("commit {config}"));
+    if uci::uci_exec_batch(&batch).is_ok() {
+        return Ok(());
+    }
+    // Fallback: one fork per line, then the commit.
+    for line in lines {
+        let body = line.strip_prefix("set ").unwrap_or(line.as_str());
+        let mut it = body.splitn(2, '=');
+        let key = it.next().unwrap_or("");
+        let value = it.next().unwrap_or("");
+        if key.is_empty() {
+            continue;
+        }
+        uci::uci_exec(&["-q", "set", &format!("{key}={value}")])?;
+    }
+    uci::uci_exec(&["-q", "commit", config])
 }
 
 /// `apply_policy <mode>`: persist the priority plan of one mode - writes both
 /// families of both groups, never touches IPv6 of a standby in a way that
-/// disables it, and keeps IPv6 auto=1 everywhere.
+/// disables it, and keeps IPv6 auto=1 everywhere. All changed options land in
+/// ONE `uci batch` call.
 pub fn apply_policy(mode: Mode, snap: &LiveSnapshot) -> Result<()> {
-    let mut changed = false;
+    let mut lines: Vec<String> = Vec::new();
     for g in Group::ALL {
         let metric = policy_group_metric(mode, g).to_string();
         let dr = policy_group_defaultroute(mode, g).to_string();
@@ -568,24 +594,22 @@ pub fn apply_policy(mode: Mode, snap: &LiveSnapshot) -> Result<()> {
             if sec.is_empty() {
                 continue;
             }
-            if !set_network_option_if_changed(sec, "metric", &metric, &mut changed) {
-                return Err(crate::types::Error::config("metric write failed"));
+            if let Some(line) = network_option_setline(sec, "metric", &metric) {
+                lines.push(line);
             }
-            if !set_network_option_if_changed(sec, "defaultroute", &dr, &mut changed) {
-                return Err(crate::types::Error::config("defaultroute write failed"));
+            if let Some(line) = network_option_setline(sec, "defaultroute", &dr) {
+                lines.push(line);
             }
             if fam == Family::V6 {
                 // IPv6 is always enabled: the standby keeps auto=1 so its
                 // addresses, RA and DHCPv6 state survive the switch.
-                if !set_network_option_if_changed(sec, "auto", "1", &mut changed) {
-                    return Err(crate::types::Error::config("auto write failed"));
+                if let Some(line) = network_option_setline(sec, "auto", "1") {
+                    lines.push(line);
                 }
             }
         }
     }
-    if changed {
-        uci::uci_exec(&["-q", "commit", "network"])?;
-    }
+    apply_uci_lines(&lines, "network")?;
 
     let current_mode = uci::uci_get("h5000m_netmode.settings.mode");
     if current_mode != mode.as_str()

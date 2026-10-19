@@ -11,7 +11,7 @@ use crate::network::{self, LiveSnapshot};
 use crate::state;
 use crate::system::clock::unix_ts;
 use crate::system::command;
-use crate::types::{Family, Group, Mode};
+use crate::types::{Family, Group};
 
 fn cached_health(g: Group, fam: Family) -> String {
     let k = format!("{}{}", g.as_str(), fam.suffix());
@@ -80,6 +80,13 @@ fn wireless_state() -> (u32, u32, String, u32) {
 
 /// Emit the full status snapshot on stdout.
 pub fn print_status(cfg: &AppConfig, snap: &LiveSnapshot) {
+    print!("{}", render_status(cfg, snap));
+}
+
+/// The full status snapshot as one `key=value` block. Split out of
+/// `print_status` so the deterministic test suite can assert on the exact
+/// fields without capturing process stdout.
+pub fn render_status(cfg: &AppConfig, snap: &LiveSnapshot) -> String {
     let primary = cfg.mode.primary_group();
     let backup = primary.other();
     let active = network::slot_owner(snap);
@@ -473,7 +480,7 @@ pub fn print_status(cfg: &AppConfig, snap: &LiveSnapshot) {
     line(
         &mut out,
         "dns_servers_active",
-        dns_servers_of(active.as_str()),
+        dns_servers_of(snap, active.as_str()),
     );
 
     let sw_state = state::switch_state();
@@ -593,7 +600,7 @@ pub fn print_status(cfg: &AppConfig, snap: &LiveSnapshot) {
     line(&mut out, "gw_required", bool1(cfg.gw_required));
 
     let _ = sw_pid;
-    print!("{out}");
+    out
 }
 
 fn opt_or0(v: Option<u32>) -> String {
@@ -633,17 +640,17 @@ fn pid_of(arg: &str) -> u32 {
 }
 
 /// `dns_servers_of <group>`: the DNS servers netifd assigned to the group's
-/// sections (read-only, from the bounded ubus snapshot).
-fn dns_servers_of(group: &str) -> String {
+/// sections (read-only, from the memoised ubus answers). The section names
+/// come from the SNAPSHOT - a literal "modem"/"modem6" never matched a real
+/// section (the H5000M uses `modem0`/`modem0_6`), so the modem exit always
+/// reported an empty DNS list.
+fn dns_servers_of(snap: &LiveSnapshot, group: &str) -> String {
+    let Some(g) = Group::parse(group) else {
+        return String::new();
+    };
     let mut out = Vec::new();
     for fam in Family::ALL {
-        let sec = match (group, fam) {
-            ("wan", Family::V4) => "wan",
-            ("wan", Family::V6) => "wan6",
-            ("modem", Family::V4) => "modem",
-            ("modem", Family::V6) => "modem6",
-            _ => "",
-        };
+        let sec = snap.group_sec(g, fam);
         if sec.is_empty() {
             continue;
         }
@@ -676,9 +683,4 @@ fn json_values(json: &str, key: &str) -> Vec<String> {
         }
     }
     out
-}
-
-/// `mode` of the snapshot for tests.
-pub fn current_mode(cfg: &AppConfig) -> Mode {
-    cfg.mode
 }

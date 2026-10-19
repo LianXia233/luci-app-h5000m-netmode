@@ -165,16 +165,39 @@ pub fn cmd_set(cfg: &AppConfig, target_mode: &str, wait_flag: &str) -> i32 {
     0
 }
 
+/// How long a spawned switch worker keeps trying the writer lock when it is
+/// held by a NON-switch writer (a reconcile or a hotplug pass): user requests
+/// outrank automatic ones, so the worker out-waits `switch_lock_wait` (which
+/// bounds the in-flight switch case) by this factor before it drops the
+/// request with an explicit `lock_busy` failure.
+const SWITCH_LOCK_RETRY_ROUNDS: u32 = 3;
+
 /// `cmd_switch_worker <mode> <gen>`.
 pub fn cmd_switch_worker(cfg: &AppConfig, applied: &str, my_gen: u32) -> i32 {
     let Some(mode) = Mode::parse(applied) else {
         return 64;
     };
-    if !state::acquire_lock(cfg.switch_lock_wait) {
+    // A switch in progress will pick this request up through the gen
+    // protocol, so a deferral there is success-by-delegation. A reconcile
+    // holding the lock is out-waited instead: the user asked for this switch,
+    // and an automatic pass must not starve it.
+    let mut acquired = false;
+    for _ in 0..SWITCH_LOCK_RETRY_ROUNDS {
+        if state::acquire_lock(cfg.switch_lock_wait) {
+            acquired = true;
+            break;
+        }
         if state::switch_in_progress() {
-            log::log_info("switch", &format!("switch worker deferred: a switch is already running and will pick up request gen={my_gen}"));
+            log::log_info(
+                "switch",
+                &format!(
+                    "switch worker deferred: a switch is already running and will pick up request gen={my_gen}"
+                ),
+            );
             return 2;
         }
+    }
+    if !acquired {
         log::log_info(
             "switch",
             "switch worker could not start: another writer holds the lock",
@@ -198,24 +221,22 @@ pub fn cmd_switch_worker(cfg: &AppConfig, applied: &str, my_gen: u32) -> i32 {
         ]);
         return 2;
     }
-    let held = true;
     let mut rc = 0;
     let mut applied = applied.to_string();
     let mut gen = my_gen;
     for _ in 0..3 {
         let mut snap = network::read_live_state();
-        if crate::switch::switch_run(
+        match crate::switch::switch_run(
             cfg,
             Mode::parse(&applied).unwrap_or(Mode::WanFirst),
             "switch",
             None,
+            Some(gen),
             &mut snap,
-        )
-        .is_ok()
-        {
-            rc = 0;
-        } else {
-            rc = 1;
+        ) {
+            Ok(crate::switch::SwitchOutcome::Committed) => rc = 0,
+            Ok(crate::switch::SwitchOutcome::Superseded) => rc = 0,
+            Err(_) => rc = 1,
         }
         let pending = state::state_get("requested_mode");
         let applied_mode = state::state_get("applied_mode");
@@ -237,12 +258,14 @@ pub fn cmd_switch_worker(cfg: &AppConfig, applied: &str, my_gen: u32) -> i32 {
     // ticks), and reconciling with the stale mode dragged the just-committed
     // FIB straight back to the old exit seconds after a successful manual
     // switch (worker-side twin of the watcher freeze fixed in r6).
+    //
+    // force=false: the switch itself already refreshed the health verdicts
+    // (a forced round here used to probe all four families a second time
+    // while the lock was still held - ~2x the wall time of every switch).
     let cfg = AppConfig::load();
     let snap = network::read_live_state();
-    let _ = crate::reconcile::reconcile_body(&cfg, &snap, true);
-    if held {
-        state::release_lock();
-    }
+    let _ = crate::reconcile::reconcile_body(&cfg, &snap, false);
+    state::release_lock();
     rc
 }
 
@@ -285,9 +308,36 @@ pub fn cmd_align_worker(cfg: &AppConfig) -> i32 {
     }
 }
 
+/// How long (seconds) a hotplug notify worker keeps retrying the writer lock
+/// after its debounce window before it drops the event to the watchdog: the
+/// common holder is a switch (up to `switch_budget`) or a reconcile pass
+/// (seconds). A dropped event is NOT lost - the periodic watchdog re-reads
+/// the real state on its next tick - but waiting here closes the window in
+/// the common case without spawning a second writer.
+const NOTIFY_LOCK_RETRY_S: u32 = 15;
+
 /// `hotplug_notify <section> [action]` with the coalescing debounce marker.
+///
+/// Event-merge design (the scheduling states are real, on-disk):
+///   * DEBOUNCING: the marker directory exists; every further event of every
+///     section only updates `hotplug_last`/`hotplug_events` and returns.
+///   * RUNNING: the marker owner holds the writer lock and reconciles. New
+///     events during the run still coalesce - the marker is only removed
+///     AFTER the lock is acquired, so the window covers the whole wait.
+///   * DROPPED (bounded): after `NOTIFY_LOCK_RETRY_S` seconds of lock
+///     contention the event is dropped with one log line; the watchdog
+///     converges the state on its next tick (the debounce is never the only
+///     correctness mechanism).
+///
+/// The merged decision always re-reads netifd, addresses and the FIB: no
+/// conclusion is drawn from the event records themselves.
 pub fn hotplug_notify(cfg: &AppConfig, section: &str, action: &str) {
-    let marker = state::state_file().with_extension("state.debounce");
+    // Suffix-append instead of `with_extension`: the state file may carry no
+    // extension at all (the test seam names it plain `state`), where
+    // `with_extension` would produce `state.state.debounce` instead of
+    // `state.debounce`.
+    let mut marker = state::state_file();
+    marker.as_mut_os_string().push(".debounce");
     let events: u32 = crate::types::num_or(&state::state_get("hotplug_events"), 0) + 1;
     let _ = state::state_write(&[
         ("hotplug_last", &format!("{section}:{action}")),
@@ -324,13 +374,50 @@ pub fn hotplug_notify(cfg: &AppConfig, section: &str, action: &str) {
     if debounce > 0 {
         std::thread::sleep(std::time::Duration::from_secs(debounce as u64));
     }
-    let _ = std::fs::remove_dir_all(&marker);
 
-    if !state::acquire_lock(cfg.reconcile_wait) {
+    // Bounded lock retry: the marker stays in place while we wait, so events
+    // arriving during the contention window coalesce into THIS run instead
+    // of starting their own.
+    let mut got_lock = false;
+    let mut waited: u32 = 0;
+    while waited < NOTIFY_LOCK_RETRY_S {
+        if state::acquire_lock(1) {
+            got_lock = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        waited += 1;
+    }
+    // Remove the marker only now: any event that raced between removal and
+    // the reconcile below starts its own full cycle instead of being lost,
+    // and the reconcile reads the LIVE state, which includes it.
+    let _ = std::fs::remove_dir_all(&marker);
+    if !got_lock {
+        log::log_info(
+            "hotplug",
+            "event dropped after the lock retry budget; the watchdog will re-evaluate",
+        );
         return;
     }
+
+    // Targeted health refresh: re-probe only the group the event belongs to
+    // (its cached verdicts predate the interface change); the other group's
+    // verdicts are untouched by the event. `health_force` stays consumed by
+    // this pass - the watcher's next tick does a normal throttled round.
+    // Honours `health_check=0` exactly like the reconciler's own refresh.
+    let role_group = match crate::network::iface_role(section) {
+        "wan" => Some(crate::types::Group::Wan),
+        "modem" => Some(crate::types::Group::Modem),
+        _ => None,
+    };
     let snap = network::read_live_state();
-    let _ = crate::reconcile::reconcile_body(cfg, &snap, true);
+    if let Some(g) = role_group {
+        if cfg.health_check {
+            crate::health::refresh_health_group(&snap, cfg, true, g);
+        }
+        let _ = state::state_write(&[("health_force", "0")]);
+    }
+    let _ = crate::reconcile::reconcile_body(cfg, &snap, false);
     state::release_lock();
 }
 
@@ -362,14 +449,19 @@ fn clear_stale_marker(marker: &std::path::Path, max_age_s: u64) -> bool {
 }
 
 /// `run_watch`: procd-managed watchdog loop.
+///
+/// Every tick takes the writer lock first (bounded, one second): without it
+/// the watchdog's reconcile could race a hotplug pass or a switch worker -
+/// two writers doing route surgery at once, the exact hazard the lock exists
+/// for. A busy lock means another writer is already converging the state, so
+/// the tick is simply skipped and the next one re-checks.
 pub fn run_watch(cfg: &AppConfig) {
     log::log_info(
         "watch",
         &format!("watcher started, interval={}s", cfg.watch_interval),
     );
     // First pass immediately, then every interval.
-    let snap = network::read_live_state();
-    let _ = crate::reconcile::reconcile_body(cfg, &snap, false);
+    watch_tick(cfg);
     loop {
         std::thread::sleep(std::time::Duration::from_secs(cfg.watch_interval as u64));
         // Reload the config every tick: a manual `set` writes uci without
@@ -378,9 +470,22 @@ pub fn run_watch(cfg: &AppConfig) {
         // after a successful manual switch (manual settings outrank
         // everything). Interval changes take effect on the next tick.
         let cfg = AppConfig::load();
-        let snap = network::read_live_state();
-        let _ = crate::reconcile::reconcile_body(&cfg, &snap, false);
+        watch_tick(&cfg);
     }
+}
+
+/// One watchdog evaluation: lock (short bound), snapshot, reconcile, unlock.
+/// Public so the deterministic test suite can drive exactly one bounded tick
+/// (the `watch` loop itself never returns).
+pub fn watch_tick(cfg: &AppConfig) {
+    if !state::acquire_lock(1) {
+        // Another writer (a switch, an align, a hotplug pass) owns the state;
+        // it converges the system itself, and the next tick re-checks.
+        return;
+    }
+    let snap = network::read_live_state();
+    let _ = crate::reconcile::reconcile_body(cfg, &snap, false);
+    state::release_lock();
 }
 
 /// `get-device-map`.
@@ -403,8 +508,6 @@ fn cmd_eth_candidates() {
     }
 }
 
-fn uci_gen_bump() {}
-
 /// `eth-fallback get|set`.
 fn cmd_eth_fallback(args: &[String]) -> i32 {
     match args.first().map(|s| s.as_str()) {
@@ -423,7 +526,6 @@ fn cmd_eth_fallback(args: &[String]) -> i32 {
             {
                 return 1;
             }
-            uci_gen_bump();
             log::log_info("config", &format!("eth_fallback={sections}"));
             0
         }
@@ -471,7 +573,6 @@ fn cmd_set_device_map(cfg: &AppConfig, role: &str, dev: &str) -> i32 {
     if uci::uci_set_commit("h5000m_netmode", &key, dev).is_err() {
         return 1;
     }
-    uci_gen_bump();
     log::log_info("config", &format!("manual device map {role}={dev}"));
     0
 }

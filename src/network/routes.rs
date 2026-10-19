@@ -5,6 +5,7 @@
 //! as netifd-owned, per-group default route, slot metric and ECMP counting.
 
 use std::fs;
+use std::sync::Mutex;
 
 use crate::network::sysfs::proc_net;
 use crate::types::{Family, Group};
@@ -159,10 +160,61 @@ fn hex_groups(hex: &str) -> Vec<u16> {
 // oracles
 // ---------------------------------------------------------------------------
 
+/// Snapshot-scoped route-table cache.
+///
+/// One `read_live_state`/`refresh_routing` pass used to re-read and re-parse
+/// `/proc/net/{route,ipv6_route}` for every oracle call (group routes,
+/// winners, ECMP counts, standby checks: easily ten parses per snapshot).
+/// The cache holds one parse per family and is invalidated
+///   * at the start of every snapshot (`invalidate()` from `read_live_state`
+///     and `refresh_routing`), and
+///   * after every netlink route write of ours (`netlink.rs` calls
+///     `invalidate()` after RTM_NEWROUTE/RTM_DELROUTE), so a commit-then-verify
+///     sequence still reads the post-commit FIB.
+///
+/// External writers (netifd, mwan3) between two of our reads are picked up by
+/// the next snapshot or by the post-settle re-read, exactly as before: the
+/// cache never spans a snapshot boundary.
+type RoutesCache = [Option<Vec<Route>>; 2];
+
+fn routes_cache() -> &'static Mutex<RoutesCache> {
+    static CACHE: std::sync::OnceLock<Mutex<RoutesCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new([None, None]))
+}
+
+/// Drop the memoised route tables (see the cache documentation).
+pub fn invalidate() {
+    match routes_cache().lock() {
+        Ok(mut g) => *g = [None, None],
+        Err(e) => *e.into_inner() = [None, None],
+    }
+}
+
+fn family_index(family: Family) -> usize {
+    match family {
+        Family::V4 => 0,
+        Family::V6 => 1,
+    }
+}
+
 /// `show_defaults <family>`: all usable default routes of one family.
 /// /proc views never contain prohibit/blackhole/unreachable/throw entries and
 /// carry no `linkdown` marker; structural checks compensate (see module doc).
 pub fn show_defaults(family: Family) -> Vec<Route> {
+    let idx = family_index(family);
+    if let Ok(guard) = routes_cache().lock() {
+        if let Some(v) = guard[idx].as_ref() {
+            return v.clone();
+        }
+    }
+    let v = parse_family_defaults(family);
+    if let Ok(mut guard) = routes_cache().lock() {
+        guard[idx] = Some(v.clone());
+    }
+    v
+}
+
+fn parse_family_defaults(family: Family) -> Vec<Route> {
     match family {
         Family::V4 => parse_ipv4_proc(read_lines(&format!("{}/route", proc_net()))),
         Family::V6 => parse_ipv6_proc(read_lines(&format!("{}/ipv6_route", proc_net()))),
@@ -201,10 +253,6 @@ pub fn winning_default(family: Family) -> Option<Route> {
 
 pub fn winner_dev(family: Family) -> Option<String> {
     winning_default(family).map(|r| r.dev)
-}
-
-pub fn winner_metric(family: Family) -> Option<u32> {
-    winning_default(family).map(|r| r.metric)
 }
 
 /// `equal_metric_count`: how many default routes compete with the given route
@@ -254,10 +302,6 @@ pub fn group_default_route(family: Family, _group: Group, group_devs: &[String])
 
 pub fn slot_metric(family: Family, group: Group, group_devs: &[String]) -> Option<u32> {
     group_default_route(family, group, group_devs).map(|r| r.metric)
-}
-
-pub fn group_gateway(family: Family, group: Group, group_devs: &[String]) -> Option<String> {
-    group_default_route(family, group, group_devs).and_then(|r| r.via)
 }
 
 /// `has_default_route_any`: does any default route sit on one of the devices?

@@ -1,5 +1,20 @@
 #!/bin/sh
 #
+# DEPRECATED (v1.9.0): this suite targets the legacy SHELL backend's seams
+# (PATH-visible mocks for uci/ubus/ifup and the sysfs-root variable). The
+# Rust backend invokes /sbin/uci, /sbin/ubus and ifup through the
+# H5000M_UCI_BIN / H5000M_UBUS_BIN / H5000M_IFUP_BIN seams (absolute paths,
+# not PATH lookup) and reads configs through H5000M_CFG_FILE /
+# H5000M_NETWORK_CFG - none of which this script redirects. Running it
+# against the Rust backend on a live router therefore touches the REAL
+# /etc/config and the REAL netifd state.
+#
+# The replacement is the Rust-native test tower:
+#   * unit tests:            cargo test
+#   * deterministic suites:  tests/backend_logic.rs  (Scenario + mocks)
+#   * real-kernel pin:       tests/backend_netns.rs  (H5_NETNS_TEST=1 unshare -n)
+# This file is kept for history; do NOT run it against an installed backend.
+#
 # Deterministic unit tests for the h5000m-netmode backend.
 #
 # The backend decides which uplink is live and keeps IPv4 and IPv6 on the same

@@ -193,11 +193,6 @@ impl Mode {
     }
 }
 
-/// Normalize a mode string the way `normalize_mode` does (wan_first defaults).
-pub fn normalize_mode(s: &str) -> Mode {
-    Mode::parse(s).unwrap_or(Mode::WanFirst)
-}
-
 /// State machine states, spelled exactly like the shell constants so the state
 /// file stays byte-compatible (the status program and the LuCI page parse them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,10 +260,4 @@ impl SmState {
             _ => SmState::Idle,
         }
     }
-}
-
-/// `switch_busy` semantics: a state is busy when non-terminal *and* the worker
-/// pid that wrote it is still alive.
-pub fn switch_busy(state: SmState, pid_alive: bool) -> bool {
-    !state.is_terminal() && pid_alive
 }

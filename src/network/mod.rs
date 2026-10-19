@@ -334,8 +334,11 @@ fn json_field(json: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Build the live snapshot. Callers must `invalidate` before a fresh view.
+/// Build the live snapshot. Each call re-reads the kernel and daemon views
+/// exactly once (snapshot-scoped caches are dropped up front) and then derives
+/// every routing field from them.
 pub fn read_live_state() -> LiveSnapshot {
+    begin_snapshot();
     let mut snap = LiveSnapshot::default();
     let settings = uci::settings_section();
     let eth_fallback: Vec<String> = settings.1.get("eth_fallback").cloned().unwrap_or_else(|| {
@@ -448,17 +451,46 @@ pub fn read_live_state() -> LiveSnapshot {
     };
     snap.modem_devs = dedup(&snap.modem_devs, &[]);
 
+    derive_routing(&mut snap);
+    snap
+}
+
+/// Invalidate every snapshot-scoped cache so the next reads re-query the
+/// kernel and the daemon views. Called at the start of `read_live_state` and
+/// `refresh_routing`: within one snapshot each view is then read exactly once
+/// (previously one pass re-parsed the route tables per oracle call and forked
+/// `ubus` per section lookup).
+fn begin_snapshot() {
+    routes::invalidate();
+    command::invalidate_ubus_cache();
+    sysfs::invalidate_addr_cache();
+}
+
+/// Re-read only the routing-derived fields of a snapshot: routes, readiness,
+/// egress, winners, ownership, external-route attribution. Section membership
+/// and the ubus up/available state are kept - the caller takes a full
+/// `read_live_state` after actions that can change them (an `ifup` retry).
+/// This is the cheap per-second refresh the switch wait loop uses instead of
+/// a full snapshot (four `ubus` forks and a dozen UCI parses per second).
+pub fn refresh_routing(snap: &mut LiveSnapshot) {
+    begin_snapshot();
+    derive_routing(snap);
+}
+
+/// The routing half of `read_live_state`: everything derived from the FIB and
+/// the interface addresses. Shared by the full snapshot and the light refresh.
+fn derive_routing(snap: &mut LiveSnapshot) {
     snap.wan_route4 = routes::group_default_route(Family::V4, Group::Wan, &snap.wan4_devs);
     snap.wan_route6 = routes::group_default_route(Family::V6, Group::Wan, &snap.wan6_devs);
     snap.modem_route4 = routes::group_default_route(Family::V4, Group::Modem, &snap.modem4_devs);
     snap.modem_route6 = routes::group_default_route(Family::V6, Group::Modem, &snap.modem6_devs);
 
-    snap.wan4_ready = group_family_ready(&snap, Group::Wan, Family::V4);
-    snap.wan6_ready = group_family_ready(&snap, Group::Wan, Family::V6);
-    snap.modem4_ready = group_family_ready(&snap, Group::Modem, Family::V4);
-    snap.modem6_ready = group_family_ready(&snap, Group::Modem, Family::V6);
-    snap.wan6_capable = group_family_capable(&snap, Group::Wan, Family::V6);
-    snap.modem6_capable = group_family_capable(&snap, Group::Modem, Family::V6);
+    snap.wan4_ready = group_family_ready(snap, Group::Wan, Family::V4);
+    snap.wan6_ready = group_family_ready(snap, Group::Wan, Family::V6);
+    snap.modem4_ready = group_family_ready(snap, Group::Modem, Family::V4);
+    snap.modem6_ready = group_family_ready(snap, Group::Modem, Family::V6);
+    snap.wan6_capable = group_family_capable(snap, Group::Wan, Family::V6);
+    snap.modem6_capable = group_family_capable(snap, Group::Modem, Family::V6);
 
     // The live exit: the FIB decides the used next hop. `ip route get` also
     // honours policy rules; on this system (plain main-table routing) the
@@ -476,8 +508,8 @@ pub fn read_live_state() -> LiveSnapshot {
         .as_ref()
         .map(|r| r.dev.clone())
         .unwrap_or_default();
-    snap.active4 = route_owner(&snap, &snap.egress4, "");
-    snap.active6 = route_owner(&snap, &snap.egress6, &snap.active4);
+    snap.active4 = route_owner(snap, &snap.egress4, "");
+    snap.active6 = route_owner(snap, &snap.egress6, &snap.active4);
 
     snap.win4_dev = snap
         .default4
@@ -492,11 +524,11 @@ pub fn read_live_state() -> LiveSnapshot {
     snap.win4_metric = snap.default4.as_ref().map(|r| r.metric).unwrap_or(0);
     snap.win6_metric = snap.default6.as_ref().map(|r| r.metric).unwrap_or(0);
     snap.win4_owner = match &snap.default4 {
-        Some(r) => route_owner(&snap, &r.dev, &snap.active4),
+        Some(r) => route_owner(snap, &r.dev, &snap.active4),
         None => "none".into(),
     };
     snap.win6_owner = match &snap.default6 {
-        Some(r) => route_owner(&snap, &r.dev, &snap.active6),
+        Some(r) => route_owner(snap, &r.dev, &snap.active6),
         None => "none".into(),
     };
     snap.win4_ecmp = match &snap.default4 {
@@ -541,12 +573,10 @@ pub fn read_live_state() -> LiveSnapshot {
             };
         }
     }
-    snap.external_physical_owner = external_physical_owner(&mut snap);
+    snap.external_physical_owner = external_physical_owner(snap);
 
-    snap.slot_owner = slot_owner(&snap);
-    snap
+    snap.slot_owner = slot_owner(snap);
 }
-
 /// Policy-routing engines detectable without forking: a bounded /proc scan.
 /// `mwan3` has no resident daemon (hotplug driven), so a miss there degrades
 /// to "unknown" rather than a false "no external routing".
@@ -588,7 +618,7 @@ fn detect_policy_engine() -> String {
 
 /// The physical uplink behind whatever owns the FIB: the best default route
 /// whose device is not a tunnel (IPv4 preferred, IPv6 fallback).
-fn external_physical_owner(snap: &mut LiveSnapshot) -> String {
+fn external_physical_owner(snap: &LiveSnapshot) -> String {
     for fam in [Family::V4, Family::V6] {
         if let Some(r) = routes::winning_default(fam) {
             let tun = sysfs::dev_type(&r.dev)

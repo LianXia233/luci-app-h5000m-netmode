@@ -2,9 +2,56 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布] — 2026-09-29
+## [v1.9.0-r1] — 2026-10-19
 
-产物二进制与 r7 完全一致，`PKG_RELEASE` 暂未递增，下个版本发版时并入。
+网络切换逻辑优化与冗余代码清理：切换耗时、并发安全与测试体系的全面重构。除下方条目外，本版并入原「未发布」（现 [v1.8.5-r8]）的 `src/Makefile` 打包修复。
+
+### 性能（实测于 ImmortalWrt SNAPSHOT aarch64 实机）
+
+- **正向切换 22.7s → 5.47s**（`set modem_first --wait`）：根因是 `WAIT_IPV6` 烧满 20s 等待窗口——FM350 模组的 `modem0_6`（dhcpv6）永久 `pending` 且无全球地址。现 `strict_dual_stack=0` 下目标族**完全无地址**时封顶 `NONSTRICT_NOADDR_WAIT_CAP=5` 秒即单栈继续（实测该阶段 5.10s）；已有地址的族保留完整窗口。反向切换 0.52s → 0.28s。
+- **稳定态零扰动**：看门狗 tick 在收敛状态下不写任何文件、不改任何路由、不产生任何日志（实测 35 秒 / 3-4 个 tick：state 文件 md5 与 mtime 不变、路由表 md5 不变、logread 零新增）。
+- **每 tick 重复查询消除**：UCI 解析改为 mtime+size 校验的进程内缓存（此前每 tick 全文件重复解析 20+ 次）；路由表与接口地址改为快照级缓存（每快照各解析一次，此前 10+ 次）；ubus section 状态快照级缓存（此前每 tick 4 次 fork）；`remember_routes` 四个 key 合并为单次写；健康探测四族并行（thread::scope，此前顺序探测持锁可达 30s+）；切换事务的 UCI 写入合并为单次 `uci batch`（失败逐行回退）。
+- **切换后不再强制二轮探测**：worker 收尾 reconcile 改为非强制（此前每次切换后全族探测再跑一遍，约 2 倍墙钟时间）。
+
+### 并发（单写入者协议）
+
+- **gen 代次协议**：`set` 只递增 `gen` 并记录 `requested_mode`；worker 在每个阶段边界与每轮等待内检查，**首个路由写入前**发现新请求即中止当前事务（`superseded`，非错误）并立即执行最新请求；首写之后先完成或回滚再执行新请求，绝不留半提交状态。
+- **看门狗持锁**：watch tick 先抢写锁（有界 1 秒），锁忙即跳过本 tick，不再与切换/hotplug 竞赛出两个写者。
+- **Hotplug 事件合并加固**：debounce marker 由持锁后才移除（等待窗口内的事件并入本轮）；锁竞争最多等 `NOTIFY_LOCK_RETRY_S=15` 秒后丢弃事件并委托看门狗收敛（事件永不丢失）；marker 属主死亡或超窗自动回收。修复 marker 路径 bug：`with_extension("state.debounce")` 对无扩展名的 state 文件会生成 `state.state.debounce`，改为后缀追加（`<state>.debounce`）。
+- **worker 锁重试轮**：用户请求优先于自动 pass——switch worker 对非切换写者多等 `SWITCH_LOCK_RETRY_ROUNDS` 轮；对切换中 worker 则委托 gen 协议。
+
+### 修复
+
+- **phases 字段 off-by-one**：阶段耗时被记到下一阶段名下（20 秒的 WAIT_IPV6 显示为 VERIFY_IPV4 22.09s），曾把延迟排查引向错误方向。现耗时记入刚结束的阶段（`CURRENT_PHASE`），且重开同阶段不再记空条目。详见 FIXES.md 12.5 / 12.6。
+- **dns_servers_of 硬编码**：原以字面 `"modem"`/`"modem6"` 匹配 section，实机实际是 `modem0`/`modem0_6`，modem 侧 DNS 永远报空。现从快照的 section 解析。
+- **对齐冷却漏洞**：冷却此前只从「最后成功」计时，失败的对齐每看门狗周期无限重试探测死目标。现失败同样消耗冷却（`last_align_attempt_ts`）。
+- **already-governs 不记录 applied_mode**：命中「策略已生效」快速路径的 `set` 不写 `applied_mode`，worker 的最新请求循环据此误判重跑。现一并写入。
+- **默认配置清理**：删除孤儿项 `status_cache`（`AppConfig` 已无此字段，前端也不读）。
+
+### 冗余代码清理
+
+- 删除死代码：`normalize_mode`、`switch_busy`、`gateway_probe`、`health_targets`、`run_health_round`、`winner_metric`、`has_default_route_any`、`group_gateway`、`list_netdevs`、`dev_info`、`current_mode`、`uci_gen_bump`（空函数）、`AppConfig` 的 `eth_fallback`/`status_cache` 字段、`_routes_used`/`has_targets`。
+- 合并重复实现：`switch_worker` 与 `cmd_switch_worker` 两份 worker 逻辑合一；`render_status` 拆分为可复用的渲染函数。
+
+### 测试
+
+- 新增 `src/bin/h5000m-test-mocks.rs`：uci / ubus / ifup 三合一 mock 守护进程（按文件名分角色，mini-uci 解析与渲染保留 section type）。
+- 新增 `tests/common/mod.rs`（`Scenario` 脚手架：场景目录、环境接缝、fixtures 工厂、`real_kernel` 模式）与 `H5M_MOCK_EXE` 运行时覆盖（设备上跑测试时替换编译期嵌入的构建机路径）。
+- 新增 `tests/backend_logic.rs`（12 例确定性集成测试：gen 协议、superseded 中止、事件合并、看门狗让锁、陈旧锁回收、稳定态零扰动、TUN 归属、抖动序列、并发 notify 单 marker、阶段归属回归、冷却消耗）——实机 12/12 通过。
+- 新增 `tests/backend_netns.rs`（4 例真内核 netns 测试，`H5_NETNS_TEST=1` 门控）——本机为 Windows、实机 BusyBox 无 `unshare`，无法执行，如实标记为待验证项；无门控时自动跳过（实测 4/4 正确 skip）。
+- 修复测试 fixture 的 `/proc/net/route` 网关字节序（内核是小端 hex，fixture 曾写大端导致网关 IP 反转）。
+- `tests/run_tests.sh` 标记废弃：针对旧 shell 后端的 PATH mock 契约，对 Rust 后端的绝对路径调用（`/sbin/uci` 等）不生效，在设备上误跑会触碰真实配置；新测试体系见 README。
+
+### 变更文件
+
+- 后端核心：`src/switch/{mod,transaction}.rs`（状态机重写、批量写、gen 协议）、`src/rpc.rs`（worker 合一、锁协议、notify 加固）、`src/reconcile.rs`、`src/health/mod.rs`（并行探测）、`src/status.rs`、`src/network/{mod,routes,sysfs,netlink}.rs`（缓存层）、`src/config/{mod,uci}.rs`（解析缓存、batch、接缝）、`src/system/{clock,command}.rs`、`src/types/mod.rs`、`src/probe/mod.rs`
+- 新增：`src/bin/h5000m-test-mocks.rs`、`tests/common/mod.rs`、`tests/backend_logic.rs`、`tests/backend_netns.rs`
+- 文档：`README.md`（并发协议与测试体系说明）、`FIXES.md`（12.5 / 12.6）、`root/etc/config/h5000m_netmode`（删 status_cache）
+- 产物：`root/usr/sbin/h5000m-netmode{,-status}`（随本版重建，CI 比对一致）
+
+## [v1.8.5-r8] — 2026-09-29（原「未发布」）
+
+产物二进制与 r7 完全一致，`PKG_RELEASE` 随 v1.9.0 一并递增发布。r7 之后的 `src/Makefile` 修复见下方条目（已随 v1.9.0 发布）。
 
 ### 修复
 
@@ -714,3 +761,5 @@ probe 恒 `unknown`（`attempts=3 ok=0 need=2`）、切换被 `ipv4_not_ready` �
 - IPv6 出口跟随 IPv4，防止双栈流量分裂
 - daed 自动重载
 - Hotplug 触发 reconcile
+
+> AI生成

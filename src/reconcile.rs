@@ -19,22 +19,33 @@ pub fn switch_cooldown(cfg: &AppConfig) -> u32 {
 
 /// `align_cooldown_ok`: a forced align (UI one-click, `H5000M_FORCE_ALIGN=1`)
 /// bypasses the rate limit - a split is a fault and waiting would be wrong.
+/// The cooldown is measured from the last ATTEMPT (not the last success): a
+/// failing align used to retry on every watchdog tick without ever consuming
+/// the cooldown, re-probing a dead target every `watch_interval` seconds.
 pub fn align_cooldown_ok(cfg: &AppConfig, force: bool) -> bool {
     if force {
         return true;
     }
     let now = unix_ts();
-    let last = crate::types::num_or::<u64>(&state::state_get("last_align_ts"), 0);
+    let last = crate::types::num_or::<u64>(&state::state_get("last_align_attempt_ts"), 0);
     now.saturating_sub(last) >= switch_cooldown(cfg) as u64
 }
 
-/// `mark_align`: persist the audit trail of an alignment.
+/// `mark_align`: persist the audit trail of a SUCCESSFUL alignment (kept for
+/// the UI) and stamp the attempt clock (used by the cooldown).
 pub fn mark_align(reason: &str, target: &str) {
     let _ = state::state_write(&[
         ("last_align_ts", &unix_ts().to_string()),
+        ("last_align_attempt_ts", &unix_ts().to_string()),
         ("last_align_reason", reason),
         ("last_align_target", target),
     ]);
+}
+
+/// `mark_align_attempt`: stamp the attempt clock at the START of an align so
+/// failed attempts also consume the cooldown (see `align_cooldown_ok`).
+fn mark_align_attempt() {
+    let _ = state::state_write(&[("last_align_attempt_ts", &unix_ts().to_string())]);
 }
 
 /// `confirm_candidate`: consecutive observations must agree before a failback
@@ -59,15 +70,36 @@ pub fn clear_candidate() {
 }
 
 /// `remember_routes`: snapshot the current next hops so an isolated standby can
-/// be warmed later.
+/// be warmed later. One read + one write: the previous version did up to four
+/// separate read-rewrite cycles of the whole state file on every reconcile
+/// tick even when nothing had changed.
 pub fn remember_routes(snap: &LiveSnapshot) {
+    let current = state::kv_read(&state::state_file());
+    let mut stale: Vec<(String, String)> = Vec::new();
     for g in Group::ALL {
         for fam in Family::ALL {
-            if let Some(r) = snap.group_route(g, fam) {
-                transaction::remember_group_route(g, fam, r);
+            let Some(r) = snap.group_route(g, fam) else {
+                continue;
+            };
+            let (gw, dev) = crate::network::routes::route_gw_dev(r);
+            if gw.is_empty() || dev.is_empty() {
+                continue;
+            }
+            let key = format!("rt_{}{}", g.as_str(), fam.n());
+            let val = format!("{gw} {dev}");
+            if current.get(&key).map(|v| v.as_str()) != Some(val.as_str()) {
+                stale.push((key, val));
             }
         }
     }
+    if stale.is_empty() {
+        return;
+    }
+    let pairs: Vec<(&str, &str)> = stale
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let _ = state::state_write(&pairs);
 }
 
 /// `align_to <group> <reason>`: probe, commit both families, verify; on any
@@ -87,6 +119,7 @@ pub fn align_to(
         );
         return Err(crate::types::Error::switch("cooldown"));
     }
+    mark_align_attempt();
     if let Err(e) = transaction::verify_group_online(snap, cfg, group) {
         log::log_info(
             "reconcile",

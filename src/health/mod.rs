@@ -39,64 +39,85 @@ pub fn throttle_ok(cfg: &AppConfig, force: bool) -> bool {
 
 /// `refresh_health <force>`: one bounded probe round for every (group, family)
 /// that structurally can answer; verdicts and failure streaks are persisted.
+/// The four (group, family) probes run in PARALLEL: this runs while the writer
+/// lock is held on the hotplug/reconcile path, and a sequential worst case
+/// (four families × attempts × timeout) could park the lock for half a minute.
 pub fn refresh_health(snap: &LiveSnapshot, cfg: &AppConfig, force: bool) {
+    refresh_health_scope(snap, cfg, force, None);
+}
+
+/// `refresh_health_group <force>`: the hotplug path's targeted variant -
+/// refresh only the two families of ONE group (the exit the event belongs
+/// to). The other group's cached verdicts stay: an event on the modem cannot
+/// change what the wired WAN answers, and those verdicts are at most
+/// `health_probe_interval` old, exactly what the throttled path accepts.
+pub fn refresh_health_group(snap: &LiveSnapshot, cfg: &AppConfig, force: bool, group: Group) {
+    refresh_health_scope(snap, cfg, force, Some(group));
+}
+
+fn refresh_health_scope(snap: &LiveSnapshot, cfg: &AppConfig, force: bool, only: Option<Group>) {
     if !throttle_ok(cfg, force) {
         return;
     }
 
-    let mut wan = Verdict::Unknown;
-    let mut wan6 = Verdict::Unknown;
-    let mut modem = Verdict::Unknown;
-    let mut modem6 = Verdict::Unknown;
+    let pairs: Vec<(Group, Family)> = Group::ALL
+        .iter()
+        .flat_map(|g| Family::ALL.iter().map(move |f| (*g, *f)))
+        .filter(|(g, _)| only.map(|o| o == *g).unwrap_or(true))
+        .collect();
 
-    if snap.wan4_ready {
-        wan = probe::probe_group_family(
-            Family::V4,
-            Group::Wan,
-            &snap.wan4_devs,
-            cfg.probe_attempts,
-            cfg.probe_ok,
-            cfg.probe_timeout,
-            &cfg.probe_targets,
-            &cfg.probe_targets6,
-        );
-    }
-    if snap.wan6_ready {
-        wan6 = probe::probe_group_family(
-            Family::V6,
-            Group::Wan,
-            &snap.wan6_devs,
-            cfg.probe_attempts,
-            cfg.probe_ok,
-            cfg.probe_timeout,
-            &cfg.probe_targets,
-            &cfg.probe_targets6,
-        );
-    }
-    if snap.modem4_ready {
-        modem = probe::probe_group_family(
-            Family::V4,
-            Group::Modem,
-            &snap.modem4_devs,
-            cfg.probe_attempts,
-            cfg.probe_ok,
-            cfg.probe_timeout,
-            &cfg.probe_targets,
-            &cfg.probe_targets6,
-        );
-    }
-    if snap.modem6_ready {
-        modem6 = probe::probe_group_family(
-            Family::V6,
-            Group::Modem,
-            &snap.modem6_devs,
-            cfg.probe_attempts,
-            cfg.probe_ok,
-            cfg.probe_timeout,
-            &cfg.probe_targets,
-            &cfg.probe_targets6,
-        );
-    }
+    let results: Vec<(Group, Family, Verdict)> = {
+        let snap_ref = &snap;
+        let cfg_ref = &cfg;
+        std::thread::scope(|s| {
+            let handles: Vec<_> = pairs
+                .iter()
+                .map(|(g, fam)| {
+                    let ready = match (g, fam) {
+                        (Group::Wan, Family::V4) => snap.wan4_ready,
+                        (Group::Wan, Family::V6) => snap.wan6_ready,
+                        (Group::Modem, Family::V4) => snap.modem4_ready,
+                        (Group::Modem, Family::V6) => snap.modem6_ready,
+                    };
+                    let devs = snap_ref.group_devs(*g, *fam).to_vec();
+                    // A family that cannot answer is `unknown`, never a
+                    // failure - no probe is spawned for it.
+                    let probe = if ready {
+                        s.spawn(move || {
+                            probe::probe_group_family(
+                                *fam,
+                                *g,
+                                &devs,
+                                cfg_ref.probe_attempts,
+                                cfg_ref.probe_ok,
+                                cfg_ref.probe_timeout,
+                                &cfg_ref.probe_targets,
+                                &cfg_ref.probe_targets6,
+                            )
+                        })
+                    } else {
+                        s.spawn(move || Verdict::Unknown)
+                    };
+                    (*g, *fam, probe)
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|(g, fam, h)| (g, fam, h.join().unwrap_or(Verdict::Unknown)))
+                .collect()
+        })
+    };
+    let verdict_of = |g: Group, f: Family| -> Verdict {
+        results
+            .iter()
+            .find(|(rg, rf, _)| *rg == g && *rf == f)
+            .map(|(_, _, v)| *v)
+            .unwrap_or(Verdict::Unknown)
+    };
+    let wan = verdict_of(Group::Wan, Family::V4);
+    let wan6 = verdict_of(Group::Wan, Family::V6);
+    let modem = verdict_of(Group::Modem, Family::V4);
+    let modem6 = verdict_of(Group::Modem, Family::V6);
 
     let now = crate::system::clock::unix_ts();
     let wan_fail = next_streak("wan_fail", wan);

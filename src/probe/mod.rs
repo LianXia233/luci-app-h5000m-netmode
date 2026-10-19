@@ -8,7 +8,6 @@
 pub mod icmp;
 pub mod tcp;
 
-use crate::network::routes;
 use crate::network::sysfs;
 use crate::switch::budget;
 use crate::types::{Family, Group, Verdict};
@@ -75,12 +74,6 @@ pub fn probe_group_family(
     Verdict::Down
 }
 
-/// Gateway reachability (advisory). Uses the group's own gateway so the probe
-/// leaves through the interface being checked.
-pub fn gateway_probe(family: Family, devs: &[String], gateway: &str, timeout: u32) -> bool {
-    icmp::gateway_reachable(family, devs, gateway, timeout)
-}
-
 /// Optional TCP layer for the health score (`tcp_check` opt-in). Never used by
 /// the auto-switch decision; the first reachable target answers.
 pub fn tcp_score(devs: &[String], targets: &[String], timeout_ms: u64) -> bool {
@@ -143,29 +136,4 @@ fn dns_query_a(name: &str) -> Result<bool, String> {
     }
     let ancount = u16::from_be_bytes([rx[6], rx[7]]);
     Ok(ancount > 0)
-}
-
-/// Health-target resolution (for the optional score): gateway first, then
-/// configured ICMP targets. Domestic defaults only.
-pub fn health_targets(cfg: &crate::config::AppConfig) -> (Vec<String>, Vec<String>) {
-    (cfg.probe_targets.clone(), cfg.probe_targets6.clone())
-}
-
-/// The `health` command path: run one bounded probe round for every
-/// (group, family) that is structurally ready, persist verdicts and streaks.
-pub fn run_health_round(snap: &crate::network::LiveSnapshot, cfg: &crate::config::AppConfig) {
-    use crate::health::refresh_health;
-    refresh_health(snap, cfg, true);
-}
-
-/// Keep the unused import lint happy for routes when only gateway is used.
-#[allow(dead_code)]
-fn _routes_used(r: &routes::Route) -> bool {
-    r.gateway().is_some()
-}
-
-/// Guard against an empty config after a manual edit: probes with no targets
-/// must be treated as unknown rather than down.
-pub fn has_targets(cfg: &crate::config::AppConfig, family: Family) -> bool {
-    !probe_targets(family, &cfg.probe_targets, &cfg.probe_targets6).is_empty()
 }

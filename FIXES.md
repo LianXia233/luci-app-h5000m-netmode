@@ -24,6 +24,8 @@
   - [12.2 提交前失败也会「回滚」：正常出口被无谓搬家](#122-提交前失败也会回滚正常出口被无谓搬家)
   - [12.3 手动接口映射被逐 section 读取覆盖](#123-手动接口映射被逐-section-读取覆盖)
   - [12.4 只有一个族有默认路由，不等于「出口分流」](#124-只有一个族有默认路由不等于出口分流)
+  - [12.5 phases 字段的 off-by-one：20 秒的等待被记到下一个阶段头上](#125-phases-字段的-off-by-one20-秒的等待被记到下一个阶段头上)
+  - [12.6 无地址的 IPv6 烧满整个等待窗口：22.7 秒切换的另一半根因](#126-无地址的-ipv6-烧满整个等待窗口227-秒切换的另一半根因)
   - [11.1 init 脚本没有执行位：服务「已启用」却从未启动](#111-init-脚本没有执行位服务已启用却从未启动)
   - [11.2 别用 tar 解 apk：OpenWrt 25.x 起容器是 ADB.pckg](#112-别用-tar-解-apkopnewrt-25x-起容器是-adbpckg)
 
@@ -1452,3 +1454,82 @@ IPv4 根本没有默认路由，谈不上"走另一个出口"。同时 `write_ip
 sh tests/run_tests.sh /usr/sbin/h5000m-netmode no_ipv4_default   # 零路由操作、IPv6 毫发无损
 sh tests/run_tests.sh /usr/sbin/h5000m-netmode stable_state      # 稳定态零扰动
 ```
+
+### 12.5 phases 字段的 off-by-one：20 秒的等待被记到下一个阶段头上
+
+**现象**：切到 5G 出口的实测耗时 22.7 秒，`status` 的 `phases` 字段却显示耗时大头在
+`VERIFY_IPV4`（22.09s）——「验证 IPv4 可达性」一个本地探测步骤怎么可能花 22 秒？这个自相矛盾
+的读数把延迟排查往「探测慢/网络差」方向引了一整天。
+
+**根因**：阶段计时的记账方向反了。切换状态机每进入一个新阶段就打一条时间戳，旧实现把
+「当前时刻 − 上次打戳」记在**正在进入的阶段**名下：`task_phase(WAIT_IPV6)` 打戳时，把
+`PREPARING_TARGET` 以来流逝的时间记给了 `WAIT_IPV6` 的**初始值**，随后 20 秒的等待结束时
+`task_phase(VERIFY_IPV4)` 打戳，这 20 秒被记在 `VERIFY_IPV4` 头上。每个阶段的真实耗时都被
+记到了**下一个**阶段名下，只是绝大多数阶段耗时接近零所以看不出来，一旦某个阶段真的烧了
+20 秒，账就全错位了。
+
+**危害**：`phases` 是排障时唯一的分段耗时来源，错位意味着它系统性地把瓶颈指向错误的阶段。
+本例中它让「IPv6 等待烧满窗口」（配置/模组问题）伪装成「IPv4 探测超时」（网络问题），
+两个方向的排查手段完全不同。
+
+**修复**：耗时记入**刚结束**的阶段（`CURRENT_PHASE`），打戳只是开启新阶段。时序：
+`task_begin` 武装 `PREPARING_TARGET` → `prepare_group` 跑完 → `task_phase(WAIT_IPV4)`
+把 `PREPARING_TARGET` 的真实耗时记在自己名下，并开启 `WAIT_IPV4`……以此类推。首次重开
+同阶段（`task_begin` 后的第一条 `task_phase`）不再记零时长空条目，保证每个阶段恰好一条。
+
+**为什么不能在阶段开始时记零、结束时补差**：两种记法在数值上等价，但「记给谁」是展示语义——
+读 phases 的人想知道「这个阶段花了多久」，只有结束时刻账才完整；开始时刻只能记 0。
+
+**验证**：
+
+```sh
+h5000m-netmode set modem_first --wait
+grep '^phases=' /var/run/h5000m-netmode.state
+# 修复后：WAIT_IPV6:5.10s VERIFY_IPV4:0.07s —— 等待记在等待头上，探测只记探测的
+# 修复前：WAIT_IPV6:0.00s VERIFY_IPV4:5.17s —— 20 秒等待被伪装成探测耗时
+```
+
+`tests/backend_logic.rs` 的 `wait_phase_duration_is_charged_to_the_waiting_phase`
+是该回归的确定性测试：构造「IPv6 完全无地址 + strict_dual_stack=0」场景，断言
+`WAIT_IPV6` 条目大于零且 `VERIFY_IPV4` 条目小于 1 秒。
+
+### 12.6 无地址的 IPv6 烧满整个等待窗口：22.7 秒切换的另一半根因
+
+**现象**：`set modem_first` 实测 22.7 秒，其中 `WAIT_IPV6` 独占 20 秒（完整的
+`switch_wait_ipv6` 窗口）。模组侧 `modem0_6`（dhcpv6）在 ubus 里永久 `pending`，
+接口上**从来没有**过全球地址。
+
+**根因**：等待循环的条件只有「就绪或超时」。对「这族根本不会有结果」的情况——FM350 类模组的
+dhcpv6 section 永久 pending、从不分配地址——20 秒窗口被原封不动烧满。而
+`strict_dual_stack=0` 的设计语义是「IPv6 是增强，不是门槛」：文档明说 IPv6 缺失不该阻塞切换。
+也就是说，这 20 秒等的是一个**已经决定不等也要继续**的结果。
+
+**判据**（为什么封顶 5 秒而不是直接跳过）：区分两种「没就绪」——
+
+1. **有地址、路由没到**：地址是这族活着的证据，只是路由还在收敛，值得等满配置窗口；
+2. **完全没有地址**：dhcpv6 没跑出来，5 秒内不出现的地址大概率不会来（插桩实测 FM350 的
+   `modem0_6` 从未出过地址），继续等是纯浪费。
+
+**危害**：每次切到模组出口都多花 15 秒（20 − 5）；期间切换持有写锁，用户的新请求只能排队，
+`--wait` 的调用方也跟着等。叠加厂商 `modemd` 每 15 秒重置 `modem0.metric=20` 的干扰，
+切换窗口内的状态观测全部失真。
+
+**修复**：`wait_group_family` 在 `strict_dual_stack=0` 且目标族**无任何地址**时，把等待上限
+收紧为 `min(switch_wait_ipv6, NONSTRICT_NOADDR_WAIT_CAP=5)`；`strict_dual_stack=1` 或族已有
+地址时保留完整窗口（严格双栈的用户明确要求等）。IPv4 不做封顶——有线 WAN 侧 dhcpv4 不会出现
+「永久 pending 无地址」的形态，且 IPv4 是主族，宁可等满。
+
+**验证**：
+
+```sh
+# 实机（FM350，modem0_6 永久 pending）：
+h5000m-netmode set modem_first --wait
+grep '^phases=' /var/run/h5000m-netmode.state
+# v1.9.0：elapsed=5.47s，WAIT_IPV6:5.10s，result=ok（单栈提交保留）
+# v1.8.5：elapsed=22.7s，WAIT_IPV6 烧满 20s
+```
+
+`tests/backend_netns.rs` 的 `real_switch_commits_and_demotes_standby` 在真内核命名空间里
+覆盖「v6 目标永远不就绪」时单栈提交仍成功且温备降级的完整路径。
+
+> AI生成

@@ -113,7 +113,7 @@ flowchart LR
     style action fill:#f0fdf4,stroke:#bbf7d0,stroke-width:1px
 ```
 
-1. 用户通过 LuCI 卡片选择策略，前端调用 `set <mode>`；后端只创建后台任务并**立即返回**，真正的切换由工作进程完成，LuCI 通过只读 `status` 轮询进度（切换中收紧到 1 秒），HTTP/ubus 调用永远不会被切换阻塞；
+1. 用户通过 LuCI 卡片选择策略，前端调用 `set <mode>`；后端只创建后台任务并**立即返回**，真正的切换由工作进程完成，LuCI 通过只读 `status` 轮询进度（切换中收紧到 1 秒），HTTP/ubus 调用永远不会被切换阻塞；命令行可用 `set <mode> --wait` 前台等待结果；
 2. 切换不是重建接口，而是**移动默认路由的优先级**：目标出口准备并通过连通性验证后，后端按协议族依次提交（IPv4、IPv6），并复核最终路由；目标出口缺少某个协议族时会按组能力处理并停靠备用侧对应路由，避免残留分流。切换期间路由更新并非跨 IPv4 / IPv6 的单条原子操作，因此提交中途失败会按已成功修改的协议族执行回滚；`strict_dual_stack=0` 时 IPv6 缺失或验证失败可按单栈继续，设为 `1` 才要求严格双栈；
 3. 出口判定用 `ip route get` 向内核查询**实际**默认出口而非读 main 表，因此策略路由（mwan3 / qmodem / VPN / daed）环境下依然准确；若出口是 TUN 隧道（透明代理），按网卡内核类型识别并归属到代理实际使用的上行链路；
 4. Hotplug 脚本（`95-h5000m-netmode`）委托后端对 section 分类并触发复算；procd 看门狗按 `watch_interval` 周期复算，覆盖 Hotplug 看不到的漂移；两路都只管理物理 WAN / 5G 模组接口，HomeProxy、sing-box、daed 等透明代理的 TUN 不作为出口被管理，也不重载代理服务；
@@ -160,7 +160,9 @@ flowchart LR
 - **提交前不动路由**：等待或探测阶段失败时不对活动槽位做任何写操作，失败路径不制造抖动；
 - **失败必回滚**：提交阶段的任何失败（含 IPv6 提交失败）都会把两个族恢复到切换前的出口；回滚永不产生黑洞路由；
 - **全部等待有上限**：等 IPv4 / IPv6、每次探测、以及整次切换（`switch_budget`）都有硬上限，超时按序退出并保留可用出口；
-- **切换串行化 + 去抖**：所有写操作共用一把锁，`reconcile` 让路、重复点击排队给正在运行的 worker；Hotplug 事件合并去抖；出口降级需连续多轮探测失败、回切需连续多轮确认、自动动作之间还有冷却时间，不会来回抖。
+- **切换串行化 + 最新请求优先**：所有写操作共用一把锁（mkdir 锁，陈旧持有者自动回收），`reconcile` 与看门狗 tick 让路；切换期间的重复 `set` 只递增代次号（`gen`），worker 在首个路由写入前发现新请求会中止当前事务并立即执行最新请求（`superseded`，不算失败），首写之后则先完成或回滚再执行新请求，绝不留半提交状态；Hotplug 事件合并去抖（ debounce marker 由活持有者持有，死持有者自动回收）；出口降级需连续多轮探测失败、回切需连续多轮确认、自动动作之间还有冷却时间（失败的对齐同样消耗冷却），不会来回抖；
+- **稳定态零扰动**：状态已收敛时，看门狗每个 tick 不写任何文件、不改任何路由、不产生任何日志（可用 `logread` 直接验证）；
+- **无地址 IPv6 不拖慢切换**：`strict_dual_stack=0` 下，目标出口某族**完全没有地址**时最多等待 5 秒（`NONSTRICT_NOADDR_WAIT_CAP`）即单栈继续——针对 FM350 类模组 dhcpv6 永久 `pending` 不出地址的场景（实测切换 22.7s → 5.5s）；已有地址的族仍保留完整等待窗口。
 
 根因级分析、判定逻辑与排查手法见 [FIXES.md](FIXES.md)。
 
@@ -190,6 +192,14 @@ scripts/build-rust.sh aarch64-unknown-linux-musl
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
+
+测试体系分三层：
+
+- **单元测试**（`cargo test`，lib 内嵌）：纯逻辑函数，任何主机可跑；
+- **确定性集成测试**（`tests/backend_logic.rs`）：`Scenario` 脚手架把 UCI / sysfs / /proc/net / ubus 全部重定向到临时目录，`h5000m-test-mocks` 模拟 uci/ubus/ifup 守护进程，覆盖 gen 协议、superseded 中止、事件合并、看门狗让锁、陈旧锁回收、稳定态零扰动、TUN 归属、阶段归属回归等；
+- **真内核测试**（`tests/backend_netns.rs`）：在私有网络命名空间里用真实的 netlink 路由写入验证提交/降级/回滚/单写者，需 `H5_NETNS_TEST=1 unshare -n` 门控（默认跳过；无 `unshare` 的环境如实报告为无法执行）。
+
+在设备上跑集成测试：把 `target/aarch64-unknown-linux-musl/debug/deps/backend_logic-*` 与 `debug/h5000m-test-mocks` 一起传到路由器，然后 `H5M_MOCK_EXE=./h5000m-test-mocks ./backend_logic --test-threads=1`（mock 路径用 `H5M_MOCK_EXE` 覆盖，因为编译时嵌入的是构建机路径）。
 
 `root/usr/sbin/h5000m-netmode*` 是提交进仓库的预编译产物（buildroot 没有 Rust 工具链）。CI 会比对编译输出与该产物：不一致时给出警告，并在 main 分支上自动提交更新后的产物并顺带修正格式（`autofix` 任务）。本地改动 `src/` 后执行上面的脚本并连同产物一起提交。
 
@@ -507,3 +517,5 @@ logread | grep h5000m-netmode | tail -5
 ## 许可证
 
 本项目采用 [Apache License 2.0](LICENSE)。
+
+> AI生成

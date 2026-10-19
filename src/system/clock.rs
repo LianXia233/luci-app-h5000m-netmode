@@ -8,9 +8,10 @@
 
 use std::fs;
 
-/// Path of the uptime file; a test seam, like the shell's `H5000M_UPTIME_FILE`.
-pub fn uptime_path() -> &'static str {
-    "/proc/uptime"
+/// Path of the uptime file; a test seam, like the shell's `H5000M_UPTIME_FILE`
+/// (the deterministic test suite redirects it to control the budget clock).
+pub fn uptime_path() -> String {
+    std::env::var("H5000M_UPTIME_FILE").unwrap_or_else(|_| "/proc/uptime".into())
 }
 
 /// Monotonic time in centiseconds. Falls back to the wall clock (times 100)

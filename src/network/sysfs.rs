@@ -8,6 +8,7 @@
 //!   * `/proc/net/if_inet6`     – IPv6 interface addresses.
 
 use std::fs;
+use std::sync::Mutex;
 
 pub const SYS_NET: &str = "/sys/class/net";
 pub const PROC_NET: &str = "/proc/net";
@@ -66,8 +67,36 @@ pub fn dev_ifindex(dev: &str) -> Option<u32> {
 }
 
 // ---------------------------------------------------------------------------
-// IPv4 addresses: SIOCGIFCONF
+// Interface addresses: snapshot-scoped caches
 // ---------------------------------------------------------------------------
+// `read_live_state` and `refresh_routing` call `invalidate_addr_cache()` at
+// their start, so one snapshot reads the address set once instead of once per
+// `group_family_has_address` predicate (eight-plus reads per snapshot before).
+
+/// Memoised `(device, address)` pairs, v4 (SIOCGIFCONF) and v6
+/// (`/proc/net/if_inet6`) flavours.
+type AddrCacheV4 = Option<Vec<(String, String)>>;
+type AddrCacheV6 = Option<Vec<(String, String, u8)>>;
+
+fn addr_cache_v4() -> &'static Mutex<AddrCacheV4> {
+    static C: std::sync::OnceLock<Mutex<AddrCacheV4>> = std::sync::OnceLock::new();
+    C.get_or_init(|| Mutex::new(None))
+}
+
+fn addr_cache_v6() -> &'static Mutex<AddrCacheV6> {
+    static C: std::sync::OnceLock<Mutex<AddrCacheV6>> = std::sync::OnceLock::new();
+    C.get_or_init(|| Mutex::new(None))
+}
+
+/// Drop the memoised interface addresses (see the cache documentation).
+pub fn invalidate_addr_cache() {
+    if let Ok(mut g) = addr_cache_v4().lock() {
+        *g = None;
+    }
+    if let Ok(mut g) = addr_cache_v6().lock() {
+        *g = None;
+    }
+}
 
 /// Collect IPv4 addresses per device via `SIOCGIFCONF`.
 ///
@@ -78,6 +107,33 @@ pub fn dev_ifindex(dev: &str) -> Option<u32> {
 /// `modem4_ready`) was stuck at 0. SIOCGIFCONF is the kernel's actual
 /// interface-address enumeration and is what `ip addr` itself wraps.
 pub fn ipv4_addrs() -> Vec<(String, String)> {
+    if let Ok(g) = addr_cache_v4().lock() {
+        if let Some(v) = g.as_ref() {
+            return v.clone();
+        }
+    }
+    let v = ipv4_addrs_uncached();
+    if let Ok(mut g) = addr_cache_v4().lock() {
+        *g = Some(v.clone());
+    }
+    v
+}
+
+fn ipv4_addrs_uncached() -> Vec<(String, String)> {
+    // Test seam: a plain `<dev> <ip>` line list replaces the ioctl so the
+    // deterministic suite can give fake devices addresses.
+    if let Ok(path) = std::env::var("H5000M_IPV4_ADDRS") {
+        let mut out = Vec::new();
+        if let Ok(text) = fs::read_to_string(&path) {
+            for line in text.lines() {
+                let f: Vec<&str> = line.split_whitespace().collect();
+                if f.len() == 2 {
+                    out.push((f[0].to_string(), f[1].to_string()));
+                }
+            }
+        }
+        return out;
+    }
     let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
         return Vec::new();
@@ -135,6 +191,19 @@ fn parse_ifconf(buf: &[u8], filled: usize, req_size: usize) -> Vec<(String, Stri
 
 /// (dev, address, scope) tuples. `scope` 0x20 is link-local.
 pub fn ipv6_addrs() -> Vec<(String, String, u8)> {
+    if let Ok(g) = addr_cache_v6().lock() {
+        if let Some(v) = g.as_ref() {
+            return v.clone();
+        }
+    }
+    let v = ipv6_addrs_uncached();
+    if let Ok(mut g) = addr_cache_v6().lock() {
+        *g = Some(v.clone());
+    }
+    v
+}
+
+fn ipv6_addrs_uncached() -> Vec<(String, String, u8)> {
     let text = read_file(&format!("{}/if_inet6", proc_net()));
     let mut out = Vec::new();
     for line in text.lines() {
@@ -236,38 +305,6 @@ pub fn dev_has_family_address(dev: &str, family: u8) -> bool {
             .iter()
             .any(|(d, _, scope)| d == dev && *scope != 0x20),
         _ => false,
-    }
-}
-
-/// All physical netdevs present, sorted (for `list-devices`).
-pub fn list_netdevs() -> Vec<String> {
-    let mut v: Vec<String> = Vec::new();
-    if let Ok(rd) = fs::read_dir(sys_net()) {
-        for e in rd.flatten() {
-            v.push(e.file_name().to_string_lossy().to_string());
-        }
-    }
-    v.sort();
-    v
-}
-
-/// Warm standby route presence for a group+family uses route tables; helper
-/// reused by the status output to expose device state.
-pub struct DevInfo {
-    pub carrier: String,
-    pub operstate: String,
-    pub present: bool,
-}
-
-pub fn dev_info(dev: &str) -> DevInfo {
-    DevInfo {
-        carrier: match dev_carrier(dev) {
-            Some(0) => "0".into(),
-            Some(1) => "1".into(),
-            _ => "unknown".into(),
-        },
-        operstate: dev_operstate(dev),
-        present: netdev_exists(dev),
     }
 }
 

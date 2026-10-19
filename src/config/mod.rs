@@ -33,13 +33,11 @@ pub struct AppConfig {
     pub hotplug_debounce: u32,
     pub reconcile_wait: u32,
     pub switch_lock_wait: u32,
-    pub status_cache: u32,
     pub probe_targets: Vec<String>,
     pub probe_targets6: Vec<String>,
     pub gw_required: bool,
     pub dns_check: bool,
     pub tcp_check: bool,
-    pub eth_fallback: Vec<String>,
     pub wan_device: String,
     pub modem_device: String,
     pub ipv6_owner: String,
@@ -69,13 +67,11 @@ impl Default for AppConfig {
             hotplug_debounce: 2,
             reconcile_wait: 5,
             switch_lock_wait: 10,
-            status_cache: 3,
             probe_targets: vec!["223.5.5.5".into(), "119.29.29.29".into()],
             probe_targets6: vec!["2400:3200::1".into(), "2402:4e00::".into()],
             gw_required: false,
             dns_check: false,
             tcp_check: false,
-            eth_fallback: Vec::new(),
             wan_device: String::new(),
             modem_device: String::new(),
             ipv6_owner: String::new(),
@@ -115,7 +111,6 @@ impl AppConfig {
         c.hotplug_debounce = parse_u32(get("hotplug_debounce"), 2);
         c.reconcile_wait = parse_u32(get("reconcile_wait"), 5).max(1);
         c.switch_lock_wait = parse_u32(get("switch_lock_wait"), 10).max(1);
-        c.status_cache = parse_u32(get("status_cache"), 3);
         c.gw_required = bool_val(get("gw_required"), false);
         c.dns_check = bool_val(get("dns_check"), false);
         c.tcp_check = bool_val(get("tcp_check"), false);
@@ -159,11 +154,10 @@ impl AppConfig {
             c.probe_targets6 = AppConfig::default().probe_targets6;
         }
 
-        if let Some(l) = lists.get("eth_fallback") {
-            c.eth_fallback = l.clone();
-        } else {
-            c.eth_fallback = split_words(get("eth_fallback"));
-        }
+        // `eth_fallback` and `status_cache` stay UCI options read through
+        // `settings_section()`/`uci_get` by their real consumers (modem
+        // discovery and the status cache front end); they are not part of the
+        // resolved struct.
         c
     }
 }

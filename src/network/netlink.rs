@@ -285,8 +285,10 @@ pub fn route_replace_slot(
     let oif = crate::network::sysfs::dev_ifindex(dev)
         .ok_or_else(|| Error::route(format!("no ifindex for {dev}")))?;
     let flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
-    netlink_request(family, RTM_NEWROUTE, flags, Some(oif), via, Some(metric))?;
-    Ok(())
+    let out = netlink_request(family, RTM_NEWROUTE, flags, Some(oif), via, Some(metric));
+    // Our own write changed the FIB: the next route oracle must re-read it.
+    crate::network::routes::invalidate();
+    out.map(|_| ())
 }
 
 /// `route_del(family, gw, dev, metric)`.
@@ -302,8 +304,10 @@ pub fn route_del(family: Family, via: Option<IpAddr>, dev: &str, metric: u32) ->
         crate::network::sysfs::dev_ifindex(dev)
     };
     let flags = NLM_F_REQUEST | NLM_F_ACK;
-    netlink_request(family, RTM_DELROUTE, flags, oif, via, Some(metric))?;
-    Ok(())
+    let out = netlink_request(family, RTM_DELROUTE, flags, oif, via, Some(metric));
+    // Our own write changed the FIB: the next route oracle must re-read it.
+    crate::network::routes::invalidate();
+    out.map(|_| ())
 }
 
 /// Dump every route of one family and return the payload of each entry.

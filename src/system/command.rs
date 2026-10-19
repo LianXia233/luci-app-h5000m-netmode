@@ -11,7 +11,10 @@
 //!
 //! No business module ever invokes a subprocess directly.
 
+use std::collections::BTreeMap;
+use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::types::{Error, Result};
@@ -25,7 +28,38 @@ pub fn run_bounded(program: &str, args: &[&str], timeout: Duration) -> Result<St
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| Error::system(format!("spawn {program}: {e}")))?;
+    run_bounded_child(program, &mut child, timeout)
+}
 
+/// `run_bounded` with the given bytes on the child's stdin (used by
+/// `uci batch`, which reads its commands one per line from stdin).
+pub fn run_bounded_stdin(
+    program: &str,
+    args: &[&str],
+    input: &[u8],
+    timeout: Duration,
+) -> Result<String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| Error::system(format!("spawn {program}: {e}")))?;
+    if let Some(mut si) = child.stdin.take() {
+        // A wedged child that never reads must not park the caller: write in
+        // non-blocking fashion is overkill for a <1 KiB script (it fits the
+        // pipe buffer), so a plain write + drop is bounded by the pipe size.
+        let _ = si.write_all(input);
+    }
+    run_bounded_child(program, &mut child, timeout)
+}
+
+fn run_bounded_child(
+    program: &str,
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<String> {
     // Make the stdout pipe non-blocking so the read loop below can respect the
     // deadline without a separate reader thread.
     if let Some(so) = child.stdout.as_ref() {
@@ -88,6 +122,28 @@ pub fn run_bounded(program: &str, args: &[&str], timeout: Duration) -> Result<St
     }
 }
 
+// ---------------------------------------------------------------------------
+// ubus answer memoisation (one snapshot = one query per section)
+// ---------------------------------------------------------------------------
+
+type UbusCache = BTreeMap<String, Option<String>>;
+
+fn ubus_cache() -> &'static Mutex<UbusCache> {
+    static CACHE: std::sync::OnceLock<Mutex<UbusCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Drop the memoised ubus answers. `read_live_state` calls this once at the
+/// start of every snapshot: within one snapshot the same section is queried
+/// once (a snapshot build + the status DNS pass used to fork `ubus` six
+/// times for at most four distinct sections).
+pub fn invalidate_ubus_cache() {
+    match ubus_cache().lock() {
+        Ok(mut g) => g.clear(),
+        Err(e) => e.into_inner().clear(),
+    }
+}
+
 /// Flip O_NONBLOCK on a pipe fd.
 fn set_nonblocking(fd: i32, on: bool) {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
@@ -121,35 +177,55 @@ fn json_escape(s: &str) -> String {
     out
 }
 
-/// Run with the default 5s bound.
+/// `run_bounded` with the default 5s bound.
 pub fn run_bounded_default(program: &str, args: &[&str]) -> Result<String> {
     run_bounded(program, args, Duration::from_secs(5))
 }
 
+/// The `ubus` binary (test seam `H5000M_UBUS_BIN`, default `/usr/bin/ubus`).
+fn ubus_bin() -> String {
+    std::env::var("H5000M_UBUS_BIN").unwrap_or_else(|_| "/usr/bin/ubus".into())
+}
+
+/// The `ifup` binary (test seam `H5000M_IFUP_BIN`, default `/sbin/ifup`).
+fn ifup_bin() -> String {
+    std::env::var("H5000M_IFUP_BIN").unwrap_or_else(|_| "/sbin/ifup".into())
+}
+
 /// `ubus call network.interface.<sec> status` with a 1s connect-timeout hint.
-/// Returns None on any failure (the caller decides the fallback).
+/// Returns None on any failure (the caller decides the fallback). Memoised
+/// for the lifetime of one snapshot (see `invalidate_ubus_cache`).
 pub fn ubus_section_status(sec: &str) -> Option<String> {
-    run_bounded_default(
-        "ubus",
+    if let Ok(map) = ubus_cache().lock() {
+        if let Some(v) = map.get(sec) {
+            return v.clone();
+        }
+    }
+    let v = run_bounded_default(
+        &ubus_bin(),
         &["call", &format!("network.interface.{sec}"), "status"],
     )
-    .ok()
+    .ok();
+    if let Ok(mut map) = ubus_cache().lock() {
+        map.insert(sec.to_string(), v.clone());
+    }
+    v
 }
 
 /// `ubus call network.wireless status`.
 pub fn ubus_wireless_status() -> Option<String> {
-    run_bounded_default("ubus", &["call", "network.wireless", "status"]).ok()
+    run_bounded_default(&ubus_bin(), &["call", "network.wireless", "status"]).ok()
 }
 
 /// `ubus call iwinfo assoclist {"device": "<dev>"}`.
 pub fn ubus_iwinfo_assoclist(dev: &str) -> Option<String> {
     let payload = format!("{{\"device\":\"{}\"}}", json_escape(dev));
-    run_bounded_default("ubus", &["call", "iwinfo", "assoclist", &payload]).ok()
+    run_bounded_default(&ubus_bin(), &["call", "iwinfo", "assoclist", &payload]).ok()
 }
 
 /// `ifup <sec>` – bounded; never blocks a switch beyond the timeout.
 pub fn ifup_section(sec: &str) -> Result<()> {
-    run_bounded_default("ifup", &[sec]).map(|_| ())
+    run_bounded_default(&ifup_bin(), &[sec]).map(|_| ())
 }
 
 /// `mt5700m-manager sync` (vendor integration after a committed switch).
