@@ -4,7 +4,7 @@
 
 ## [v1.9.2] — 2026-10-19
 
-修复实机"接口在通、页面报链路离线"的误报，接入 v1.9.x 后端的运行面证据字段，并新增有线兜底（`eth-candidates` / `eth-fallback`）管理面板。
+修复实机"接口在通、页面报链路离线"的误报，接入 v1.9.x 后端的运行面证据字段。曾短暂加入的有线兜底（`eth-candidates` / `eth-fallback`）管理面板按用户要求整体移除（UCI 侧 `eth_fallback` 选项仍由后端自治，前端不再读写）。
 
 ### 修复
 
@@ -12,15 +12,18 @@
 
 ### 新增
 
-- **有线兜底面板**：读取 `eth-candidates` 候选 section 池渲染复选框，当前列表与 status 的 `eth_fallback` 字段同源回显；保存走 `eth-fallback set`（空列表落库为空 option，等价于全部交由后端自动判定）。面板附语义说明：标记的 section 不参与模组网关接口自动发现。
 - **接口映射来源徽标**：接口绑定下拉框旁显示 `自动`/`手动`（来自 `wan_device_source`/`modem_device_source`），说明当前值是后端自动判定还是用户指定。
 - **meta 栏如实化**：静态文案"双栈对称原则：强制 IPv6 伴随 IPv4"与后端实际行为不符（strict_dual_stack=0 时允许单栈切换），改为按 `strict_dual_stack` 显示"严格双栈/宽松单栈"；健康探测一并显示后端通过阈值（如 `2/3`）。
 
+### 移除
+
+- **有线兜底出口面板**：`loadEthCandidates()` / `ethFallbackPanel()` / `applyEthFallback()` 及配套 CSS、renderKey 轮询项全部删除；`eth-candidates` / `eth-fallback get|set` 仍由后端 CLI 提供，仅前端不再暴露。
+
 ### 测试
 
-- `tests/svg_audit.js` 字段契约扩展：`group_online_*`、`addr4_/addr6_*`、`*_device_source` 走 computed key 展开；新增守卫"兜底面板必须读 `eth-candidates`、写 `eth-fallback set`"。
+- `tests/svg_audit.js` 字段契约扩展：`group_online_*`、`addr4_/addr6_*`、`*_device_source` 走 computed key 展开。
 - `tests/test_exit_card.js` 149 项断言零改动通过（新增证据字段在测试基线中缺省，不改变既有分支）。
-- `tools/sync_po.py` 重新生成目录（172 条），`check_catalog` 与 `msgfmt --check` 通过。
+- `tools/sync_po.py` 重新生成目录，`check_catalog` 与 `msgfmt --check` 通过。
 
 ### 变更文件
 

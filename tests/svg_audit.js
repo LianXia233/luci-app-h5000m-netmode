@@ -252,8 +252,6 @@ report(src.indexOf("[ 'align' ]") > -1, 'split repair calls the `align` command'
 report(/data\.split_detail/.test(src), 'the split alert surfaces split_detail');
 report(src.indexOf('reconcileExits') < 0,
 	'the retired synchronous `reconcile` UI action stays gone');
-report(src.indexOf("'eth-candidates'") > -1 && src.indexOf("'eth-fallback', 'set'") > -1,
-	'the wired-fallback picker reads candidates and writes eth-fallback set');
 
 const neverRead = [ ...emitted ].filter(f => !consumed.has(f)).sort();
 console.log('emitted but not read by the view (' + neverRead.length + '): ' + (neverRead.join(', ') || '(none)'));

@@ -294,25 +294,6 @@ return view.extend({
 			'.h5net-switch-step.failed{background:var(--h5-red-soft);color:var(--h5-red)}',
 			'.h5net-switch-actions{margin-top:10px;display:flex;justify-content:flex-end}',
 
-			/* ================= 有线兜底 (eth-fallback) ================= */
-			'.h5net-fallback{',
-				'margin-top:14px;padding:16px 20px;border-radius:16px;',
-				'background:var(--h5-card-bg);border:1px solid var(--h5-card-border);box-shadow:var(--h5-card-shadow);',
-			'}',
-			'.h5net-fallback-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}',
-			'.h5net-fallback-head h3{margin:0;font-size:14.5px;font-weight:700;color:var(--h5-text-main)}',
-			'.h5net-fallback-cur{font-size:12px;color:var(--h5-text-sub);font-family:ui-monospace,Menlo,Consolas,monospace}',
-			'.h5net-fallback-desc{margin:8px 0 10px;font-size:12px;color:var(--h5-text-muted);line-height:1.6}',
-			'.h5net-eth-list{display:flex;flex-wrap:wrap;gap:8px}',
-			'.h5net-eth-item{',
-				'display:inline-flex;align-items:center;gap:7px;padding:6px 12px;',
-				'border:1px solid var(--h5-card-border);border-radius:8px;font-size:12.5px;font-weight:600;',
-				'color:var(--h5-text-sub);cursor:pointer;user-select:none;transition:all .18s;',
-			'}',
-			'.h5net-eth-item input{margin:0;accent-color:var(--h5-blue)}',
-			'.h5net-eth-item:has(input:checked){border-color:var(--h5-blue);background:var(--h5-blue-soft);color:var(--h5-blue)}',
-			'.h5net-fallback-actions{margin-top:12px;display:flex;justify-content:flex-end}',
-
 			/* ================= 设备映射来源徽标 ================= */
 			'.h5net-dev-src{',
 				'font-size:11px;padding:2px 8px;border-radius:6px;white-space:nowrap;',
@@ -1456,118 +1437,6 @@ return view.extend({
 	},
 
 
-	// ------------------------------------------------------------------
-	// 有线兜底 (eth-fallback / eth-candidates)
-	//
-	// 后端 v1.9.x 暴露的两个命令：
-	//   * eth-candidates — 可 designated 的 netifd section 池（除 wan/wan6/
-	//     lan/loopback 外的全部接口 section，如 modem0 / modem0_6）；
-	//   * eth-fallback get|set — 标记为"有线兜底"的 section 列表，列表中的
-	//     section 不参与模组网关接口的自动发现（discover_modem 会跳过它们）。
-	// 当前已保存列表与 status 的 eth_fallback 字段同源（空格分隔），前端
-	// 只渲染选择器并透传 set，不自行猜测 section 语义。
-	// ------------------------------------------------------------------
-	loadEthCandidates: function() {
-		return this.execStatus([ 'eth-candidates' ]).then(L.bind(function(res) {
-			this.ethCandidates = (res.code === 0)
-				? (res.stdout || '').trim().split(/\s+/).filter(Boolean)
-				: [];
-			this.ethCandidatesError = res.code !== 0;
-			this.repaint();
-		}, this)).catch(L.bind(function() {
-			this.ethCandidates = [];
-			this.ethCandidatesError = true;
-			this.repaint();
-		}, this));
-	},
-
-	onEthToggle: function(section, ev) {
-		ev.stopPropagation();
-		var set = this.pendingEthSections;
-		var i = set.indexOf(section);
-		if (ev.target.checked) {
-			if (i < 0) set.push(section);
-		}
-		else if (i > -1) {
-			set.splice(i, 1);
-		}
-		this.ethDirty = true;
-		this.repaint();
-	},
-
-	applyEthFallback: function(ev) {
-		if (ev) { ev.preventDefault(); ev.stopPropagation(); }
-		if (this.applying || this.switchRunning()) return;
-
-		var self = this;
-		var sections = this.pendingEthSections.slice().sort();
-		// 后端要求 set 后至少一个参数位；空列表传空串参数，落库为空 option，
-		// 等价于"不标记任何有线兜底"。
-		var args = [ 'eth-fallback', 'set' ].concat(sections.length ? sections : [ '' ]);
-
-		this.applying = true;
-		this.repaint();
-
-		return this.execStatus(args).then(function(res) {
-			self.applying = false;
-			if (res.code !== 0) {
-				ui.addNotification(null, E('p',
-					_('有线兜底列表保存失败（返回码 %d）。').format(res.code)), 'danger');
-				self.repaint();
-				return;
-			}
-			ui.addNotification(null, E('p', _('有线兜底出口列表已更新。')));
-			self.ethDirty = false;
-			return self.refreshStatus();
-		});
-	},
-
-	ethFallbackPanel: function(data) {
-		var candidates = this.ethCandidates || [];
-		var selected = this.pendingEthSections || [];
-		var dirty = this.ethDirty;
-
-		var body;
-		if (this.ethCandidatesError)
-			body = E('span', { 'class': 'h5net-device-empty' }, _('后端未响应，兜底候选列表不可用'));
-		else if (!candidates.length)
-			body = E('span', { 'class': 'h5net-device-empty' }, _('后端未报告任何可作为有线兜底的 section'));
-		else {
-			body = E('div', { 'class': 'h5net-eth-list' }, candidates.map(L.bind(function(sec) {
-				return E('label', { 'class': 'h5net-eth-item' }, [
-					E('input', {
-						'type': 'checkbox',
-						'checked': selected.indexOf(sec) > -1 ? 'checked' : null,
-						'change': L.bind(this.onEthToggle, this, sec),
-						'click': function(ev) { ev.stopPropagation(); }
-					}),
-					E('span', {}, sec)
-				]);
-			}, this)));
-		}
-
-		var current = String(data.eth_fallback || '').trim().split(/\s+/).filter(Boolean);
-		var desc = _('勾选的接口 section 将标记为“有线兜底”，不再参与 5G 模组网关接口的自动发现；未被标记的候选中，排序最前的会被识别为模组接口。留空表示全部交给后端自动判定。');
-
-		return E('div', { 'class': 'h5net-fallback' }, [
-			E('div', { 'class': 'h5net-fallback-head' }, [
-				E('h3', {}, _('有线兜底出口')),
-				E('span', { 'class': 'h5net-fallback-cur' },
-					current.length ? _('当前：%s').format(current.join(' ')) : _('当前：未设置'))
-			]),
-			E('p', { 'class': 'h5net-fallback-desc' }, desc),
-			body,
-			E('div', { 'class': 'h5net-fallback-actions' }, [
-				E('button', {
-					'class': 'cbi-button cbi-button-apply',
-					'type': 'button',
-					'disabled': (!dirty || this.applying || this.switchRunning()) ? 'disabled' : null,
-					'click': L.bind(this.applyEthFallback, this)
-				}, dirty ? _('保存兜底列表') : _('已保存'))
-			])
-		]);
-	},
-
 	statusPanel: function(data) {
 		data.mode = data.mode || 'wan_first';
 		data.active4 = data.active4 || 'none';
@@ -1615,7 +1484,6 @@ return view.extend({
 				this.routeCard('wan', data),
 				this.routeCard('modem', data)
 			]),
-			this.ethFallbackPanel(data),
 			E('div', { 'class': 'h5net-foot' }, [
 				this.metaBar(data),
 				E('div', { 'class': 'h5net-buttons' }, buttons)
@@ -1637,7 +1505,7 @@ return view.extend({
 			data.group_online_wan, data.group_online_modem,
 			data.addr4_wan, data.addr6_wan, data.addr4_modem, data.addr6_modem,
 			data.wan_device_source, data.modem_device_source,
-			data.strict_dual_stack, data.probe_ok_threshold, data.eth_fallback,
+			data.strict_dual_stack, data.probe_ok_threshold,
 			data.switch_state, data.switch_busy, data.switch_target, data.switch_target_mode,
 			data.switch_reason, data.switch_message, data.switch_elapsed, data.switch_phases,
 			this.switchDismissed,
@@ -1647,10 +1515,6 @@ return view.extend({
 			(this.availableDevices || []).join(','),
 			this.applying ? '1' : '0',
 			this.deviceDirty ? '1' : '0',
-			this.ethDirty ? '1' : '0',
-			(this.pendingEthSections || []).join(','),
-			(this.ethCandidates || []).join(','),
-			this.ethCandidatesError ? '1' : '0'
 		].join('\u0001');
 	},
 
@@ -1691,11 +1555,6 @@ return view.extend({
 					var dm = this.deviceMap || {};
 					this.pendingDeviceMap = { wan: dm.wan || '', modem: dm.modem || '' };
 				}
-				// 兜底列表与 status 的 eth_fallback 字段同源：未被本地改动时
-				// 跟随后端回读刷新（后端 set 之后这里会拿到新值）。
-				if (!this.ethDirty)
-					this.pendingEthSections = String(this.liveData.eth_fallback || '')
-						.trim().split(/\s+/).filter(Boolean);
 			}
 			this.statusReady = true;
 			this.repaint(true);
@@ -1764,21 +1623,13 @@ return view.extend({
 		this.switchDismissed = null;
 		this.renderedKey = this.renderKey(this.liveData);
 
-		this.ethCandidates = null;
-		this.ethCandidatesError = false;
-		this.ethDirty = false;
-		this.pendingEthSections = String(this.liveData.eth_fallback || '')
-			.trim().split(/\s+/).filter(Boolean);
-
-		this.pollInterval = this.idlePollInterval();
 		this.pollHandle = poll.add(L.bind(this.scheduledRefresh, this), this.pollInterval);
 		this.bindVisibilityRefresh();
 
-		// 骨架屏先上屏，数据随后到。三条请求并行：状态决定主卡片，设备映射只影响
+		// 骨架屏先上屏，数据随后到。两条请求并行：状态决定主卡片，设备映射只影响
 		// 接口下拉框，兜底候选只影响兜底面板，谁先回来谁先刷新，互不等待。
 		this.refreshStatus();
 		this.loadDeviceMapOnce();
-		this.loadEthCandidates();
 
 		// 第一次进页面时数据还没回来：先给骨架屏，等 refreshStatus() 拿到数据后
 		// 由 repaint() 整块换成正式面板。后续轮询不会再走这个分支。
