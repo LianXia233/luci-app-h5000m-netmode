@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust toolchain (stable + aarch64 musl target)
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -107,7 +107,7 @@ jobs:
           done
       - name: Upload the binaries built from src/
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: h5000m-netmode-aarch64-musl
           path: dist-artifacts/
@@ -116,7 +116,7 @@ jobs:
         # and it is not reachable from the API. Keep the fmt / clippy / test
         # output as an artefact so a red run can be diagnosed without a browser.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-logs
           path: ci-logs/
@@ -178,7 +178,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
       # rustfmt only: no target, no clippy component, no download of the
@@ -186,7 +186,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         # Absent when the cross-compile step never ran (a red run above), which
         # must not cost us the log publication at the end of this job.
         continue-on-error: true
@@ -224,7 +224,7 @@ jobs:
             exit 0
           }
       - name: Download the check logs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: ci-logs
