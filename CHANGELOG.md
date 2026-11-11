@@ -2,6 +2,21 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布] — 2026-11-12
+
+### 变更
+
+- **CI 全量升级**：`.github/workflows/ci.yml`、`release.yml` 共 8 处 `uses:` 升级 ——
+  `actions/checkout@v4` → `v7`、`actions/upload-artifact@v4` → `v7`、
+  `actions/download-artifact@v4` → `v8`。
+- GitHub 已于 2026-09-23 从托管 runner 移除 Node 20 运行时，仍声明 `node20` 的 action 会被强制跑在 Node 24 上并打印 `Node.js 20 is deprecated` 告警，属于未验证状态；本次按各 action 的 `action.yml` 逐一核对 `runs.using` 后统一升级。
+- **仅改 CI 配置**：项目源码、`node-version` / `python-version` / `go-version` 等工具链版本、产物命名与 Release 流程均未改动。告警指的是 action 自身声明的运行时，不是项目构建所用的 Node 版本。
+  交叉编译目标、日志/产物下载路径与校验脚本均未改动。
+
+### 测试
+
+- 升级后全仓复扫 59 个工作流/Action 文件：`node20` / `node16` / `node12` 引用残留为 0，所有 YAML 均可解析。
+
 ## [v1.9.2] — 2026-10-19
 
 修复实机"接口在通、页面报链路离线"的误报，接入 v1.9.x 后端的运行面证据字段。曾短暂加入的有线兜底（`eth-candidates` / `eth-fallback`）管理面板按用户要求整体移除（UCI 侧 `eth_fallback` 选项仍由后端自治，前端不再读写）。
