@@ -2,6 +2,31 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.9.1] — 2026-11-19
+
+新增插件总开关（全局启用/停用），并纳入此前 v1.9.0-r5 的断网修复，作为正式版发布。
+
+### 新增
+
+- **全局开关 `settings.enabled`（默认 1）**：LuCI 页面底部新增「插件：已开启/已关闭」总开关按钮，点击调用后端 `set-enabled 0|1`，UCI 配置与状态保存一致。关闭后插件不执行任何路由/策略操作：dispatch 拒绝全部变更类命令（退出码 65），`reconcile_body()` / `apply_policy()` 双重短路，init.d 不注册看门狗、hotplug 脚本直接跳过；只读的 `status` 仍可用并上报 `enabled=0`。
+- **关闭即恢复默认路由**：从开启切到关闭时，`set-enabled 0` 一次性把所有被停靠的 `defaultroute=0` 恢复为 1，并对「已有地址但无默认路由」的段触发 `ifup`，确保关闭插件不会导致断网。开启后正常监管在下一个 watch tick / 热插拔 / `apply` 自动恢复。
+- **向后兼容**：存量配置缺少 `enabled` 选项时默认视为开启；`uci-defaults` 仅在缺项时补默认值，不覆盖用户设定。
+- `status` 新增 `enabled` 字段；`watcher` 在总开关关闭时上报 `off`。
+
+### 测试
+
+- 新增 `disabled_plugin_never_mutates_routes`、`missing_enabled_option_defaults_to_on`：验证关闭态不写任何路由策略、变更命令返回 65、status 上报 enabled，以及缺省配置默认开启。
+- `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（39 单元 + 19 集成 + 4 netns）、JS/SVG/exit-card（149 项）、catalogue 校验全部通过。
+
+### 变更文件
+
+- 后端：`src/config/mod.rs`、`src/reconcile.rs`、`src/rpc.rs`、`src/switch/transaction.rs`、`src/status.rs`
+- 前端：`htdocs/luci-static/resources/view/h5000m/netmode.js`、`po/zh_Hans/h5000m-netmode.po`
+- 系统：`root/etc/config/h5000m_netmode`、`root/etc/uci-defaults/90-h5000m-netmode`、`root/etc/init.d/h5000m-netmode`、`root/etc/hotplug.d/iface/95-h5000m-netmode`
+- 测试：`tests/backend_logic.rs`
+- 产物：`root/usr/sbin/h5000m-netmode{,-status}`（aarch64 musl 静态重建）
+- 打包：`Makefile`（`PKG_VERSION` 1.9.0→1.9.1，`PKG_RELEASE` 重置 1）、`Cargo.toml`
+
 ## [v1.9.0-r5] — 2026-11-19
 
 修复 issue #4 的现场复发：模组配置段仍在、但设备并未建立时（如 fm350 `enabled=0`，`/etc/config/network` 里残留 `modem` 接口段，却没有对应的 netdev/地址/路由），r4 的 `group_complete()` 仍把「UCI section 存在」当作出口可用，看门狗据此把出口救援到这个不存在的模组，并停靠掉有线 WAN 唯一的默认路由（`network.wan.defaultroute=0`），导致整机及下挂设备全部无法上网。

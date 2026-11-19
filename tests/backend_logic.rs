@@ -766,3 +766,63 @@ fn dead_modem_section_never_parks_the_only_wan_exit() {
     assert_eq!(s.status_field(&out, "group_online_modem"), "0");
     s.cleanup();
 }
+
+// ---------------------------------------------------------------------------
+// 18. global on/off switch
+// ---------------------------------------------------------------------------
+
+/// With the global switch off, no automatic path may mutate routes or UCI
+/// policy - not reconcile, not even a forced align. Only status stays readable
+/// and reports enabled=0.
+#[test]
+fn disabled_plugin_never_mutates_routes() {
+    let _g = file_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let s = Scenario::new("disabled-global");
+    both_up_scenario(&s);
+    s.settings(&[("enabled", "0")]);
+
+    let rc = s.run(&["reconcile"]);
+    assert_eq!(
+        rc, 65,
+        "mutating commands must be refused with the disabled exit code"
+    );
+    let ops = s.uci_ops();
+    assert!(
+        !ops.iter()
+            .any(|l| l.contains("defaultroute") || l.contains("metric")),
+        "a disabled plugin must not write any route policy: {ops:?}"
+    );
+
+    // Status is still available while disabled and reports the switch.
+    let out = s.status();
+    assert_eq!(s.status_field(&out, "enabled"), "0");
+    assert_eq!(s.status_field(&out, "watcher"), "off");
+    s.cleanup();
+}
+
+/// A missing `enabled` option means enabled: an existing install upgraded to
+/// this version keeps working without any config migration.
+#[test]
+fn missing_enabled_option_defaults_to_on() {
+    let _g = file_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let s = Scenario::new("enabled-default");
+    both_up_scenario(&s);
+    // settings() always writes an `enabled` line, so drop it to simulate a
+    // legacy config written before the switch existed.
+    let cfg_path = s.path("config/h5000m_netmode");
+    let cfg = std::fs::read_to_string(&cfg_path).unwrap();
+    let legacy: String = cfg
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("option enabled"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&cfg_path, legacy + "\n").unwrap();
+
+    let out = s.status();
+    assert_eq!(
+        s.status_field(&out, "enabled"),
+        "1",
+        "legacy installs without `enabled` must default to on"
+    );
+    s.cleanup();
+}

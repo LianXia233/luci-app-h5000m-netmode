@@ -653,6 +653,15 @@ pub fn apply_uci_lines(lines: &[String], config: &str) -> Result<()> {
 /// disables it, and keeps IPv6 auto=1 everywhere. All changed options land in
 /// ONE `uci batch` call.
 pub fn apply_policy(mode: Mode, snap: &LiveSnapshot) -> Result<()> {
+    // Callers with a loaded config check `enabled` first; this guard also
+    // protects the first-install `apply` path, which has no config object.
+    // A missing option means enabled (legacy installs), so only an explicit
+    // false value blocks the write.
+    let raw = crate::config::uci::uci_get("h5000m_netmode.settings.enabled");
+    if matches!(raw.as_str(), "0" | "false" | "no" | "off") {
+        log::log_info("apply", "disabled by global switch; no policy written");
+        return Ok(());
+    }
     let mut lines: Vec<String> = Vec::new();
     for g in Group::ALL {
         let metric = policy_group_metric(mode, g).to_string();

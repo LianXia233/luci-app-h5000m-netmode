@@ -27,6 +27,14 @@ esac
 
 [ -n "$INTERFACE" ] || exit 0
 
+# Global on/off switch: skip entirely while disabled, so no worker is forked
+# and no hotplug state is written. The backend `notify` path is guarded too;
+# this early exit avoids even that cost and keeps the log quiet.
+_enabled="$(uci -q get h5000m_netmode.settings.enabled 2>/dev/null)"
+case "$_enabled" in
+	0|off|false|no) exit 0 ;;
+esac
+
 # Detached: the hotplug helper must not hold netifd waiting on a debounce
 # window, and its stdout must not keep an rpcd pipe open. stderr carries the
 # [netmode]-prefixed log lines and is pushed into syslog via logger, so a

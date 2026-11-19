@@ -7,6 +7,11 @@
 uci -q get h5000m_netmode.settings >/dev/null 2>&1 || \
 	uci -q set h5000m_netmode.settings='settings'
 
+# Global on/off switch: default enabled. Only fill a missing value so an
+# operator's deliberate 0 survives a reinstall/upgrade.
+uci -q get h5000m_netmode.settings.enabled >/dev/null 2>&1 || \
+	uci -q set h5000m_netmode.settings.enabled='1'
+
 # The watchdog is opt-out: settings.watcher=0 stops the service from registering.
 uci -q get h5000m_netmode.settings.watcher >/dev/null 2>&1 || \
 	uci -q set h5000m_netmode.settings.watcher='1'

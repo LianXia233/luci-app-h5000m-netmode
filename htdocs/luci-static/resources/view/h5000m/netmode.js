@@ -250,8 +250,10 @@ return view.extend({
 			'.h5net-meta{display:flex;flex-wrap:wrap;gap:14px;color:var(--h5-text-sub);font-size:12px}',
 			'.h5net-meta b{font-weight:700;color:var(--h5-text-main)}',
 			'.h5net-meta .off{color:var(--h5-amber)}',
-			'.h5net-buttons{display:flex;gap:10px;flex-shrink:0}',
+			'.h5net-buttons{display:flex;gap:10px;flex-shrink:0;flex-wrap:wrap}',
 			'.h5net-buttons .cbi-button{min-width:110px;padding:8px 16px;border-radius:8px;font-weight:600}',
+			'.h5net-switch-on{background:var(--h5-green,#16a34a);color:#fff;border-color:transparent}',
+			'.h5net-switch-off{background:var(--h5-amber);color:#fff;border-color:transparent}',
 
 			/* ================= 动效：只保留 hero 图标需要的少量关键帧 ================= */
 			'@keyframes h5-beacon{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.4;transform:scale(1.2)}}',
@@ -1436,6 +1438,34 @@ return view.extend({
 		}, this));
 	},
 
+	// ------------------------------------------------------------------
+	// 插件总开关
+	//
+	// 通过后端 `set-enabled <0|1>` 落盘：关闭时后端会停止所有路由/策略操作，
+	// 并把此前被停靠的 defaultroute 恢复为 1，确保关掉插件不会导致断网。
+	// 这里只负责下发指令并刷新状态，不做任何 UCI 直写，保持单一写入路径。
+	// ------------------------------------------------------------------
+	toggleEnabled: function() {
+		if (this.guardReady() || this.applying || this.switchRunning()) return;
+		var target = (this.liveData && this.liveData.enabled === '1') ? '0' : '1';
+		this.applying = true;
+		this.repaint();
+
+		return this.execStatus([ 'set-enabled', target ]).then(L.bind(function(res) {
+			if (res.code !== 0) {
+				ui.addNotification(null, E('p',
+					_('切换插件开关失败（返回码 %d）').format(res.code)), 'danger');
+				return null;
+			}
+			ui.addNotification(null, E('p', target === '1'
+				? _('插件已开启，出口监管恢复工作。')
+				: _('插件已关闭，路由策略交还系统，默认路由已恢复。')));
+			return null;
+		}, this)).then(L.bind(function() {
+			this.applying = false;
+			return this.refreshStatus();
+		}, this));
+	},
 
 	statusPanel: function(data) {
 		data.mode = data.mode || 'wan_first';
@@ -1455,7 +1485,15 @@ return view.extend({
 		var dirty = changed || deviceChanged;
 
 		var loading = this.guardReady();
+		var enabled = data.enabled === '1';
 		var buttons = [];
+		// 总开关始终可用（disabled 时它正是重新开启的入口），用醒目配色区分状态。
+		buttons.push(E('button', {
+			'class': 'cbi-button ' + (enabled ? 'h5net-switch-on' : 'h5net-switch-off'),
+			'title': _('统一开启或关闭本插件；关闭时停止所有路由监管并恢复默认路由'),
+			'disabled': (loading || this.applying) ? 'disabled' : null,
+			'click': L.bind(this.toggleEnabled, this)
+		}, enabled ? _('插件：已开启（点击关闭）') : _('插件：已关闭（点击开启）')));
 		if (split) {
 			buttons.push(E('button', {
 				'class': 'cbi-button cbi-button-action',
@@ -1493,7 +1531,7 @@ return view.extend({
 
 	renderKey: function(data) {
 		return [
-			data.mode, data.split, data.active4, data.active6,
+			data.enabled, data.mode, data.split, data.active4, data.active6,
 			data.egress4, data.egress6,
 			data.watcher, data.watch_interval, data.health_check,
 			data.wan_health, data.modem_health, data.daed_exit_state,

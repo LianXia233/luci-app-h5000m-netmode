@@ -518,6 +518,15 @@ pub fn reconcile_align(cfg: &AppConfig, snap: &LiveSnapshot, force: bool) -> Res
 
 /// `reconcile_body`: one serialised evaluation.
 pub fn reconcile_body(cfg: &AppConfig, snap: &LiveSnapshot, force: bool) -> Result<()> {
+    // Global kill switch: when disabled the plugin must not touch routes,
+    // health state or UCI policy at all. This is the single decision point
+    // shared by watchdog, hotplug, align and apply paths, so one check here
+    // cuts every automatic mutation. `force` cannot override it: a user who
+    // turned the plugin off must stay off until they explicitly turn it on.
+    if !cfg.enabled {
+        log::log_info("reconcile", "disabled by global switch; no action");
+        return Ok(());
+    }
     if crate::state::switch_in_progress() {
         log::log_info("reconcile", "skipped: switch in progress");
         return Ok(());

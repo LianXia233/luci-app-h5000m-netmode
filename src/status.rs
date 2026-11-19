@@ -109,6 +109,7 @@ pub fn render_status(cfg: &AppConfig, snap: &LiveSnapshot) -> String {
 
     let mut out = String::new();
 
+    line(&mut out, "enabled", bool1(cfg.enabled));
     line(&mut out, "mode", cfg.mode.as_str());
     line(&mut out, "ipv6_policy", "follow_active_group");
     line(
@@ -406,7 +407,7 @@ pub fn render_status(cfg: &AppConfig, snap: &LiveSnapshot) -> String {
     line(
         &mut out,
         "watcher",
-        if state::proc_alive(pid_of("watch")) {
+        if cfg.enabled && state::proc_alive(pid_of("watch")) {
             "on"
         } else {
             "off"

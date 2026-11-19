@@ -23,10 +23,20 @@ STOP=10
 USE_PROCD=1
 
 start_service() {
-	local enabled
+	local global_enabled watcher
 
-	enabled="$(uci -q get h5000m_netmode.settings.watcher 2>/dev/null)"
-	case "$enabled" in
+	# Global on/off switch. When off, do not register a watchdog instance at
+	# all. The Rust dispatch/reconcile guards cover any path that bypasses
+	# procd (hotplug, manual commands); this check avoids a pointless process.
+	global_enabled="$(uci -q get h5000m_netmode.settings.enabled 2>/dev/null)"
+	case "$global_enabled" in
+		0|off|false|no) return 0 ;;
+	esac
+
+	# Legacy per-feature switch retained: watcher=0 stops only the periodic
+	# watchdog without disabling the plugin as a whole.
+	watcher="$(uci -q get h5000m_netmode.settings.watcher 2>/dev/null)"
+	case "$watcher" in
 		0|off|false|no) return 0 ;;
 	esac
 

@@ -577,6 +577,91 @@ fn cmd_set_device_map(cfg: &AppConfig, role: &str, dev: &str) -> i32 {
     0
 }
 
+/// `set-enabled <0|1>`: flip the global on/off switch.
+///
+/// Disabling is not a passive stop: the plugin may have parked a standby
+/// exit's `defaultroute` in UCI, and that value survives a reboot. Leaving it
+/// behind means that once the active exit fails, netifd has no fallback
+/// default route to install and the whole box (plus its LAN clients) goes
+/// offline. So on the 1 -> 0 edge we restore every participating section's
+/// `defaultroute=1` and nudge netifd for any section that already holds an
+/// address but lost its route. The whole flip is serialised on the writer
+/// lock. Enabling only persists the flag; normal policy/reconcile resumes on
+/// the next watch tick, hotplug event or explicit `apply`.
+fn cmd_set_enabled(value: &str) -> i32 {
+    let want = match value {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        _ => {
+            eprintln!("Usage: h5000m-netmode set-enabled {{0|1}}");
+            return 64;
+        }
+    };
+    if !state::acquire_lock(5) {
+        eprintln!("another exit policy update is already running");
+        return 2;
+    }
+
+    let was = AppConfig::load().enabled;
+    if uci::uci_set_commit(
+        "h5000m_netmode",
+        "h5000m_netmode.settings.enabled",
+        if want { "1" } else { "0" },
+    )
+    .is_err()
+    {
+        state::release_lock();
+        eprintln!("failed to persist enabled state");
+        return 1;
+    }
+
+    let mut rc = 0;
+    if was && !want {
+        // One-shot un-park of every section this plugin may have touched.
+        let snap = network::read_live_state();
+        let mut reopened: Vec<(crate::types::Group, crate::types::Family, String)> = Vec::new();
+        for g in crate::types::Group::ALL {
+            for fam in crate::types::Family::ALL {
+                let sec = snap.group_sec(g, fam);
+                if sec.is_empty() || !uci::uci_has_key(&format!("network.{sec}")) {
+                    continue;
+                }
+                let line =
+                    crate::switch::transaction::network_option_setline(sec, "defaultroute", "1");
+                if let Some(line) = line {
+                    if crate::switch::transaction::apply_uci_lines(&[line], "network").is_err() {
+                        rc = 1;
+                    }
+                    reopened.push((g, fam, sec.to_string()));
+                }
+            }
+        }
+        // Ask netifd to re-install routes for sections that already hold an
+        // address but currently have no default route of that family.
+        let mut reloaded = false;
+        for (g, fam, sec) in &reopened {
+            if network::group_family_has_address(&snap, *g, *fam)
+                && snap.group_route(*g, *fam).is_none()
+            {
+                let _ = crate::system::command::ifup_section(sec);
+                reloaded = true;
+            }
+        }
+        if reloaded {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+        let _ = state::state_write(&[("enabled_cleanup", "1")]);
+        log::log_info(
+            "config",
+            "plugin disabled; restored all parked default routes to 1",
+        );
+    }
+
+    state::release_lock();
+    println!("enabled={}", if want { "1" } else { "0" });
+    rc
+}
+
 /// `health`: one forced probe round; prints the cached verdicts.
 fn cmd_health(cfg: &AppConfig) -> i32 {
     let snap = network::read_live_state();
@@ -621,6 +706,35 @@ fn cmd_reconcile(cfg: &AppConfig) -> i32 {
 pub fn dispatch(args: &[String]) -> i32 {
     let cfg = AppConfig::load();
     let action = args.first().map(|s| s.as_str()).unwrap_or("");
+
+    // Read-only commands stay available while disabled so the UI can still
+    // show status and re-enable. `set-enabled` is the one mutating command
+    // that must work while off (it is how the plugin is turned back on); it
+    // handles its own locking and cleanup. Everything else that could move a
+    // route or rewrite UCI policy is refused with a distinct exit code (65).
+    let read_only = matches!(
+        action,
+        "now-cs"
+            | "status"
+            | "iface-role"
+            | "list-devices"
+            | "get-device-map"
+            | "eth-candidates"
+            | "set-enabled"
+    );
+    let eth_fallback_read =
+        action == "eth-fallback" && args.get(1).map(|s| s.as_str()).unwrap_or("") != "set";
+    if !cfg.enabled && !read_only && !eth_fallback_read {
+        eprintln!("plugin disabled (h5000m_netmode.settings.enabled=0); enable it first");
+        return 65;
+    }
+
+    // set-enabled <0|1>: the global on/off switch. Disabling also performs a
+    // one-shot cleanup that restores every parked `defaultroute=0` to 1, so
+    // turning the plugin off can never leave the box without a default route.
+    if action == "set-enabled" {
+        return cmd_set_enabled(args.get(1).map(|s| s.as_str()).unwrap_or(""));
+    }
 
     match action {
         "now-cs" => {

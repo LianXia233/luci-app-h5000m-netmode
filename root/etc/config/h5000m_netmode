@@ -1,4 +1,6 @@
 config settings 'settings'
+	# 插件总开关：设为 0 时插件不执行任何路由/策略操作，并自动恢复被停靠的默认路由
+	option enabled '1'
 	option mode 'wan_first'
 	option watcher '1'
 	option watch_interval '10'

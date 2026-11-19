@@ -13,6 +13,9 @@ use crate::types::{num_or, parse_u32, Mode};
 /// Fully resolved settings for `h5000m_netmode.settings`.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
+    /// Global on/off switch. When false, no mutating entry point may touch
+    /// routes or UCI policy; enabling it restores normal operation.
+    pub enabled: bool,
     pub mode: Mode,
     pub watcher: bool,
     pub watch_interval: u32,
@@ -47,6 +50,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         AppConfig {
+            enabled: true,
             mode: Mode::WanFirst,
             watcher: true,
             watch_interval: 10,
@@ -91,6 +95,9 @@ impl AppConfig {
         let mut c = AppConfig::default();
 
         let get = |k: &str| map.get(k).map(|s| s.as_str()).unwrap_or("");
+        // Missing option means enabled: legacy installs without `enabled`
+        // keep their previous behaviour. bool_val maps "" to the default.
+        c.enabled = bool_val(get("enabled"), true);
         c.mode = Mode::parse(get("mode")).unwrap_or(Mode::WanFirst);
         c.watcher = bool_val(get("watcher"), true);
         c.watch_interval = clamp(num_or(get("watch_interval"), 10), 3, 3600);
@@ -199,6 +206,7 @@ mod tests {
     #[test]
     fn defaults_are_documented() {
         let c = AppConfig::from_section(&BTreeMap::new(), &BTreeMap::new());
+        assert!(c.enabled, "a missing `enabled` option must mean enabled");
         assert_eq!(c.mode, Mode::WanFirst);
         assert_eq!(c.probe_targets, vec!["223.5.5.5", "119.29.29.29"]);
         assert_eq!(c.probe_targets6, vec!["2400:3200::1", "2402:4e00::"]);
@@ -211,6 +219,7 @@ mod tests {
     #[test]
     fn section_overrides() {
         let m = map(&[
+            ("enabled", "0"),
             ("mode", "modem_first"),
             ("watch_interval", "25"),
             ("strict_dual_stack", "1"),
@@ -218,6 +227,7 @@ mod tests {
             ("health_check", "off"),
         ]);
         let c = AppConfig::from_section(&m, &BTreeMap::new());
+        assert!(!c.enabled);
         assert_eq!(c.mode, Mode::ModemFirst);
         assert_eq!(c.watch_interval, 25);
         assert!(c.strict_dual_stack);
