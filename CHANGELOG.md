@@ -2,6 +2,29 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.9.0-r5] — 2026-11-19
+
+修复 issue #4 的现场复发：模组配置段仍在、但设备并未建立时（如 fm350 `enabled=0`，`/etc/config/network` 里残留 `modem` 接口段，却没有对应的 netdev/地址/路由），r4 的 `group_complete()` 仍把「UCI section 存在」当作出口可用，看门狗据此把出口救援到这个不存在的模组，并停靠掉有线 WAN 唯一的默认路由（`network.wan.defaultroute=0`），导致整机及下挂设备全部无法上网。
+
+### 修复
+
+- **停靠门槛升级为「真实就绪」**：`apply_group_holes()` 不再只凭 UCI section 存在就认定出口可用，改为要求目标出口至少有一个协议族同时具备 section + 设备 + 地址 + 默认路由（`group_family_ready()`）。死 section 不再有资格停靠备用出口。
+- **禁止停靠唯一有效出口**：停靠前检查该协议族当前默认路由是否正由备用出口（WAN）持有、且目标出口没有替代路由；若是则拒绝停靠，避免把整机唯一的 `0.0.0.0/0` 移除。
+- **救援目标增加就绪硬门槛**：`reconcile_align()` 的 rescue 分支在选择 primary/backup 前，要求目标至少有一个协议族真实就绪。`group_complete_online()` 的缓存 verdict 在开机或 `health_check=0` 时可能为 `unknown`，此前仍会触发救援并连带停靠 WAN。
+- **收窄 IPv6 降级白名单**：`verify_commit()` 原先把所有 `ipv6_` 错误在 `strict_dual_stack=0` 下静默降级为成功，导致 `ipv6_ambiguous_metric_*` / `ipv6_no_default_route` 这类结构性错误被放过，把「救援到不存在的模组」标记为 `COMMITTED/ok`。现在仅 `ipv6_unreachable` / `ipv6_commit_failed` / `ipv6_not_ready` 可降级。
+
+### 测试
+
+- `tests/backend_logic.rs` 新增 `dead_modem_section_never_parks_the_only_wan_exit`：复现「modem 段存在但无设备、WAN 为唯一出口、lo 残留 metric=FFFFFFFF 的 IPv6 默认路由」的现场，断言不写 `defaultroute=0`、不记录救援 target/reason、modem 不 ready/online。
+- `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（39 单元 + 17 集成 + 4 netns）全部通过。
+
+### 变更文件
+
+- 后端：`src/switch/transaction.rs`、`src/reconcile.rs`
+- 测试：`tests/backend_logic.rs`
+- 产物：`root/usr/sbin/h5000m-netmode{,-status}`（aarch64 musl 静态重建）
+- 打包：`Makefile`（`PKG_RELEASE` 4 → 5）
+
 ## [v1.9.0-r4] — 2026-11-19
 
 修复 issue #4：开机早于 netifd / 模组管理器建面时，看门狗把「尚未被发现的模组出口」误判为完整出口并向其救援，顺带把有线 WAN 的默认路由停靠（`defaultroute=0`）；此后 WAN 即使拿到 DHCP 也永远 `unknown`。同时修复 `ubus` 二进制路径硬编码导致的 `wan_up=0` 误报。

@@ -716,3 +716,53 @@ fn ubus_is_resolved_from_path() {
     assert_eq!(s.status_field(&out, "wan_available"), "1");
     s.cleanup();
 }
+
+// ---------------------------------------------------------------------------
+// 17. dead modem section (fm350 enabled=0) must never park the wired WAN
+// ---------------------------------------------------------------------------
+
+/// Field recurrence 2026-11-19 on 192.0.2.186: the modem UCI section is
+/// present in /etc/config/network (fm350 left its section behind while
+/// `enabled=0`), but there is no modem netdev/address/route. Only the wired
+/// WAN is real. A rescue must not pick the dead modem and park WAN's only
+/// default route, which used to leave the box with no `0.0.0.0/0` at all.
+#[test]
+fn dead_modem_section_never_parks_the_only_wan_exit() {
+    let _g = file_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let s = Scenario::new("dead-modem-section");
+    // Both modem and wan sections exist; only wan0 has a device/address/route.
+    s.standard_network();
+    s.settings(&[("mode", "wan_first"), ("health_check", "0")]);
+    s.netdev("wan0", 1);
+    // modem0 intentionally has NO netdev -> group_family_ready(modem)=false.
+    s.addrs4(&[("wan0", "192.0.2.186")]);
+    // WAN is the sole default route; lo carries stale v6 defaults at the
+    // sentinel metric seen in the field (FFFFFFFF).
+    s.routes4(&[("wan0", "192.0.2.1", 10)]);
+    s.routes6(&[("lo", "", 4294967295, ""), ("lo", "", 4294967295, "")]);
+    // Upstream is reachable on WAN.
+    s.ubus_section("wan", true, false, "wan0");
+
+    let rc = s.run(&["reconcile"]);
+    assert_eq!(rc, 0);
+
+    let ops = s.uci_ops();
+    assert!(
+        !ops.iter().any(|l| l.ends_with("defaultroute=0")),
+        "a dead modem section must never park the working WAN: {ops:?}"
+    );
+    assert_eq!(
+        s.state("last_align_target"),
+        "",
+        "no rescue may target a modem without a usable interface"
+    );
+    assert_eq!(
+        s.state("last_align_reason"),
+        "",
+        "no rescue reason may be recorded for a dead modem"
+    );
+    let out = s.status();
+    assert_eq!(s.status_field(&out, "group_ready_modem"), "0");
+    assert_eq!(s.status_field(&out, "group_online_modem"), "0");
+    s.cleanup();
+}

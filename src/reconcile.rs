@@ -433,20 +433,38 @@ pub fn reconcile_align(cfg: &AppConfig, snap: &LiveSnapshot, force: bool) -> Res
             _ => {
                 // No usable default route: rescue onto whichever group is
                 // complete, preferring the policy primary.
-                if network::group_complete_online(snap, primary, cfg.strict_dual_stack) {
+                //
+                // `group_complete_online` checks structure + cached verdict,
+                // but the cached verdict can be stale/Unknown at boot or when
+                // health_check is off. A modem whose UCI section is present
+                // but whose device/address never came up (fm350 enabled=0)
+                // must never become a rescue target: align_to() would park the
+                // wired WAN's only default route before failing, leaving the
+                // box offline. Demand at least one genuinely ready family
+                // (device + address + route) before attempting a rescue.
+                let rescue_ready = |g: Group| -> bool {
+                    Family::ALL.iter().any(|fam| {
+                        network::group_family_required(snap, g, *fam, cfg.strict_dual_stack)
+                            && network::group_family_ready(snap, g, *fam)
+                    })
+                };
+                if rescue_ready(primary)
+                    && network::group_complete_online(snap, primary, cfg.strict_dual_stack)
+                {
                     if align_to(cfg, primary, "rescue", snap, force).is_ok() {
                         owner = primary.as_str().to_string();
                     }
-                } else if network::group_complete_online(snap, backup, cfg.strict_dual_stack)
+                } else if rescue_ready(backup)
+                    && network::group_complete_online(snap, backup, cfg.strict_dual_stack)
                     && align_to(cfg, backup, "rescue", snap, force).is_ok()
                 {
                     owner = backup.as_str().to_string();
                 } else {
-                    // Both groups are structurally incomplete (boot: no
-                    // address/route yet) or unproven. Doing nothing is the
-                    // correct action - the next interface event or watchdog
-                    // tick re-evaluates, and a premature rescue must never
-                    // park an exit that is merely late.
+                    // Neither group is genuinely ready or proven. Doing
+                    // nothing is the correct action - the next interface
+                    // event or watchdog tick re-evaluates, and a premature
+                    // rescue must never park an exit that is merely late or
+                    // a modem that is disabled.
                     log::log_info(
                         "reconcile",
                         "no exit is complete yet; waiting for an interface event or the next tick",

@@ -290,7 +290,19 @@ pub fn verify_commit(
     };
     match check() {
         Ok(()) => Ok(()),
-        Err(e) if !cfg.strict_dual_stack && e.starts_with("ipv6_") => {
+        // Under strict_dual_stack=0 only a *capable IPv6 family that failed to
+        // reach/be committed* is tolerated, so a single-stack commit can still
+        // succeed. Structural failures are never tolerable: with a dead modem
+        // section the FIB held only `lo`'s metric=FFFFFFFF IPv6 default route,
+        // producing `ipv6_ambiguous_metric_*` / `ipv6_no_default_route`, which
+        // the old blanket `ipv6_` prefix downgraded to Ok - marking a rescue
+        // onto a non-existent modem as COMMITTED/ok and leaving no exit at all.
+        Err(e)
+            if !cfg.strict_dual_stack
+                && (e.starts_with("ipv6_unreachable")
+                    || e.starts_with("ipv6_commit_failed")
+                    || e.starts_with("ipv6_not_ready")) =>
+        {
             log::log_warn(
                 "switch",
                 &format!(
@@ -492,10 +504,17 @@ pub fn rollback_family(fam: Family, previous: Group, target: Group, snap: &LiveS
 /// route while installing nothing, and the parked `defaultroute=0` survives
 /// in UCI - the WAN then never recovers on its own.
 pub fn apply_group_holes(_mode: Mode, snap: &LiveSnapshot, cfg: &AppConfig, g: Group) -> bool {
-    let participating = Family::ALL
-        .iter()
-        .any(|fam| crate::network::group_family_required(snap, g, *fam, cfg.strict_dual_stack));
-    if !participating {
+    // A UCI section alone is not an exit. fm350 with `enabled=0` leaves its
+    // modem/USB sections in /etc/config/network with no device, no address
+    // and no route; treating that as "capable" let a rescue park the only
+    // working wired WAN default route while installing nothing (issue #4,
+    // field recurrence 2026-11-19 with a dead modem section). Require a
+    // family that is genuinely ready: section + device + address + route.
+    let usable = Family::ALL.iter().any(|fam| {
+        crate::network::group_family_required(snap, g, *fam, cfg.strict_dual_stack)
+            && crate::network::group_family_ready(snap, g, *fam)
+    });
+    if !usable {
         log::log_warn(
             "switch",
             &format!(
@@ -508,6 +527,23 @@ pub fn apply_group_holes(_mode: Mode, snap: &LiveSnapshot, cfg: &AppConfig, g: G
     }
     let standby = g.other();
     for fam in crate::network::group_hole_families(snap, g, cfg.strict_dual_stack) {
+        // Never remove the family's only working default route. If `standby`
+        // currently owns the FIB for this family and `g` has no replacement
+        // route of its own, parking would blackhole the whole box.
+        if crate::network::slot_owner_family(snap, fam) == standby.as_str()
+            && snap.group_route(standby, fam).is_some()
+            && snap.group_route(g, fam).is_none()
+        {
+            log::log_warn(
+                "switch",
+                &format!(
+                    "warning: {} is the only working ipv{} exit; refusing to park it",
+                    standby.as_str(),
+                    fam.n()
+                ),
+            );
+            continue;
+        }
         let sec = snap.group_sec(standby, fam).to_string();
         if !sec.is_empty() {
             let _ = uci::uci_set_commit("network", &format!("network.{sec}.defaultroute"), "0");
