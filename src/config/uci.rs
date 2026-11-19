@@ -325,9 +325,14 @@ pub fn settings_section() -> (BTreeMap<String, String>, BTreeMap<String, Vec<Str
     doc.get("settings").cloned().unwrap_or_default()
 }
 
-/// The `uci` binary (test seam `H5000M_UCI_BIN`, default `/sbin/uci`).
+/// The `uci` binary (test seam `H5000M_UCI_BIN`). Resolved through `PATH`
+/// first so a distro that keeps it outside `/sbin` still works.
 fn uci_bin() -> String {
-    std::env::var("H5000M_UCI_BIN").unwrap_or_else(|_| "/sbin/uci".into())
+    crate::system::command::resolve_bin(
+        "H5000M_UCI_BIN",
+        "uci",
+        &["/sbin/uci", "/usr/sbin/uci", "/bin/uci", "/usr/bin/uci"],
+    )
 }
 
 /// External `uci` invocation with a hard timeout. Used only for mutations.
@@ -376,10 +381,10 @@ pub fn uci_set_commit(cfg: &str, key: &str, value: &str) -> Result<()> {
     uci_exec(&["-q", "commit", cfg])
 }
 
-/// Is `/sbin/uci` present at all (a missing uci means config cannot be
+/// Is the `uci` binary present at all (a missing uci means config cannot be
 /// mutated; reads still work from the files).
 pub fn uci_present() -> bool {
-    Path::new("/sbin/uci").exists()
+    Path::new(&uci_bin()).exists()
 }
 
 /// Bounded wait helper for external commands: seconds cap.

@@ -678,10 +678,12 @@ fn superseded_check(my_gen: Option<u32>, flag: &mut bool) -> bool {
 
 /// The post-settle online check uses the (fresh) snapshot's reachability.
 fn verify_group_online_after_settle(snap: &LiveSnapshot, cfg: &AppConfig, g: Group) -> Result<()> {
+    let mut probed_families = 0u32;
     for fam in Family::ALL {
         if !network::group_family_capable(snap, g, fam) {
             continue;
         }
+        probed_families += 1;
         let v = crate::probe::probe_group_family(
             fam,
             g,
@@ -705,6 +707,11 @@ fn verify_group_online_after_settle(snap: &LiveSnapshot, cfg: &AppConfig, g: Gro
                 fam.n()
             )));
         }
+    }
+    // A target with no participating family probes nothing; that is not a
+    // verified exit (issue #4's boot case).
+    if probed_families == 0 {
+        return Err(crate::types::Error::probe("no_usable_family"));
     }
     Ok(())
 }

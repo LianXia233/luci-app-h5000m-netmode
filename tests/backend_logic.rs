@@ -540,3 +540,179 @@ fn failed_alignment_consumes_the_cooldown() {
     );
     s.cleanup();
 }
+
+// ---------------------------------------------------------------------------
+// 11. boot order: an undiscovered exit must never be rescued onto (issue #4)
+// ---------------------------------------------------------------------------
+
+/// The 13:19:01 field state from issue #4: the wired WAN section exists, but
+/// netifd has not configured it yet and the modem manager has not published
+/// its `config interface 'USB'` section.
+fn boot_network_without_modem(s: &Scenario, wan_defaultroute: Option<&str>) {
+    let dr = wan_defaultroute
+        .map(|v| format!("\toption defaultroute '{v}'\n"))
+        .unwrap_or_default();
+    s.write_network(&format!(
+        "config interface 'loopback'\n\toption device 'lo'\n\n\
+         config interface 'lan'\n\toption device 'br-lan'\n\n\
+         config interface 'wan'\n\toption device 'wan0'\n\toption proto 'dhcp'\n\toption metric '50'\n{dr}\n\
+         config interface 'wan6'\n\toption device 'wan0'\n\toption proto 'dhcpv6'\n\toption metric '50'\n\toption auto '1'\n"
+    ));
+}
+
+#[test]
+fn boot_without_a_modem_section_never_parks_the_wan() {
+    let _g = file_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let s = Scenario::new("boot-no-modem");
+    boot_network_without_modem(&s, None);
+    s.settings(&[("mode", "wan_only")]);
+    s.netdev("wan0", 1);
+    s.routes4(&[]);
+    s.routes6(&[]);
+    s.ubus_drop("wan");
+    s.ubus_drop("wan6");
+
+    // Before the fix group_complete(modem) was vacuously true (no section ->
+    // no family checked), so this command rescued onto the modem and wrote
+    // `defaultroute=0` into the WAN sections.
+    let rc = s.run(&["reconcile"]);
+    assert_eq!(rc, 0);
+    let ops = s.uci_ops();
+    assert!(
+        !ops.iter().any(|l| l.starts_with("set network.")),
+        "boot must not rewrite the network policy: {ops:?}"
+    );
+    assert!(
+        !ops.iter().any(|l| l.ends_with("defaultroute=0")),
+        "nothing may be parked at boot: {ops:?}"
+    );
+    assert_eq!(
+        s.state("last_align_target"),
+        "",
+        "no rescue may be recorded for an undiscovered exit"
+    );
+    let out = s.status();
+    assert_eq!(s.status_field(&out, "group_ready_wan"), "0");
+    assert_eq!(s.status_field(&out, "group_ready_modem"), "0");
+    assert_eq!(s.status_field(&out, "group_online_modem"), "0");
+    assert_eq!(
+        s.status_field(&out, "ipv6_owner"),
+        "none",
+        "an undiscovered modem must never be recorded as the ipv6 exit"
+    );
+    s.cleanup();
+}
+
+#[test]
+fn a_parked_primary_defaultroute_is_reopened() {
+    let _g = file_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let s = Scenario::new("parked-primary");
+    // The signature issue #4 left behind: a rescue wrote defaultroute=0 into
+    // the wired WAN, and the option survives reboots.
+    boot_network_without_modem(&s, Some("0"));
+    s.settings(&[("mode", "wan_only")]);
+    s.netdev("wan0", 1);
+    s.routes4(&[]);
+    s.routes6(&[]);
+    s.ubus_drop("wan");
+    s.ubus_drop("wan6");
+
+    let rc = s.run(&["reconcile"]);
+    assert_eq!(rc, 0);
+    let ops = s.uci_ops();
+    assert!(
+        ops.iter().any(|l| l == "set network.wan.defaultroute=1"),
+        "the watchdog must reopen the parked primary: {ops:?}"
+    );
+    assert!(
+        !ops.iter().any(|l| l.ends_with("defaultroute=0")),
+        "nothing may be parked at boot: {ops:?}"
+    );
+    assert_eq!(s.status_field(&s.status(), "wan_defaultroute"), "1");
+    s.cleanup();
+}
+
+#[test]
+fn a_failover_restores_the_target_policy_before_aligning() {
+    let _g = file_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let s = Scenario::new("align-prep");
+    s.standard_network();
+    // The standby target is complete but its UCI policy was left parked
+    // (`defaultroute=0`). `prepare_group` used to run only for a manual
+    // switch; an automatic alignment therefore never re-opened it.
+    let network = std::fs::read_to_string(s.path("config/network")).unwrap();
+    let network = network.replace(
+        "config interface 'modem0'\n\toption device 'modem0'\n\toption proto 'static'\n\toption metric '20'\n",
+        "config interface 'modem0'\n\toption device 'modem0'\n\toption proto 'static'\n\toption metric '20'\n\toption defaultroute '0'\n",
+    );
+    s.write_network(&network);
+    s.settings(&[("mode", "wan_first")]);
+    s.netdev("wan0", 1);
+    s.netdev("modem0", 1);
+    s.addrs4(&[("wan0", "192.168.88.187"), ("modem0", "10.13.35.40")]);
+    s.addrs6(&[
+        ("wan0", "2409:8800::187", false),
+        ("modem0", "2409:8a00::40", false),
+    ]);
+    // WAN is active but its health streak says it is degraded; the standby
+    // modem is complete and online, so a failover align is due.
+    s.routes4(&[("wan0", "192.168.88.1", 10), ("modem0", "10.13.35.1", 50)]);
+    s.routes6(&[("wan0", "fe80::1", 10, ""), ("modem0", "fe80::2", 50, "")]);
+    s.ubus_section("wan", true, false, "wan0");
+    s.ubus_section("wan6", true, false, "wan0");
+    s.ubus_section("modem0", true, false, "modem0");
+    s.ubus_section("modem0_6", true, false, "modem0");
+    std::fs::write(
+        s.path("health"),
+        "wan=0\nwan_fail=3\nwan6=0\nmodem=1\nmodem6=1\n",
+    )
+    .unwrap();
+
+    s.run(&["reconcile"]);
+    let ops = s.uci_ops();
+    assert!(
+        ops.iter().any(|l| l == "set network.modem0.defaultroute=1"),
+        "an automatic alignment must restore the target policy: {ops:?}"
+    );
+    s.cleanup();
+}
+
+// ---------------------------------------------------------------------------
+// 12. the ubus binary is resolved like `command -v`, not from a fixed prefix
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ubus_is_resolved_from_path() {
+    let _g = file_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let s = Scenario::new("ubus-path");
+    s.write_network(
+        "config interface 'wan'\n\toption device 'wan0'\n\toption proto 'dhcp'\n\n\
+         config interface 'wan6'\n\toption device 'wan0'\n\toption proto 'dhcpv6'\n",
+    );
+    s.settings(&[]);
+    s.netdev("wan0", 1);
+    s.addrs4(&[("wan0", "192.168.31.5")]);
+    s.routes4(&[("wan0", "192.168.31.1", 10)]);
+    s.ubus_section("wan", true, false, "wan0");
+    s.ubus_section("wan6", true, false, "wan0");
+
+    s.apply_env();
+    // Field image: `ubus` lives in PATH, `/usr/bin/ubus` does not exist and
+    // no explicit seam is configured.
+    std::env::remove_var("H5000M_UBUS_BIN");
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let mockbin = s.path("mockbin");
+    std::env::set_var("PATH", format!("{}:{old_path}", mockbin.display()));
+
+    let cfg = h5000m_netmode::config::AppConfig::load();
+    let snap = h5000m_netmode::network::read_live_state();
+    let out = h5000m_netmode::status::render_status(&cfg, &snap);
+    std::env::set_var("PATH", old_path);
+    assert_eq!(
+        s.status_field(&out, "wan_up"),
+        "1",
+        "ubus must be found on PATH instead of assuming /usr/bin/ubus"
+    );
+    assert_eq!(s.status_field(&out, "wan_available"), "1");
+    s.cleanup();
+}

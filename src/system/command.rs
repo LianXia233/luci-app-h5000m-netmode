@@ -182,14 +182,66 @@ pub fn run_bounded_default(program: &str, args: &[&str]) -> Result<String> {
     run_bounded(program, args, Duration::from_secs(5))
 }
 
-/// The `ubus` binary (test seam `H5000M_UBUS_BIN`, default `/usr/bin/ubus`).
-fn ubus_bin() -> String {
-    std::env::var("H5000M_UBUS_BIN").unwrap_or_else(|_| "/usr/bin/ubus".into())
+/// Resolve one helper binary without assuming a single layout.
+///
+/// A compile-time constant is wrong on some images: the H5000M ImmortalWrt
+/// firmware ships `ubus` at `/bin/ubus`, while the old default here was
+/// `/usr/bin/ubus`. That failure is silent - every
+/// `network.interface.<sec> status` read returns None, so `up`/`available`
+/// collapse to 0 and the status page (and any caller that trusts those fields)
+/// reports a healthy WAN as down. Resolution order mirrors `command -v`:
+/// explicit test seam -> `PATH` -> known absolute locations -> bare name
+/// (execvp then reports the real error).
+pub(crate) fn resolve_bin(env_key: &str, name: &str, known: &[&str]) -> String {
+    if let Some(v) = std::env::var_os(env_key) {
+        let value = v.to_string_lossy().to_string();
+        if !value.is_empty() {
+            return value;
+        }
+    }
+    if let Some(path) = find_in_path(name) {
+        return path;
+    }
+    for path in known {
+        if std::path::Path::new(path).is_file() {
+            return (*path).to_string();
+        }
+    }
+    name.to_string()
 }
 
-/// The `ifup` binary (test seam `H5000M_IFUP_BIN`, default `/sbin/ifup`).
+fn find_in_path(name: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path).collect();
+    find_in_dirs(name, &dirs)
+}
+
+fn find_in_dirs(name: &str, dirs: &[std::path::PathBuf]) -> Option<String> {
+    for dir in dirs {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// The `ubus` binary (test seam `H5000M_UBUS_BIN`).
+fn ubus_bin() -> String {
+    resolve_bin(
+        "H5000M_UBUS_BIN",
+        "ubus",
+        &["/bin/ubus", "/usr/bin/ubus", "/sbin/ubus", "/usr/sbin/ubus"],
+    )
+}
+
+/// The `ifup` binary (test seam `H5000M_IFUP_BIN`).
 fn ifup_bin() -> String {
-    std::env::var("H5000M_IFUP_BIN").unwrap_or_else(|_| "/sbin/ifup".into())
+    resolve_bin(
+        "H5000M_IFUP_BIN",
+        "ifup",
+        &["/sbin/ifup", "/usr/sbin/ifup", "/bin/ifup"],
+    )
 }
 
 /// `ubus call network.interface.<sec> status` with a 1s connect-timeout hint.
@@ -238,5 +290,39 @@ pub fn vendor_sync() {
         Err(e) => {
             crate::system::log::log_warn("vendor", &format!("mt5700m-manager sync failed: {e}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_lookup_finds_the_first_match() {
+        let dir = std::env::temp_dir().join(format!("h5nm-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ubus"), b"#!/bin/sh\n").unwrap();
+        let missing = std::env::temp_dir().join("h5nm-path-does-not-exist");
+        assert_eq!(
+            find_in_dirs("ubus", &[missing, dir.clone()]),
+            Some(dir.join("ubus").to_string_lossy().into_owned())
+        );
+        assert_eq!(find_in_dirs("not-there", std::slice::from_ref(&dir)), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn env_seam_wins_and_empty_means_unset() {
+        std::env::set_var("H5NM_TEST_BIN", "/tmp/h5nm-seam-bin");
+        assert_eq!(
+            resolve_bin("H5NM_TEST_BIN", "ubus", &["/bin/ubus"]),
+            "/tmp/h5nm-seam-bin"
+        );
+        // Empty seam must not be mistaken for a binary path.
+        std::env::set_var("H5NM_TEST_BIN", "");
+        let resolved = resolve_bin("H5NM_TEST_BIN", "ubus", &["/bin/ubus"]);
+        assert!(!resolved.is_empty());
+        std::env::remove_var("H5NM_TEST_BIN");
     }
 }

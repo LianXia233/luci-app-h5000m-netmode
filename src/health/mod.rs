@@ -31,10 +31,9 @@ pub fn throttle_ok(cfg: &AppConfig, force: bool) -> bool {
     }
     let now = crate::system::clock::unix_ts();
     let last = crate::types::num_or::<u64>(&state::health_get("ts"), 0);
-    if last > 0 && now > 0 && now.saturating_sub(last) < interval as u64 {
-        return false;
-    }
-    true
+    // Allow a fresh round unless the previous one is recent. A missing or
+    // zero clock stamp always allows one (boot / fresh install).
+    !(last > 0 && now > 0 && now.saturating_sub(last) < interval as u64)
 }
 
 /// `refresh_health <force>`: one bounded probe round for every (group, family)
