@@ -30,6 +30,7 @@
 
 ### 变更
 
+- **移除 ci-diag 诊断日志分支发布**：`ci.yml` 的「Download the check logs」与「Publish the check logs to the ci-diag branch」两步删除——诊断日志仍以每次运行的 `ci-logs` artifact 形式保留在 Actions 里，不再向仓库推送独立分支；远端 `ci-diag` 分支一并清理。
 - **CI 全量升级**：`.github/workflows/ci.yml`、`release.yml` 共 8 处 `uses:` 升级 ——
   `actions/checkout@v4` → `v7`、`actions/upload-artifact@v4` → `v7`、
   `actions/download-artifact@v4` → `v8`。

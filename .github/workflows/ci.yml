@@ -223,32 +223,7 @@ jobs:
             echo "::warning::cannot push the autofix; run cargo fmt and scripts/build-rust.sh locally"
             exit 0
           }
-      - name: Download the check logs
-        uses: actions/download-artifact@v8
-        continue-on-error: true
-        with:
-          name: ci-logs
-          path: ci-logs
-      - name: Publish the check logs to the ci-diag branch
-        # The log artefact is a zip on Azure Blob Storage, which the API will
-        # not hand out to a script; a branch is plain git and readable from
-        # anywhere. Keep it off main - it is a diagnostic, not part of the tree.
-        continue-on-error: true
-        run: |
-          if [ -z "$(ls -A ci-logs 2>/dev/null)" ]; then
-            echo "no check logs to publish"
-            exit 0
-          fi
-          git checkout -B ci-diag
-          git rm -rq --ignore-unmatch . || true
-          mkdir -p log
-          cp ci-logs/* log/ 2>/dev/null || true
-          git add log
-          git -c user.name="github-actions[bot]" \
-              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit -q -m "ci: 诊断日志 $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git push -qf origin ci-diag || {
-            echo "::warning::cannot publish the check logs to ci-diag"
-            exit 0
-          }
-          echo "check logs published on the ci-diag branch"
+      - name: The check logs stay as workflow artifacts
+        # Diagnostics remain available as Actions artifacts of each run; no
+        # dedicated branch is published anymore (ci-diag retired 2026-11-19).
+        run: echo "check logs are kept as the ci-logs artifact of this run"
