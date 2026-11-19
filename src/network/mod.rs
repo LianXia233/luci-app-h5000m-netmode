@@ -700,6 +700,7 @@ pub fn group_family_required(
 }
 
 pub fn group_complete(snap: &LiveSnapshot, g: Group, strict_dual_stack: bool) -> bool {
+    let mut participating = false;
     for fam in Family::ALL {
         // strict_dual_stack=0: a broken or merely-stale IPv6 must never gate
         // the group predicates - IPv4 is the deciding family for failover and
@@ -712,14 +713,26 @@ pub fn group_complete(snap: &LiveSnapshot, g: Group, strict_dual_stack: bool) ->
         if !group_family_required(snap, g, fam, strict_dual_stack) {
             continue;
         }
+        participating = true;
         if !group_family_ready(snap, g, fam) {
             return false;
         }
     }
-    true
+    // A loop that checked nothing is not "complete". When the group's
+    // interface section has not been discovered yet - at boot the modem
+    // manager publishes `config interface 'USB'` only once the module
+    // enumerates - no family participates and the loop above succeeds
+    // vacuously. Returning true there made the reconciler rescue onto a
+    // non-existent exit and park the wired WAN's default routes (issue #4).
+    // An exit needs at least one participating family before it can be used.
+    participating
 }
 
 /// `group_complete_online`: structural + cached reachability verdicts.
+///
+/// Because `group_complete` now requires at least one participating family,
+/// this loop always has at least one verdict to check: an undiscovered group
+/// can never be "online".
 pub fn group_complete_online(snap: &LiveSnapshot, g: Group, strict_dual_stack: bool) -> bool {
     if !group_complete(snap, g, strict_dual_stack) {
         return false;
@@ -855,5 +868,22 @@ mod tests {
         assert_eq!(route_owner(&s, "eth2", ""), "modem");
         assert_eq!(route_owner(&s, "lo", ""), "other");
         assert_eq!(route_owner(&s, "", ""), "none");
+    }
+
+    #[test]
+    fn a_group_without_a_section_is_never_complete() {
+        // Regression for issue #4: at boot the modem section may not exist yet.
+        // The old loop had nothing to check and returned true, so the
+        // reconciler rescued onto the modem and parked the WAN routes.
+        let snap = LiveSnapshot::default();
+        for strict in [false, true] {
+            assert!(!group_complete(&snap, Group::Modem, strict));
+            assert!(!group_complete_online(&snap, Group::Modem, strict));
+            assert!(!group_complete_online(&snap, Group::Wan, strict));
+        }
+        assert_eq!(
+            group_hole_families(&snap, Group::Modem, false),
+            vec![Family::V4, Family::V6]
+        );
     }
 }

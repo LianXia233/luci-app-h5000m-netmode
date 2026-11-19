@@ -1532,4 +1532,70 @@ grep '^phases=' /var/run/h5000m-netmode.state
 `tests/backend_netns.rs` 的 `real_switch_commits_and_demotes_standby` 在真内核命名空间里
 覆盖「v6 目标永远不就绪」时单栈提交仍成功且温备降级的完整路径。
 
+## 十三、开机竞态：还不存在的出口被当成「完整且在线」
+
+issue #4（2026-11-19，H5000M ImmortalWrt v1.9.0-r3）的现场只有两行日志，却是一条完整的
+因果链：
+
+```text
+13:19:01 health check: wan=unknown/unknown modem=unknown/unknown
+13:19:01 reconcile: align -> modem (rescue)
+13:19:01 switch: warning: wan cannot be the active exit for ipv4; parked its route
+13:19:03 wan: DHCP lease 192.168.31.5          # 地址有了，默认路由永远不会来
+13:19:06 netifd: Interface 'USB' is enabled    # 模组 section 此刻才出现
+```
+
+### 13.1 三个「空集合返回成功」叠加成永久断网
+
+| 位置 | 旧行为 | 为什么危险 |
+| --- | --- | --- |
+| `network::group_complete()` | 逐族 `continue`，没有一族参与时循环空转，返回 `true` | 模组 section 尚未写出时，「什么都没检查」被当成「完整」 |
+| `switch::transaction::verify_group_online()` | 零个 capable 族时直接 `Ok(())` | 让「向模组救援」通过了最后的在线校验 |
+| `transaction::apply_group_holes()` | `group_hole_families()` 对零族组返回 `[V4, V6]`，于是把备用的 WAN / WAN6 `defaultroute` 写成 0 | 在「现役出口」根本不存在时，把唯一可用的有线出口停靠掉 |
+
+**为什么不能自愈**：`defaultroute=0` 是持久化到 `/etc/config/network` 的。WAN 之后拿到
+DHCP 地址，但 `group_family_ready()` 要求「设备 + 地址 + 默认路由」三者齐备，缺路由 →
+`unknown` → 不完整 → 看门狗不会向 WAN 救援；而救援逻辑又要求目标「完整且在线」。两边互等，
+只有手动切换（`switch_run` 会先 `prepare_group`）才能把 `defaultroute` 改回 1。
+
+### 13.2 修复
+
+1. **完整性非空**：`group_complete()` 记录是否至少检查过一个参与族；零族直接 `false`。
+   `group_complete_online()` 因此也不会对空组返回在线。
+2. **在线校验非空**：`verify_group_online()` / `verify_group_online_after_settle()` 在
+   `probed_families == 0` 时返回 `no_usable_family`。
+3. **停靠有门槛**：`apply_group_holes()` 在目标零族时拒绝执行并返回失败；`align_to()`
+   只在提交成功后才调用它（此前提交失败仍会停靠备用）。
+4. **对齐恢复策略**：`align_to()` 先 `prepare_group()`（恢复目标的 `metric` /
+   `defaultroute` / `auto`），对「有地址、无默认路由」的族显式 `ifup` 让 netifd 重装
+   路由（最多等 2 秒），再用新快照校验/提交。
+5. **看门狗修补历史停靠**：`repair_primary_policy()` 每轮只把**策略首选出口**的显式
+   `defaultroute=0` 恢复为 1。不动备用出口——那里的 `defaultroute=0` 是
+   `apply_group_holes` 的合法停靠，恢复它会造成协议族分流。
+
+### 13.3 `ubus` 路径：另一个独立误报
+
+同一台设备上 `status` 的 `wan_up=0` / `wan_available=0` 与健康探测无关：`ubus_bin()` 默认
+`/usr/bin/ubus`，而镜像把 ubus 装在 `/bin/ubus`。所有 `network.interface.* status` 调用
+静默失败（`run_bounded` 返回 `None`，不报错），netifd 视图整体为空。现按 `command -v`
+语义解析：`H5000M_UBUS_BIN` → `PATH` → 已知绝对路径；`uci`、`ifup` 采用同一解析器。
+
+### 13.4 验证
+
+```sh
+# 实机开机后（r4）：
+h5000m-netmode status | grep -E '^(wan_up|wan_available|wan_defaultroute|wan6_defaultroute|group_ready_modem|group_online_modem|ipv6_owner)='
+# 期望：wan_up=1 wan_available=1 wan_defaultroute=1 ipv6_owner=wan
+#       group_ready_modem=0 group_online_modem=0（模组 section 未出现前）
+
+uci get network.wan.defaultroute   # 不应是 0
+
+# 旧版本已经踩坑的设备（升级前应急）：
+uci set network.wan.defaultroute='1' && uci commit network && ifup wan
+```
+
+`tests/backend_logic.rs::boot_without_a_modem_section_never_parks_the_wan` 在旧实现上实测
+得到 issue 现场的同一组写入：`set network.wan.defaultroute=0`、
+`set network.wan6.defaultroute=0`、`ipv6_owner=modem`；修复后该用例要求网络策略零写入。
+
 > AI生成

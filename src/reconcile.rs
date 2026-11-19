@@ -102,6 +102,10 @@ pub fn remember_routes(snap: &LiveSnapshot) {
     let _ = state::state_write(&pairs);
 }
 
+/// Seconds to let netifd re-evaluate an interface after a parked default
+/// route is re-opened. Bounded: an alignment must never grow into a switch.
+const ALIGN_RELOAD_SETTLE_S: u32 = 2;
+
 /// `align_to <group> <reason>`: probe, commit both families, verify; on any
 /// failure restore the previous owner.
 pub fn align_to(
@@ -120,7 +124,44 @@ pub fn align_to(
         return Err(crate::types::Error::switch("cooldown"));
     }
     mark_align_attempt();
-    if let Err(e) = transaction::verify_group_online(snap, cfg, group) {
+
+    // Put the target back on its configured policy before judging it. A
+    // previous rescue parks the standby by writing `defaultroute=0`, and an
+    // interface whose default route is parked can never become ready - so an
+    // alignment back to WAN could previously only succeed through a manual
+    // switch (which is exactly what `prepare_group` does for `switch_run`).
+    crate::switch::prepare_group(group, cfg.mode, snap);
+
+    // `prepare_group` only ifups a section that is down or has no device. A
+    // family that already holds an address but has no default route is the
+    // signature of a parked option, and netifd must re-evaluate that section
+    // for the re-opened `defaultroute=1` to reach the FIB.
+    let mut reloaded = false;
+    for fam in Family::ALL {
+        if !network::group_family_required(snap, group, fam, cfg.strict_dual_stack) {
+            continue;
+        }
+        let sec = snap.group_sec(group, fam).to_string();
+        if sec.is_empty() || snap.group_route(group, fam).is_some() {
+            continue;
+        }
+        if network::group_family_has_address(snap, group, fam) {
+            log::log_info(
+                "reconcile",
+                &format!("bringing {sec} up so its default route is re-installed"),
+            );
+            let _ = crate::system::command::ifup_section(&sec);
+            reloaded = true;
+        }
+    }
+    if reloaded {
+        std::thread::sleep(std::time::Duration::from_secs(ALIGN_RELOAD_SETTLE_S as u64));
+    }
+
+    // Judge the target on a fresh view: the policy write above and the ifup
+    // both postdate the caller's snapshot.
+    let fresh = network::read_live_state();
+    if let Err(e) = transaction::verify_group_online(&fresh, cfg, group) {
         log::log_info(
             "reconcile",
             &format!("alignment to {} aborted: {}", group.as_str(), e),
@@ -145,10 +186,10 @@ pub fn align_to(
 
     let mut ok = true;
     for fam in Family::ALL {
-        if !network::group_family_required(snap, group, fam, cfg.strict_dual_stack) {
+        if !network::group_family_required(&fresh, group, fam, cfg.strict_dual_stack) {
             continue;
         }
-        if commit_family(fam, group, Some(previous), snap).is_err() {
+        if commit_family(fam, group, Some(previous), &fresh).is_err() {
             if fam == Family::V6 && !cfg.strict_dual_stack {
                 log::log_warn(
                     "reconcile",
@@ -167,8 +208,10 @@ pub fn align_to(
     // Park the standby's route for every family the active group cannot
     // carry. Without this the align/rescue path leaves the standby's IPv6
     // default in place and the families split across uplinks - the very
-    // thing the switch state machine's apply_group_holes prevents.
-    if !transaction::apply_group_holes(cfg.mode, snap, cfg, group) {
+    // thing the switch state machine's apply_group_holes prevents. Only a
+    // target with a committed family may park anything: a vacuous target
+    // (`ok == false`, no section) must never remove the working exit.
+    if ok && !transaction::apply_group_holes(cfg.mode, &fresh, cfg, group) {
         ok = false;
     }
 
@@ -178,7 +221,10 @@ pub fn align_to(
     ]);
     // verify_commit keeps an IPv4-only commit alive when IPv6 verification
     // fails under strict_dual_stack=0 (IPv6 is an enhancement, not a gate).
-    if ok && transaction::verify_commit(snap, group, cfg).is_ok() {
+    // The view must be taken AFTER the commit and the hole parking: judging a
+    // pre-surgery snapshot reported the just-deleted standby route as a leak.
+    let post = network::read_live_state();
+    if ok && transaction::verify_commit(&post, group, cfg).is_ok() {
         mark_align(reason, group.as_str());
         let _ = state::state_write(&[
             ("state", SmState::COMMITTED),
@@ -191,7 +237,7 @@ pub fn align_to(
             ("pid", ""),
         ]);
         clear_candidate();
-        crate::health::refresh_health(snap, cfg, false);
+        crate::health::refresh_health(&post, cfg, false);
         return Ok(());
     }
 
@@ -203,9 +249,9 @@ pub fn align_to(
         ),
     ]);
     for fam in Family::ALL {
-        let _ = commit_family(fam, previous, Some(group), snap);
+        let _ = commit_family(fam, previous, Some(group), &fresh);
     }
-    transaction::post_failure_converge(snap, cfg);
+    transaction::post_failure_converge(&network::read_live_state(), cfg);
     let _ = state::state_write(&[
         ("state", SmState::FAILED),
         ("result", "failed"),
@@ -220,7 +266,7 @@ pub fn align_to(
         ),
         ("pid", ""),
     ]);
-    crate::health::refresh_health(snap, cfg, false);
+    crate::health::refresh_health(&network::read_live_state(), cfg, false);
     Err(crate::types::Error::switch("align_verify_failed"))
 }
 
@@ -255,6 +301,80 @@ pub fn write_ipv6_owner(value: &str) {
             value
         ),
     );
+}
+
+/// Restore the policy primary's own `defaultroute` when it was left parked.
+///
+/// `apply_group_holes` writes `defaultroute=0` into UCI for the standby's
+/// families. If the "active" group was one that did not exist yet, that
+/// parked the wired WAN itself; the option survives reboots and netifd then
+/// never installs the WAN default route again. The interface still gets a
+/// DHCP lease, but every readiness predicate (address + route) stays false,
+/// health reports `unknown` forever and no rescue can ever move back to it
+/// (issue #4).
+///
+/// Only the policy primary's explicit `defaultroute=0` is reopened: the
+/// standby's holes are deliberate and must stay closed, so this can never
+/// fight `apply_group_holes`. An absent option already means 1 (netifd's
+/// default), so a stock config is not rewritten.
+fn repair_primary_policy(cfg: &AppConfig, snap: &LiveSnapshot) -> bool {
+    let primary = cfg.mode.primary_group();
+    let mut lines: Vec<String> = Vec::new();
+    let mut sections: Vec<String> = Vec::new();
+    let mut reopened: Vec<(Family, String)> = Vec::new();
+    for fam in Family::ALL {
+        let sec = snap.group_sec(primary, fam);
+        if sec.is_empty() || !uci::uci_has_key(&format!("network.{sec}")) {
+            continue;
+        }
+        let current = uci::uci_get(&format!("network.{sec}.defaultroute"));
+        if crate::config::bool_val(&current, true) {
+            continue;
+        }
+        lines.push(format!("set network.{sec}.defaultroute=1"));
+        sections.push(sec.to_string());
+        reopened.push((fam, sec.to_string()));
+    }
+    if lines.is_empty() {
+        return false;
+    }
+    if let Err(e) = transaction::apply_uci_lines(&lines, "network") {
+        log::log_warn(
+            "reconcile",
+            &format!("failed to restore the parked primary default route: {e}"),
+        );
+        return false;
+    }
+    // `uci commit` only rewrites the file; netifd re-reads `defaultroute` on
+    // the next interface evaluation. A family that already holds an address
+    // but has no default route would otherwise never become ready - and the
+    // watchdog would never reach the align path that could ifup it. Ask
+    // netifd explicitly, once, for exactly the reopened sections.
+    let mut reloaded = false;
+    for (fam, sec) in &reopened {
+        if network::group_family_has_address(snap, primary, *fam)
+            && snap.group_route(primary, *fam).is_none()
+        {
+            log::log_info(
+                "reconcile",
+                &format!("bringing {sec} up so its default route is re-installed"),
+            );
+            let _ = crate::system::command::ifup_section(sec);
+            reloaded = true;
+        }
+    }
+    if reloaded {
+        std::thread::sleep(std::time::Duration::from_secs(ALIGN_RELOAD_SETTLE_S as u64));
+    }
+    log::log_warn(
+        "reconcile",
+        &format!(
+            "restored the parked default route of {} ({})",
+            primary.as_str(),
+            sections.join(",")
+        ),
+    );
+    true
 }
 
 /// `reconcile_align`: the decision half of the reconciler (see the shell
@@ -321,6 +441,16 @@ pub fn reconcile_align(cfg: &AppConfig, snap: &LiveSnapshot, force: bool) -> Res
                     && align_to(cfg, backup, "rescue", snap, force).is_ok()
                 {
                     owner = backup.as_str().to_string();
+                } else {
+                    // Both groups are structurally incomplete (boot: no
+                    // address/route yet) or unproven. Doing nothing is the
+                    // correct action - the next interface event or watchdog
+                    // tick re-evaluates, and a premature rescue must never
+                    // park an exit that is merely late.
+                    log::log_info(
+                        "reconcile",
+                        "no exit is complete yet; waiting for an interface event or the next tick",
+                    );
                 }
             }
         }
@@ -374,6 +504,19 @@ pub fn reconcile_body(cfg: &AppConfig, snap: &LiveSnapshot, force: bool) -> Resu
         log::log_info("reconcile", "skipped: switch in progress");
         return Ok(());
     }
+
+    // A primary whose `defaultroute` was parked by an earlier (buggy or
+    // partial) rescue must be reopened before any readiness decision:
+    // otherwise it can never become complete again and the watchdog can never
+    // rescue back to it. Re-read the snapshot when the policy actually
+    // changed, so this pass judges the live state instead of the parked one.
+    let reopened;
+    let snap = if repair_primary_policy(cfg, snap) {
+        reopened = network::read_live_state();
+        &reopened
+    } else {
+        snap
+    };
 
     if cfg.health_check {
         let forced = force || state::state_get("health_force") == "1";

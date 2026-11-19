@@ -2,6 +2,30 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.9.0-r4] — 2026-11-19
+
+修复 issue #4：开机早于 netifd / 模组管理器建面时，看门狗把「尚未被发现的模组出口」误判为完整出口并向其救援，顺带把有线 WAN 的默认路由停靠（`defaultroute=0`）；此后 WAN 即使拿到 DHCP 也永远 `unknown`。同时修复 `ubus` 二进制路径硬编码导致的 `wan_up=0` 误报。
+
+### 修复
+
+- **开机把 WAN 默认路由停靠掉（issue #4 主因）**：`group_complete()` 在出口的 UCI section 还不存在时（模组管理器尚未写出 `config interface 'USB'`），两个协议族都不参与判定，循环空转后返回 `true`——「什么都没检查」被当成「完整」。`verify_group_online()` 同样在零个族上直接返回成功，`apply_group_holes()` 随后按「模组不支持 IPv4/IPv6」把 WAN / WAN6 的 `defaultroute` 写成 0。现在：完整性要求至少一个参与族；在线校验在零族时返回 `no_usable_family`；停靠前要求目标至少有一个可用族，且仅在提交成功后才执行。被写进 UCI 的 `defaultroute=0` 会跨重启保留，因此看门狗每轮还会把策略首选出口的显式 `defaultroute=0` 恢复为 1（只碰首选出口自己的 section，不动备用的合法停靠）。
+- **自动对齐不再恢复目标策略**：`align_to()` 直接探测/提交，不调用 `prepare_group()`，所以因停靠而失去默认路由的目标永远无法重新就绪，只能靠手动切换恢复。现在对齐前先恢复目标自身的 `metric` / `defaultroute` / `auto`，对「有地址但无默认路由」的族显式 `ifup` 让 netifd 重装路由（最多等 2 秒），并用恢复后的快照做在线校验、提交后的快照做 verify。
+- **`ubus` 路径硬编码**：默认 `/usr/bin/ubus` 在 H5000M 固件上不存在（实际在 `/bin/ubus`），`network.interface.* status` 全部返回空，`wan_up` / `wan_available` 恒为 0。现按 `command -v` 语义解析：`H5000M_UBUS_BIN` 接缝 → `PATH` → `/bin/ubus` 等已知路径；`uci`、`ifup` 同样处理。
+- **对齐告警文案纠正**：原先把「备用出口不能成为现役出口」写反了，现在明确指出是现役出口不能承载该协议族。
+
+### 测试
+
+- `tests/backend_logic.rs` 新增 4 例：开机无模组 section 不得救援/停靠（旧实现实测写出 `set network.wan.defaultroute=0`、`set network.wan6.defaultroute=0`、`ipv6_owner=modem`）；被停靠的首选出口会被看门狗恢复；自动对齐前会恢复目标策略；`ubus` 从 `PATH` 解析。
+- 单元测试：零 section 的组不完整/不在线，`apply_group_holes` 拒绝为空组停靠。
+- `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（39 单元 + 16 集成 + 4 netns）全部通过。
+
+### 变更文件
+
+- 后端：`src/network/mod.rs`、`src/switch/{transaction,mod}.rs`、`src/reconcile.rs`、`src/system/command.rs`、`src/config/uci.rs`、`src/health/mod.rs`（clippy lint）
+- 测试：`tests/backend_logic.rs`
+- 产物：`root/usr/sbin/h5000m-netmode{,-status}`（aarch64 musl 静态重建）
+- 打包：`Makefile`（`PKG_RELEASE` 3 → 4）
+
 ## [未发布] — 2026-11-12
 
 ### 变更

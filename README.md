@@ -456,6 +456,8 @@ logread | grep h5000m-netmode | tail -5
 | 合并卡片变红并显示「出口分流」 | 先看 `active4` / `active6` 是否真的不同——若二者相同而 `egress4` / `egress6` 是不同网卡名，那是经透明代理承载的正常现象，`split` 应为 0；确为分流时点击「对齐出口」，并检查 `ipv6_owner` / `ipv6_desired` |
 | 带 HomeProxy / sing-box / daed 时持续报「分流」 | v1.6.5 起后端只管理物理 WAN / 5G 模组接口：TUN 会按本轮 IPv4 物理出口归属，不会重载代理服务。先确认后端含 `is_tunnel_device()`（`grep -c is_tunnel_device /usr/sbin/h5000m-netmode` 非 0），再用**带源地址**的查询核对物理出口（见上方自检第 2 条） |
 | 主链路断开后没有自动切换 | 先确认 init 脚本有执行位：`ls -l /etc/init.d/h5000m-netmode` 应为 `-rwxr-xr-x`（v1.6.2 之前记的是 `0644`，服务「已启用」却从未启动）；再确认 `ubus call service list` 里有该服务、`ps w \| grep '[h]5000m-netmode watch'` 有进程、`status` 的 `watcher=on`，最后看 `logread \| grep h5000m-netmode` |
+| WAN 已拿到地址，但 `status` 的 `wan_up=0` / `wan_available=0` | 先核对 ubus 的位置：`ls -l /bin/ubus /usr/bin/ubus`。v1.9.0-r4 之前后端硬编码 `/usr/bin/ubus`，H5000M 镜像实际在 `/bin/ubus`，netifd 视图会整体为空；升级后按 `PATH` 解析，也可用 `H5000M_UBUS_BIN` 显式指定 |
+| 重启后 WAN 有 DHCP 地址，但健康一直 `unknown`、`wan4_ready=0` | 查 `uci get network.wan.defaultroute`：若为 `0`，是 v1.9.0-r3 及更早版本「开机向未出现的模组救援、把 WAN 路由停靠」留下的持久化状态。应急恢复：`uci set network.wan.defaultroute='1' && uci commit network && ifup wan`；v1.9.0-r4 起看门狗会自动恢复首选出口的 `defaultroute`，且不再对未发现的出口执行停靠 |
 | 界面状态与命令行输出不一致 | 页面每 5 秒轮询一次；以 `h5000m-netmode status` 的输出为准 |
 | 界面仍有英文（页面标题、菜单项） | 先确认语言包目录存在：`ls -l /usr/lib/lua/luci/i18n/h5000m-netmode.zh-cn.lmo` 必须存在——「包装上了」不等于「有目录」。v1.6.0 的故障是恒等译文被 po2lmo 全部丢弃、语言包最终零条目；v1.6.1 起构建前由 `check_catalog.py` 拦截，详见 FIXES.md |
 

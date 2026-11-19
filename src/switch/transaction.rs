@@ -306,15 +306,22 @@ pub fn verify_commit(
 
 /// `verify_group_online`: bounded reachability probes for every required
 /// family (used by align; a switch probes before committing too).
+///
+/// A group with no participating family is not "verified" by skipping every
+/// probe: that is a group whose interface has not been discovered (the boot
+/// case in issue #4), and treating it as online let a rescue commit nothing
+/// while parking the working exit. Callers get `no_usable_family` instead.
 pub fn verify_group_online(
     snap: &LiveSnapshot,
     cfg: &AppConfig,
     g: Group,
 ) -> std::result::Result<(), String> {
+    let mut probed_families = 0u32;
     for fam in Family::ALL {
         if !crate::network::group_family_capable(snap, g, fam) {
             continue;
         }
+        probed_families += 1;
         let verdict = crate::probe::probe_group_family(
             fam,
             g,
@@ -338,6 +345,9 @@ pub fn verify_group_online(
             }
             return Err(format!("ipv{}_unreachable", fam.n()));
         }
+    }
+    if probed_families == 0 {
+        return Err("no_usable_family".into());
     }
     Ok(())
 }
@@ -474,7 +484,28 @@ pub fn rollback_family(fam: Family, previous: Group, target: Group, snap: &LiveS
 /// cannot carry, so the missing family can never leak out of the standby and
 /// split the egress. Capability-based: applies whenever the active group is
 /// single-stack, regardless of strict_dual_stack.
+///
+/// Refuses to run for a group that participates in no family at all: that
+/// means its interface was not discovered (boot order, issue #4), and
+/// "cannot carry IPv4" is not a capability statement about a group that does
+/// not exist yet. Parking in that state removes the only working default
+/// route while installing nothing, and the parked `defaultroute=0` survives
+/// in UCI - the WAN then never recovers on its own.
 pub fn apply_group_holes(_mode: Mode, snap: &LiveSnapshot, cfg: &AppConfig, g: Group) -> bool {
+    let participating = Family::ALL
+        .iter()
+        .any(|fam| crate::network::group_family_required(snap, g, *fam, cfg.strict_dual_stack));
+    if !participating {
+        log::log_warn(
+            "switch",
+            &format!(
+                "warning: {} has no usable interface family; refusing to park the {} routes",
+                g.as_str(),
+                g.other().as_str()
+            ),
+        );
+        return false;
+    }
     let standby = g.other();
     for fam in crate::network::group_hole_families(snap, g, cfg.strict_dual_stack) {
         let sec = snap.group_sec(standby, fam).to_string();
@@ -492,9 +523,10 @@ pub fn apply_group_holes(_mode: Mode, snap: &LiveSnapshot, cfg: &AppConfig, g: G
         log::log_warn(
             "switch",
             &format!(
-                "warning: {} cannot be the active exit for ipv{}; parked its route",
-                standby.as_str(),
-                fam.n()
+                "warning: {} cannot carry ipv{}; parked the {} route",
+                g.as_str(),
+                fam.n(),
+                standby.as_str()
             ),
         );
     }
@@ -675,5 +707,32 @@ pub fn post_failure_converge(snap: &LiveSnapshot, _cfg: &AppConfig) {
         for fam in Family::ALL {
             let _ = commit_family(fam, g, Some(g.other()), snap);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_group_without_a_section_is_not_online() {
+        let cfg = AppConfig::default();
+        let snap = LiveSnapshot::default();
+        assert_eq!(
+            verify_group_online(&snap, &cfg, Group::Modem).unwrap_err(),
+            "no_usable_family"
+        );
+    }
+
+    #[test]
+    fn a_group_without_a_section_never_parks_the_standby() {
+        let cfg = AppConfig::default();
+        let snap = LiveSnapshot::default();
+        assert!(!apply_group_holes(
+            Mode::WanFirst,
+            &snap,
+            &cfg,
+            Group::Modem
+        ));
     }
 }
